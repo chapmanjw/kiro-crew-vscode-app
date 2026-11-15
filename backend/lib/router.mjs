@@ -15,9 +15,17 @@ export const ROUTES = [
   { method: 'POST', path: '/api/theme', name: 'theme', auth: 'proxy' },
   { method: 'GET', path: '/api/chat/status', name: 'chatStatus', auth: 'proxy' },
   { method: 'POST', path: '/api/chat/ask', name: 'chatAsk', auth: 'proxy' },
+  { method: 'GET', path: '/api/chat/prefs', name: 'chatPrefsGet', auth: 'proxy' },
+  { method: 'POST', path: '/api/chat/prefs', name: 'chatPrefs', auth: 'proxy' },
+  { method: 'POST', path: '/api/chat/open-session', name: 'chatOpenSession', auth: 'proxy' },
   { method: 'GET', path: '/api/bridge/commands', name: 'bridgeCommands', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/events', name: 'bridgeEvents', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/chat', name: 'bridgeChat', auth: 'bridge' },
+  { method: 'GET', path: '/api/bridge/sessions', name: 'bridgeSessions', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/sessions', name: 'bridgeSessionCreate', auth: 'bridge' },
+  { method: 'GET', path: '/api/bridge/sessions/history', name: 'bridgeSessionHistory', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/approve', name: 'bridgeApprove', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/question', name: 'bridgeQuestion', auth: 'bridge' },
 ];
 
 /**

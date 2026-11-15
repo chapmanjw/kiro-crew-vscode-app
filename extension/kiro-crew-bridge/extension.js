@@ -15,6 +15,7 @@
 
 const vscode = require('vscode');
 const http = require('http');
+const sessions = require('./sessions');
 
 const BRIDGE_URL = process.env.KIROCREW_VSCODE_BRIDGE_URL || '';
 const BRIDGE_SECRET = process.env.KIROCREW_VSCODE_BRIDGE_SECRET || '';
@@ -32,10 +33,32 @@ const HOST_ID = require('crypto').randomBytes(9).toString('base64url');
 
 let output;
 let statusItem;
+let crewItem;
 let stopped = false;
 let connected = false;
 let lastError = '';
-const chatState = { participant: false, defaultParticipant: false, model: false, modelPublished: false, error: null };
+const chatState = { participant: false, defaultParticipant: false, model: false, modelPublished: false, sessionType: false, sessionModelPublished: false, error: null };
+// The "Kiro Crew" chat session type, when the proposal is available (sessions.js).
+let sessionsApi = null;
+const HIDE_SETTING = 'kiroCrew.chat.hideCopilotAgents';
+
+function hideCopilotAgents() {
+  return vscode.workspace.getConfiguration().get(HIDE_SETTING, true) !== false;
+}
+
+// The Copilot settings the launcher derives from HIDE_SETTING (backend/lib/chatprefs.mjs).
+const COPILOT_AGENT_SETTINGS = ['chat.editor.localAgent.enabled', 'github.copilot.chat.cloudAgent.enabled', 'github.copilot.chat.backgroundAgent.enabled'];
+
+/** The preference plus what VS Code itself now holds for the derived settings. */
+function chatPrefsEvent() {
+  const cfg = vscode.workspace.getConfiguration();
+  const effective = {};
+  for (const k of COPILOT_AGENT_SETTINGS) {
+    const v = cfg.get(k);
+    effective[k] = typeof v === 'boolean' ? v : null;
+  }
+  return { type: 'chatPrefs', hideCopilotAgents: hideCopilotAgents(), effective };
+}
 
 function log(msg) {
   output?.appendLine(`[${new Date().toISOString()}] ${msg}`);
@@ -123,18 +146,34 @@ async function runCommand(cmd) {
     case 'applyTheme':
       return applyTheme(cmd.theme);
     case 'askChat': {
-      // Opens the Chat view and submits the prompt to the default participant
-      // on the Kiro Crew model. Resolving the model first and naming it in
+      // Opens the Chat view and submits the prompt there. With the Kiro Crew
+      // session type as the default the chat is a Kiro Crew session and its
+      // own model applies; otherwise the default participant answers on the
+      // Kiro Crew model. Resolving the model first and naming it in
       // modelSelector (IChatViewOpenOptions, chatActions.ts) avoids sending
       // before the picker has a model, which fails the request.
-      if (vscode.lm && typeof vscode.lm.selectChatModels === 'function') await vscode.lm.selectChatModels({ vendor: 'kiro-crew' });
+      const native = !!sessionsApi && hideCopilotAgents();
+      const vendor = native ? sessions.MODEL_VENDOR : 'kiro-crew';
+      if (vscode.lm && typeof vscode.lm.selectChatModels === 'function') await vscode.lm.selectChatModels({ vendor });
+      if (cmd.newChat) await vscode.commands.executeCommand('workbench.action.chat.newChat');
       await vscode.commands.executeCommand('workbench.action.chat.open', {
         query: String(cmd.prompt || ''),
         isPartialQuery: false,
-        modelSelector: { vendor: 'kiro-crew', id: 'kiro-crew' },
+        ...(native ? {} : { modelSelector: { vendor: 'kiro-crew', id: 'kiro-crew' } }),
       });
       return;
     }
+    case 'setChatPrefs': {
+      // Writes the VS Code setting; its change event reports it back to the launcher.
+      const want = !!(cmd.prefs && cmd.prefs.hideCopilotAgents);
+      const cfg = vscode.workspace.getConfiguration();
+      if (cfg.get(HIDE_SETTING, true) !== want) await cfg.update(HIDE_SETTING, want, vscode.ConfigurationTarget.Global);
+      else await postEvent(chatPrefsEvent());
+      return;
+    }
+    case 'openChatSession':
+      if (!sessionsApi) throw new Error('the Kiro Crew chat session type is not available in this VS Code');
+      return sessionsApi.openSession(String(cmd.slot || ''));
     default:
       throw new Error(`unknown command ${cmd.kind}`);
   }
@@ -334,6 +373,8 @@ function promptWithReferences(request) {
 }
 
 async function chatHandler(request, _context, stream, token) {
+  const sessionResource = _context && _context.chatSessionContext && _context.chatSessionContext.chatSessionItem && _context.chatSessionContext.chatSessionItem.resource;
+  log(`chat request to the default participant${sessionResource ? ' in session ' + sessionResource.toString() : ''}`);
   if (!BRIDGE_URL || !BRIDGE_SECRET) {
     stream.markdown('Kiro Crew is not connected: this VS Code was not started by the Kiro Crew vscode-pane app.');
     return { errorDetails: { message: 'Kiro Crew bridge not configured' } };
@@ -484,6 +525,30 @@ async function publishLanguageModel(changed) {
 function registerChat(context) {
   if (vscode.lm && typeof vscode.lm.registerLanguageModelChatProvider === 'function') registerLanguageModel(context);
   const icon = vscode.Uri.joinPath(context.extensionUri, 'icon.png');
+  // The Kiro Crew session type first, so new chats can open as Kiro Crew
+  // sessions; the participants below stay as the fallback (local harness,
+  // @kirocrew) and answer alone when the proposal is unavailable.
+  try {
+    sessionsApi = sessions.register(context, {
+      vscode,
+      request,
+      streamChat,
+      log,
+      postEvent,
+      chatState,
+      icon,
+      promptWithReferences,
+      // The launcher may have had the first hello already; tell it the new state.
+      notify: () => {
+        if (connected) sendHello();
+      },
+      workspaceFolder: () => (vscode.workspace.workspaceFolders || []).find((f) => f.uri.scheme === 'file')?.uri.fsPath,
+    });
+  } catch (e) {
+    sessionsApi = null;
+    chatState.error = `session type: ${e.message}`;
+    log(`Kiro Crew session type failed: ${e.message}`);
+  }
   for (const id of ['kiro-crew.default', 'kiro-crew.agent']) {
     try {
       const p = vscode.chat.createChatParticipant(id, chatHandler);
@@ -538,6 +603,20 @@ function activate(context) {
   context.subscriptions.push(statusItem);
   if (vscode.chat && typeof vscode.chat.createChatParticipant === 'function') registerChat(context);
 
+  // Opens or closes the docked Kiro Crew chat column in the app page around
+  // this VS Code (ui/, built separately): the launcher counts the toggles in
+  // GET /api/session and the page follows the count.
+  crewItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  crewItem.name = 'Kiro Crew chat';
+  crewItem.text = '$(comment-discussion) Crew';
+  crewItem.tooltip = 'Show or hide the Kiro Crew chat (Ctrl+Alt+K)';
+  crewItem.accessibilityInformation = { label: 'Show or hide the Kiro Crew chat' };
+  crewItem.command = 'kiroCrew.toggleCrewChat';
+  context.subscriptions.push(
+    crewItem,
+    vscode.commands.registerCommand('kiroCrew.toggleCrewChat', () => postEvent({ type: 'toggleCrewChat' })),
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('kiroCrewBridge.showStatus', () => {
       vscode.window.showInformationMessage(
@@ -551,6 +630,12 @@ function activate(context) {
     statusItem.hide();
     return;
   }
+  crewItem.show();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration(HIDE_SETTING) || COPILOT_AGENT_SETTINGS.some((k) => e.affectsConfiguration(k))) postEvent(chatPrefsEvent());
+    }),
+  );
 
   let selTimer;
   context.subscriptions.push(
@@ -568,7 +653,9 @@ function activate(context) {
 
   log(`starting bridge to ${BRIDGE_URL}`);
   // Say hello right away; the first long poll may not return for 25 s.
-  sendHello().then(() => sendEditor(vscode.window.activeTextEditor));
+  sendHello()
+    .then(() => sendEditor(vscode.window.activeTextEditor))
+    .then(() => postEvent(chatPrefsEvent()));
   pollLoop();
 }
 

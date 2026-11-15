@@ -129,9 +129,10 @@ test('bridge extension: activation still registers both participants when the ve
   ext.deactivate();
 });
 
-test('launcher Machine settings default new chats to the Kiro Crew model', () => {
+test('launcher Machine settings default new chats to the Kiro Crew model', async () => {
+  const { chatSettings } = await import('../backend/lib/chatprefs.mjs');
+  assert.equal(chatSettings()['chat.defaultModel'], 'kiro-crew');
+  assert.equal(chatSettings({ hideCopilotAgents: false })['chat.defaultModel'], 'kiro-crew');
   const src = fs.readFileSync(path.join(ROOT, 'backend', 'launcher.mjs'), 'utf8');
-  const block = /const CHAT_SETTINGS = \{([\s\S]*?)\};/.exec(src);
-  assert.ok(block, 'CHAT_SETTINGS block');
-  assert.match(block[1], /'chat\.defaultModel': 'kiro-crew'/);
+  assert.match(src, /seedThemeSettings\(withTerminal, vsTheme, chatSettings\(chatPrefs\)\)/, 'the launcher seeds chatSettings into Machine settings');
 });

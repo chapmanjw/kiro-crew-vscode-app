@@ -29,7 +29,8 @@
       "/api/chat",
       "/api/chat/slots",
       "/api/status"
-    ]
+    ],
+    "sessionApproval": true
   },
   "backend": {
     "type": "node",

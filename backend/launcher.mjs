@@ -29,8 +29,10 @@ import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
 import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
-import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE } from './lib/gateway.mjs';
-import { parseChatRequest, runChatTurn, folderInRoots } from './lib/chatbridge.mjs';
+import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE, slotNameFor, folderSlotTitle } from './lib/gateway.mjs';
+import { parseChatRequest, parseNativeChatRequest, runChatTurn, runNativeTurn, folderInRoots } from './lib/chatbridge.mjs';
+import { SessionRegistry, newSessionSlotName, sessionTitle, historyTurns, APPROVE_IN_KIRO_CREW } from './lib/nativechat.mjs';
+import { chatSettings, parseChatPrefs, DEFAULT_CHAT_PREFS } from './lib/chatprefs.mjs';
 import { parseFrameState, frameStateFor, frameStateHasKey, serializeFrameState } from './lib/framestate.mjs';
 
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -102,6 +104,14 @@ const gateway = new GatewayClient({
   log,
 });
 const chatStats = { turns: 0, lastTurn: null, active: 0 };
+
+// One Kiro Crew slot per VS Code chat session of the "Kiro Crew" session type.
+const sessions = new SessionRegistry({ file: path.join(DATA_DIR, 'state', 'chat-sessions.json') });
+// Whether Copilot's own agents (local harness, Cloud, Copilot CLI) are hidden
+// so new chats open as Kiro Crew sessions. Mirrors the VS Code setting
+// kiroCrew.chat.hideCopilotAgents, which the extension reports.
+const CHAT_PREFS_FILE = path.join(DATA_DIR, 'state', 'chat-prefs.json');
+let chatPrefs = parseChatPrefs(readText(CHAT_PREFS_FILE));
 
 // The Kiro Crew palette applied to VS Code (POST /api/theme), kept in data/state/theme.json.
 const THEME_FILE = path.join(DATA_DIR, 'state', 'theme.json');
@@ -224,35 +234,8 @@ function serverUserEnv() {
   return userEnvCache;
 }
 
-/**
- * Chat settings that keep Copilot out of the way of Kiro Crew, all supported
- * settings of the 1.146 build (window scope, so the server's Machine settings
- * apply). Built-in extensions are never removed.
- *  - chat.defaultToCopilotHarness / chat.editor.preferCopilotHarness: 1.146
- *    starts new chats in the Copilot agent host ("Copilot" session type),
- *    which never reaches extension chat participants. Off, new chats use the
- *    local harness, whose default participant is the bridge's Kiro Crew one
- *    (contrib/chat/common/constants.ts, getComputedDefaultSessionType).
- *  - chat.editor.localAgent.enabled: keeps that local harness available.
- *  - chat.mcp.autostart "never": VS Code would otherwise stop each request to
- *    ask whether to start MCP servers it discovered in other tools' configs;
- *    Kiro Crew runs its own tools.
- *  - chat.titleBar.signIn.enabled / chat.welcomePage.signIn.enabled: hide the
- *    Copilot sign-in buttons.
- *  - chat.defaultModel "kiro-crew": new chats start on the bridge's Kiro Crew
- *    model (matched by model id, modelSelection.ts resolveConfiguredModel), so
- *    a plain first message carries a model even when Copilot models appear
- *    after a sign-in. The bridge publishes that model at activation.
- */
-const CHAT_SETTINGS = {
-  'chat.defaultToCopilotHarness': false,
-  'chat.editor.preferCopilotHarness': false,
-  'chat.editor.localAgent.enabled': true,
-  'chat.mcp.autostart': 'never',
-  'chat.titleBar.signIn.enabled': false,
-  'chat.welcomePage.signIn.enabled': false,
-  'chat.defaultModel': 'kiro-crew',
-};
+// The chat settings the launcher writes, and how hideCopilotAgents changes
+// them, are in lib/chatprefs.mjs (chatSettings).
 
 /**
  * The server's Machine settings.json: terminals unset the gateway tracking and
@@ -265,7 +248,7 @@ function writeMachineSettings() {
   fs.mkdirSync(dir, { recursive: true });
   const existing = readText(file);
   const withTerminal = terminalEnvSettings(existing);
-  const next = withTerminal === null ? null : seedThemeSettings(withTerminal, vsTheme, CHAT_SETTINGS);
+  const next = withTerminal === null ? null : seedThemeSettings(withTerminal, vsTheme, chatSettings(chatPrefs));
   if (next === null) log('Machine settings.json is not plain JSON; left unchanged');
   else if (next !== existing) fs.writeFileSync(file, next);
 }
@@ -538,6 +521,12 @@ function sessionBody(folderParam) {
     bridge: { connected: bridge.connected, extension: bridge.extension },
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
     chat: chatProblem(),
+    // For the docked Kiro Crew chat column (ui/, round 3): the page toggles the
+    // column whenever crewChatToggle (an integer) changes, and crewSlot is the
+    // folder's own slot {key, folder, title}. The column lists the per-session
+    // slots itself from GET /api/chat/slots (the app's own slots, with project).
+    crewChatToggle: bridge.crewChatToggle,
+    crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,
   };
 }
 
@@ -584,12 +573,74 @@ async function chatStatusBody(probe) {
     turns: chatStats.turns,
     activeTurns: chatStats.active,
     lastTurn: chatStats.lastTurn,
+    native: {
+      prefs: chatPrefs,
+      vscodePrefs: bridge.chatPrefs,
+      approvalGrant: gateway.approvalGrant,
+      sessions: sessions.list().length,
+      events: bridge.sessionEvents.slice(-20),
+    },
   };
   if (probed) {
     Object.assign(out.gateway, probed);
     out.gateway.token = gateway.tokenValue ? { exchangedAt: gateway.lastTokenAt, expiresAt: gateway.tokenExpiresAt() } : null;
   }
   return out;
+}
+
+/** The folders this VS Code window has open (or the default workspace when none). */
+function windowRoots() {
+  return bridge.extension?.workspaceFolders?.length ? bridge.extension.workspaceFolders : [config.workspace];
+}
+
+/** A registered session whose folder this window has open, or null. */
+function sessionFor(slot) {
+  if (typeof slot !== 'string') return null;
+  const s = sessions.get(slot);
+  return s && folderInRoots(s.folder, windowRoots()) ? s : null;
+}
+
+/**
+ * Apply hideCopilotAgents: keep it in data/state/chat-prefs.json and rewrite
+ * the server's Machine settings, which the workbench picks up live.
+ */
+function applyChatPrefs(next, source) {
+  const merged = { ...DEFAULT_CHAT_PREFS, ...chatPrefs, ...next };
+  if (merged.hideCopilotAgents === chatPrefs.hideCopilotAgents) return false;
+  chatPrefs = merged;
+  fs.writeFileSync(CHAT_PREFS_FILE, JSON.stringify(chatPrefs, null, 2) + '\n');
+  writeMachineSettings();
+  log('chat prefs', JSON.stringify(chatPrefs), 'from', source);
+  return true;
+}
+
+/** POST /api/bridge/chat with a slot: a turn of a Kiro Crew session type session. */
+async function nativeChat(raw, res) {
+  const parsed = parseNativeChatRequest(raw, { defaultFolder: windowRoots()[0] || null });
+  if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+  const s = sessionFor(parsed.slot);
+  if (!s) return sendJson(res, 404, { error: 'unknown session' });
+  if (!folderInRoots(parsed.folder, windowRoots())) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
+  res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
+  const ac = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) ac.abort();
+  });
+  const write = (part) => {
+    if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(part) + '\n');
+  };
+  chatStats.active++;
+  const startedAt = new Date().toISOString();
+  try {
+    sessions.touch(s.slot, { title: parsed.prompt });
+    const r = await runNativeTurn({ gateway, prompt: parsed.prompt, folder: s.folder, slot: s.slot, title: `VS Code: ${s.title}`, signal: ac.signal, write, log });
+    chatStats.turns++;
+    chatStats.lastTurn = { at: startedAt, outcome: r.outcome, slot: r.slot || null, error: r.error || null, native: true, tools: r.tools || 0 };
+    log('chat turn (session)', r.outcome, r.slot || '', r.error || '');
+  } finally {
+    chatStats.active--;
+  }
+  if (!res.writableEnded) res.end();
 }
 
 const frameProxy = createFrameProxy(() =>
@@ -702,6 +753,7 @@ async function handle(req, res) {
       // differs. A repeated hello from the same host does not resend it.
       const newHost = ev.type === 'hello' && (!extensionBefore || !ev.host || ev.host !== hostBefore);
       if (newHost && vsTheme) bridge.enqueueLatest(themeCommand());
+      if (ev.type === 'chatPrefs') applyChatPrefs({ hideCopilotAgents: ev.hideCopilotAgents }, 'vscode');
       res.writeHead(204);
       return res.end();
     }
@@ -732,12 +784,98 @@ async function handle(req, res) {
       const parsed = parseJson(body);
       const prompt = parsed && typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
       if (!prompt || prompt.length > 4000) return sendJson(res, 400, { error: 'prompt is required (at most 4000 characters)' });
-      const { id, done } = bridge.enqueue({ kind: 'askChat', prompt }, 8000);
+      const { id, done } = bridge.enqueue({ kind: 'askChat', prompt, ...(parsed.newChat === true ? { newChat: true } : {}) }, 8000);
       const result = await done;
       return sendJson(res, 200, { id, ...result, bridgeConnected: bridge.connected });
     }
+    case 'chatPrefsGet':
+      return sendJson(res, 200, { prefs: chatPrefs, vscode: bridge.chatPrefs, settings: chatSettings(chatPrefs) });
+    case 'chatPrefs': {
+      // Changes the VS Code setting itself (the extension writes it); the
+      // setting's change then comes back as a chatPrefs event and is applied.
+      const parsed = parseJson(body);
+      if (!parsed || typeof parsed.hideCopilotAgents !== 'boolean' || Object.keys(parsed).length !== 1) {
+        return sendJson(res, 400, { error: 'body must be {hideCopilotAgents: boolean}' });
+      }
+      const { id, done } = bridge.enqueue({ kind: 'setChatPrefs', prefs: { hideCopilotAgents: parsed.hideCopilotAgents } }, 8000);
+      const result = await done;
+      if (!result.ok) applyChatPrefs(parsed, 'api'); // no VS Code window: apply for the next start
+      return sendJson(res, 200, { id, ...result, prefs: chatPrefs });
+    }
+    case 'chatOpenSession': {
+      // Opens a Kiro Crew chat session in VS Code's Chat (by its slot).
+      const parsed = parseJson(body);
+      const s = sessionFor(parsed && parsed.slot);
+      if (!s) return sendJson(res, 404, { error: 'unknown session' });
+      const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 12000);
+      return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
+    }
+    case 'bridgeSessions': {
+      const roots = windowRoots();
+      return sendJson(res, 200, { sessions: sessions.list((f) => folderInRoots(f, roots)) });
+    }
+    case 'bridgeSessionCreate': {
+      const parsed = parseJson(body);
+      const folder = parsed && typeof parsed.folder === 'string' ? parsed.folder : '';
+      if (!folder || !path.isAbsolute(folder) || !folderInRoots(folder, windowRoots())) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
+      const title = sessionTitle(parsed.title);
+      const slot = newSessionSlotName(folder);
+      try {
+        await gateway.ensureSlotNamed({ name: slot, title: `VS Code: ${title}`, folder });
+      } catch (e) {
+        return sendJson(res, e.code === 'permission' ? 403 : 502, { error: e.message, code: e.code || '' });
+      }
+      const s = sessions.add({ slot, folder, title });
+      log('chat session created', slot);
+      return sendJson(res, 200, { session: s });
+    }
+    case 'bridgeSessionHistory': {
+      const s = sessionFor(url.searchParams.get('slot'));
+      if (!s) return sendJson(res, 404, { error: 'unknown session' });
+      try {
+        const detail = await gateway.slotDetail(s.slot, 400);
+        return sendJson(res, 200, { session: s, running: !!detail?.running, turns: historyTurns(detail?.messages) });
+      } catch (e) {
+        // A slot closed in Kiro Crew has no history to show; the next turn recreates it.
+        return sendJson(res, 200, { session: s, running: false, turns: [], error: e.message, gone: e.status === 404 });
+      }
+    }
+    case 'bridgeApprove': {
+      const parsed = parseJson(body);
+      const s = sessionFor(parsed && parsed.slot);
+      if (!s) return sendJson(res, 404, { error: 'unknown session' });
+      const action = parsed.action;
+      const requestId = parsed.requestId;
+      if (!['approved', 'rejected'].includes(action) || typeof requestId !== 'string' || !requestId || requestId.length > 256) {
+        return sendJson(res, 400, { error: 'body must be {slot, requestId, action: "approved"|"rejected"}' });
+      }
+      try {
+        const r = await gateway.approve(s.slot, { requestId, action });
+        log('chat approval', s.slot, action, r.ok ? 'ok' : `${r.status} ${r.code}`);
+        if (r.code === 'session_approval_not_granted') return sendJson(res, 200, { ...r, message: r.error || APPROVE_IN_KIRO_CREW });
+        return sendJson(res, 200, r);
+      } catch (e) {
+        return sendJson(res, 502, { ok: false, error: e.message });
+      }
+    }
+    case 'bridgeQuestion': {
+      const parsed = parseJson(body);
+      const s = sessionFor(parsed && parsed.slot);
+      if (!s) return sendJson(res, 404, { error: 'unknown session' });
+      const askId = parsed.askId;
+      const answers = parsed.answers;
+      const okAnswers = answers && typeof answers === 'object' && !Array.isArray(answers) && Object.values(answers).every((v) => typeof v === 'string' && v.length <= 2000);
+      if (typeof askId !== 'string' || !askId || (!parsed.dismissed && !okAnswers)) return sendJson(res, 400, { error: 'body must be {slot, askId, answers} or {slot, askId, dismissed: true}' });
+      try {
+        return sendJson(res, 200, await gateway.answerQuestion(s.slot, { askId, answers, dismissed: parsed.dismissed === true }));
+      } catch (e) {
+        return sendJson(res, 502, { ok: false, error: e.message });
+      }
+    }
     case 'bridgeChat': {
-      const parsed = parseChatRequest(parseJson(body), {
+      const raw = parseJson(body);
+      if (raw && raw.slot !== undefined) return nativeChat(raw, res);
+      const parsed = parseChatRequest(raw, {
         defaultFolder: bridge.extension?.workspaceFolders?.[0] || (fs.existsSync(config.workspace) ? config.workspace : null),
       });
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });

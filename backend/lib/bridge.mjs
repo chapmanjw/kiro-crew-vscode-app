@@ -24,6 +24,12 @@ export class Bridge {
     // the newest host only.
     this.currentHost = null;
     this.events = 0;
+    // Bumped by the extension's kiroCrew.toggleCrewChat (keybinding, status bar,
+    // editor title); the page reads it from GET /api/session and toggles the
+    // docked Kiro Crew chat column when it changes.
+    this.crewChatToggle = 0;
+    this.chatPrefs = null; // {hideCopilotAgents} as the VS Code setting last said
+    this.sessionEvents = []; // the last native chat session events (diagnostics)
   }
 
   get connected() {
@@ -182,6 +188,25 @@ export class Bridge {
       case 'saved':
         this.lastSaved = { path: str(ev.path), at };
         return true;
+      case 'toggleCrewChat':
+        this.crewChatToggle++;
+        return true;
+      case 'chatPrefs':
+        if (typeof ev.hideCopilotAgents !== 'boolean') return false;
+        this.chatPrefs = { hideCopilotAgents: ev.hideCopilotAgents, effective: settingsInfo(ev.effective), at };
+        return true;
+      case 'chatSession': {
+        const e = {
+          what: str(ev.what),
+          slot: ev.slot == null ? null : str(ev.slot),
+          turns: Number.isInteger(ev.turns) ? ev.turns : null,
+          detail: ev.detail == null ? null : str(ev.detail),
+          at,
+        };
+        this.sessionEvents.push(e);
+        if (this.sessionEvents.length > 50) this.sessionEvents.shift();
+        return true;
+      }
       case 'result': {
         const fn = this.results.get(String(ev.id));
         if (fn) fn({ ok: !!ev.ok, error: ev.error ? str(ev.error) : undefined });
@@ -219,7 +244,25 @@ function str(v) {
 
 function chatInfo(c) {
   if (!c || typeof c !== 'object') return null;
-  return { participant: c.participant === true, defaultParticipant: c.defaultParticipant === true, model: c.model === true, modelPublished: c.modelPublished === true, error: c.error ? str(c.error) : null };
+  return {
+    participant: c.participant === true,
+    defaultParticipant: c.defaultParticipant === true,
+    model: c.model === true,
+    modelPublished: c.modelPublished === true,
+    sessionType: c.sessionType === true,
+    sessionModelPublished: c.sessionModelPublished === true,
+    error: c.error ? str(c.error) : null,
+  };
+}
+
+/** {setting: boolean|null} for the Copilot agent settings the extension reports; anything else dropped. */
+function settingsInfo(e) {
+  if (!e || typeof e !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(e).slice(0, 10)) {
+    if (/^[A-Za-z0-9_.]{1,80}$/.test(k)) out[k] = typeof v === 'boolean' ? v : null;
+  }
+  return out;
 }
 
 function sel(s) {
