@@ -83,6 +83,7 @@
         "name": "kirocrew",
         "displayName": "Kiro Crew",
         "description": "Chat with Kiro Crew: each chat is a Kiro Crew session with its agents, tools and approvals",
+        "canDelegate": true,
         "requiresCopilotSignIn": false,
         "requiresCustomModels": true,
         "supportsAutoModel": false,

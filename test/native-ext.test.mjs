@@ -195,6 +195,7 @@ test('a first send in a draft creates one session, streams text and native tool 
   const cards = stream.out.filter((o) => o.part).map((o) => o.part);
   assert.equal(cards[0].toolCallId, 'kc-tool-1');
   assert.equal(cards[0].isComplete, false);
+  assert.equal(cards[0].enablePartialUpdate, true, 'a live card is an external tool invocation');
   assert.equal(cards[1].enablePartialUpdate, true, 'the second card updates the first');
   assert.equal(cards[1].isComplete, true);
   assert.deepEqual(cards[1].toolSpecificData.commandLine, { original: 'npm test' });
@@ -288,11 +289,33 @@ test('history: provideChatSessionContent rebuilds request and response turns wit
   assert.equal(res.history[0].participant, 'kirocrew');
   assert.equal(res.history[1].response[0].toolCallId, 'c1');
   assert.equal(res.history[1].response[0].isComplete, true);
+  assert.equal(res.history[1].response[0].enablePartialUpdate, false, 'history cards render as finished');
   assert.equal(res.history[1].response[1].value.value, 'It says A.');
   assert.equal(typeof res.requestHandler, 'function');
   assert.ok(events.some((e) => e.what === 'content' && e.turns === 2));
   const draft = await rec.content[0].provider.provideChatSessionContent({ scheme: 'kirocrew', path: '/untitled-3' });
   assert.deepEqual(draft.history, []);
+});
+
+test('the confirmation tool is retried while the workbench has not registered it yet', async () => {
+  let calls = 0;
+  const vscode = {
+    lm: {
+      invokeTool: async () => {
+        calls++;
+        if (calls < 3) throw new Error('Tool vscode_get_confirmation_with_options was not contributed');
+        return { content: [{ value: 'Approve' }] };
+      },
+    },
+  };
+  const tok = { isCancellationRequested: false };
+  const r = await sessions.invokeConfirmation(vscode, {}, 't', tok, { waitMs: 1 });
+  assert.equal(r.content[0].value, 'Approve');
+  assert.equal(calls, 3);
+  calls = -100;
+  await assert.rejects(sessions.invokeConfirmation(vscode, {}, 't', tok, { tries: 2, waitMs: 1 }), /not contributed/);
+  const other = { lm: { invokeTool: async () => { throw new Error('Canceled'); } } };
+  await assert.rejects(sessions.invokeConfirmation(other, {}, 't', tok, { waitMs: 1 }), /Canceled/, 'other errors are not retried');
 });
 
 test('commandOf reads a shell command from the tool input', () => {

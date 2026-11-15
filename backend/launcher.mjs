@@ -805,7 +805,7 @@ async function handle(req, res) {
       const parsed = parseJson(body);
       const s = sessionFor(parsed && parsed.slot);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
-      const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 15000);
+      const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 12000);
       return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
     }
     case 'bridgeSessions': {

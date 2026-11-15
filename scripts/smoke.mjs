@@ -4,7 +4,9 @@
 // KIROCREW_PROXY_SECRET, signs /api calls like the proxy, and stops the
 // backend with a Windows tree kill like the gateway does.
 //
-//   node scripts/smoke.mjs [--keep] [--server-dir <path>]
+//   node scripts/smoke.mjs [--keep] [--server-dir <path>] [--minimal-env] [--native-only]
+//
+// --native-only stops after the Kiro Crew chat session type checks (step 6n).
 //
 // Needs a VS Code server build (default: the R1-B probe's copy under .cache)
 // and a local Chrome or Edge for the headless workbench.
@@ -22,6 +24,7 @@ import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
 import { slotNameFor } from '../backend/lib/gateway.mjs';
+import { nativeChatChecks, copilotAgentChecks, historyChecks, isSessionSlot } from './lib/nativechat-smoke.mjs';
 
 // Two Kiro Crew palettes: one saved before the first start (seeded into the
 // server's settings), one posted live through POST /api/theme.
@@ -41,6 +44,8 @@ const KEEP = argv.includes('--keep');
 // gateway passes to app backends (kiro_crew/apps/registry_pipeline/
 // subprocess_env.py, _SAFE_ENV_KEYS), like a real install.
 const MINIMAL_ENV = argv.includes('--minimal-env');
+const NATIVE_ONLY = argv.includes('--native-only');
+class StopEarly extends Error {}
 const GATEWAY_SAFE_ENV = new Set([
   'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TMPDIR', 'APPDATA', 'COMSPEC',
   'LOCALAPPDATA', 'PATHEXT', 'PROGRAMDATA', 'PROGRAMFILES', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE', 'WINDIR',
@@ -441,7 +446,9 @@ async function main() {
 
   // A mock Kiro Crew gateway for the chat round trip; the launcher trades the
   // proxy secret for an app token there, as it would against the real one.
-  const gatewayMock = createGatewayMock({ appName: 'vscode-pane', secret: SECRET });
+  // No unanswerable legacy permission row in the default reply: the native
+  // checks below drive approvals with the mock's "approve me" turn.
+  const gatewayMock = createGatewayMock({ appName: 'vscode-pane', secret: SECRET, defaultPermission: false });
   const gatewayOrigin = await gatewayMock.listen();
 
   // A theme saved by an earlier run: the launcher must seed it into the
@@ -664,6 +671,27 @@ async function main() {
       `${firstSent || 'not sent'}; turn ${firstTurn ? 'seen' : 'missing'}; reply ${firstReply}; model error ${firstFailed}`,
     )) console.log('workbench console (chat):\n  ' + chatConsole.slice(-20).join('\n  '));
 
+    // 6n. VS Code's own Chat on Kiro Crew sessions: the "Kiro Crew" chat
+    //     session type (tool cards, approvals, sessions, the toggle), the
+    //     Copilot agents setting, and history restored after a window reload.
+    if (workbenchUp && firstTurn) {
+      const native = await nativeChatChecks({ page, frame, api, check, gatewayMock, workspace, firstTurn, root: ROOT });
+      await copilotAgentChecks({ api, check, machineFile: path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json') });
+      const tR = Date.now();
+      await page.reload();
+      await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
+      for (let i = 0; i < 120; i++) {
+        const st = (await api('GET', '/api/state')).json;
+        if (st && st.extension && Date.parse(st.extension.at) > tR) break;
+        await sleep(500);
+      }
+      await historyChecks({ frame, api, check, slot: native.s1, since: tR });
+      await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'native-chat.png') }).catch(() => {});
+    } else {
+      check('native chat session checks ran', false, 'the workbench or the first chat turn was missing');
+    }
+    if (NATIVE_ONLY) throw new StopEarly('--native-only');
+
     // 6b. a real VS Code terminal sees the user's environment, not the gateway's
     if (process.platform === 'win32' && workbenchUp) {
       const userVar = userOnlyVarName();
@@ -752,10 +780,11 @@ async function main() {
     if (!check('the default Chat view sent the turn to Kiro Crew (no @mention, no Copilot)', !!turn, turn ? turn.message.slice(0, 160) : `turns seen: ${gatewayMock.rec.turns.length}`)) {
       console.log('workbench console (chat):\n  ' + chatConsole.slice(-20).join('\n  '));
     }
-    const expectedSlot = slotNameFor(workspace);
+    // With the Kiro Crew session type as the default, the Chat view's chat is
+    // a Kiro Crew session: one slot per VS Code chat, pointed at the folder.
     check(
-      "the turn ran in the workspace folder's Kiro Crew chat slot",
-      turn && turn.slot === expectedSlot && String(gatewayMock.rec.slots.get(expectedSlot)?.project).toLowerCase() === workspace.toLowerCase(),
+      "the turn ran in a Kiro Crew session slot pointed at the workspace folder",
+      turn && isSessionSlot(turn.slot, workspace) && String(gatewayMock.rec.slots.get(turn.slot)?.project).toLowerCase() === workspace.toLowerCase(),
       turn && `${turn.slot} project=${gatewayMock.rec.slots.get(turn.slot)?.project}`,
     );
     let chatShown = false;
@@ -798,7 +827,7 @@ async function main() {
 
     // 7b-3. the chat session was closed in Kiro Crew: the next turn recreates it
     {
-      const slotKey = slotNameFor(workspace);
+      const slotKey = turn ? turn.slot : slotNameFor(workspace);
       gatewayMock.closeSlot(slotKey);
       const prompt2 = `smoke ${crypto.randomBytes(3).toString('hex')}: after close`;
       const ask2 = await api('POST', '/api/chat/ask', { prompt: prompt2 });
@@ -810,7 +839,7 @@ async function main() {
         await sleep(300);
       }
       check(
-        'a chat session closed in Kiro Crew is recreated for the folder on the next turn',
+        'a Kiro Crew session closed in Kiro Crew is recreated with its project on the next turn',
         ask2.json && ask2.json.ok && turn2 && turn2.slot === slotKey && String(gatewayMock.rec.slots.get(slotKey)?.project).toLowerCase() === workspace.toLowerCase(),
         turn2 ? `${turn2.slot} project=${gatewayMock.rec.slots.get(slotKey)?.project}` : `turns: ${gatewayMock.rec.turns.length}`,
       );
@@ -1182,7 +1211,7 @@ async function main() {
       check('after the launcher restart chat is available again with a fresh app token', cs2 && cs2.available && cs2.gateway.reachable === true, JSON.stringify(cs2 && cs2.gateway && { reachable: cs2.gateway.reachable, lastError: cs2.gateway.lastError }));
     }
   } catch (e) {
-    check('smoke run completed without exception', false, e.message);
+    if (!(e instanceof StopEarly)) check('smoke run completed without exception', false, e.message);
   } finally {
     if (browser) await browser.close().catch(() => {});
     if (hostServer) hostServer.close();

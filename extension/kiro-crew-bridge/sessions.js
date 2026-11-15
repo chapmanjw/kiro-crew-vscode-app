@@ -48,17 +48,20 @@ function commandOf(input) {
 }
 
 /**
- * A native tool card for a tool part from the launcher. `update` marks it as
- * an update of the card with the same id (enablePartialUpdate).
+ * A native tool card for a tool part from the launcher. `live` cards set
+ * enablePartialUpdate, which 1.146 turns into an external tool invocation
+ * that later parts with the same id update in place
+ * (extHostTypeConverters ChatToolInvocationPart: externalToolInvocationUpdate);
+ * history cards leave it off and render as finished (toolInvocationSerialized).
  */
-function toolCard(vscode, t, update) {
+function toolCard(vscode, t, live) {
   const part = new vscode.ChatToolInvocationPart(t.toolKind || 'kirocrew', t.id);
   part.invocationMessage = t.title;
   part.pastTenseMessage = t.title;
   part.isConfirmed = true;
   part.isComplete = t.state === 'done' || t.state === 'error';
   part.isError = t.state === 'error';
-  part.enablePartialUpdate = !!update;
+  part.enablePartialUpdate = !!live;
   const cmd = t.toolKind === 'execute' ? commandOf(t.input) : '';
   if (cmd) {
     part.toolSpecificData = {
@@ -77,6 +80,25 @@ function markdownString(vscode, text) {
   m.isTrusted = false;
   m.supportHtml = false;
   return m;
+}
+
+/**
+ * invokeTool for the workbench's confirmation tool. The core registers it in
+ * the "chat.builtinTools" contribution at LifecyclePhase.Eventually (1.146
+ * builtinTools: bt(uOe.ID, uOe, vt.Eventually)), so right after a window
+ * opens it can still be missing ("Tool ... was not contributed"); retry for a
+ * while before giving up.
+ */
+async function invokeConfirmation(vscode, input, toolInvocationToken, token, { tries = 20, waitMs = 750 } = {}) {
+  for (let i = 0; ; i++) {
+    try {
+      return await vscode.lm.invokeTool(CONFIRM_TOOL, { input, toolInvocationToken }, token);
+    } catch (e) {
+      if (i >= tries - 1 || token.isCancellationRequested || !/not contributed/i.test(e.message || '')) throw e;
+      await new Promise((r) => setTimeout(r, waitMs));
+      if (token.isCancellationRequested) throw e;
+    }
+  }
 }
 
 /** Escape text for a markdown line. */
@@ -215,11 +237,7 @@ function register(context, deps) {
   async function askApproval(req, title, message, token) {
     if (vscode.lm && typeof vscode.lm.invokeTool === 'function') {
       try {
-        const r = await vscode.lm.invokeTool(
-          CONFIRM_TOOL,
-          { input: { title, message, buttons: [APPROVE, REJECT] }, toolInvocationToken: req.toolInvocationToken },
-          token,
-        );
+        const r = await invokeConfirmation(vscode, { title, message, buttons: [APPROVE, REJECT] }, req.toolInvocationToken, token);
         const first = r && r.content && r.content[0];
         const v = first && typeof first.value === 'string' ? first.value : '';
         return v === APPROVE || v === 'yes' ? 'approved' : 'rejected';
@@ -283,11 +301,7 @@ function register(context, deps) {
         let answer = null;
         if (q.options.length && vscode.lm && typeof vscode.lm.invokeTool === 'function') {
           try {
-            const r = await vscode.lm.invokeTool(
-              CONFIRM_TOOL,
-              { input: { title: `Kiro Crew asks${q.header ? ': ' + q.header : ''}`, message: q.question, buttons: q.options }, toolInvocationToken: req.toolInvocationToken },
-              cts.token,
-            );
+            const r = await invokeConfirmation(vscode, { title: `Kiro Crew asks${q.header ? ': ' + q.header : ''}`, message: q.question, buttons: q.options }, req.toolInvocationToken, cts.token);
             const v = r && r.content && r.content[0] && r.content[0].value;
             answer = q.options.includes(v) ? v : null;
           } catch {
@@ -315,6 +329,7 @@ function register(context, deps) {
   // ------------------------------------------------------------ requests
 
   async function handle(resource, req, chatContext, stream, token) {
+    log(`session request for ${resource ? resource.toString() : '(no resource)'}`);
     const prompt = req.command ? `/${req.command}${req.prompt ? ' ' + req.prompt : ''}` : req.prompt;
     const s = await sessionFor(resource, prompt);
     const folder = s.folder || workspaceFolder();
@@ -336,7 +351,7 @@ function register(context, deps) {
               if (vscode.ChatResponseThinkingProgressPart) stream.push(new vscode.ChatResponseThinkingProgressPart(part.text));
               break;
             case 'tool':
-              stream.push(toolCard(vscode, part, tools.has(part.id)));
+              stream.push(toolCard(vscode, part, true));
               if (!tools.has(part.id)) event('toolCard', { slot: s.slot, detail: part.title });
               tools.add(part.id);
               break;
@@ -461,10 +476,13 @@ function register(context, deps) {
   chatState.sessionType = true;
   refresh();
   if (vscode.lm && typeof vscode.lm.selectChatModels === 'function') {
-    // Registration alone does not publish the model (acp-to-chat extension.ts:424).
+    // Registration alone does not publish the model (acp-to-chat extension.ts:424):
+    // this resolves the vendor in the workbench. A model bound to a session
+    // type is not handed back to extensions, so the list itself may be empty.
     Promise.resolve(vscode.lm.selectChatModels({ vendor: MODEL_VENDOR }))
-      .then((models) => {
-        chatState.sessionModelPublished = (models || []).some((m) => m.vendor === MODEL_VENDOR);
+      .then(() => {
+        chatState.sessionModelPublished = true;
+        if (deps.notify) deps.notify();
       })
       .catch((e) => log(`session model publish failed: ${e.message}`));
   }
@@ -479,4 +497,4 @@ function register(context, deps) {
   };
 }
 
-module.exports = { register, available, toolCard, commandOf, SESSION_TYPE, MODEL_VENDOR, CONFIRM_TOOL };
+module.exports = { register, available, toolCard, commandOf, invokeConfirmation, SESSION_TYPE, MODEL_VENDOR, CONFIRM_TOOL };

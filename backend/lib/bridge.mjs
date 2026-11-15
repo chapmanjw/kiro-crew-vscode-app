@@ -193,7 +193,7 @@ export class Bridge {
         return true;
       case 'chatPrefs':
         if (typeof ev.hideCopilotAgents !== 'boolean') return false;
-        this.chatPrefs = { hideCopilotAgents: ev.hideCopilotAgents, at };
+        this.chatPrefs = { hideCopilotAgents: ev.hideCopilotAgents, effective: settingsInfo(ev.effective), at };
         return true;
       case 'chatSession': {
         const e = {
@@ -253,6 +253,16 @@ function chatInfo(c) {
     sessionModelPublished: c.sessionModelPublished === true,
     error: c.error ? str(c.error) : null,
   };
+}
+
+/** {setting: boolean|null} for the Copilot agent settings the extension reports; anything else dropped. */
+function settingsInfo(e) {
+  if (!e || typeof e !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(e).slice(0, 10)) {
+    if (/^[A-Za-z0-9_.]{1,80}$/.test(k)) out[k] = typeof v === 'boolean' ? v : null;
+  }
+  return out;
 }
 
 function sel(s) {
