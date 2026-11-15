@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.3.0). Tested standalone on Windows 11 with Node
+Status: prototype (0.3.1). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,12 +15,12 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.3.0.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.3.1.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     status, folder, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
- |  composer chip: ui/vscode-pane-session-0.3.0.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.3.1.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
@@ -177,6 +177,18 @@ agent, its tools, approvals and the history live in Kiro Crew.
    "Language model unavailable" while Copilot is signed out. Kiro Crew shows
    up in the model picker; a direct call to the model is also answered by a
    Kiro Crew turn.
+   Registering a provider does not publish its models: the workbench asks a
+   vendor for them only on `selectLanguageModels` or the provider's change
+   event (`languageModels.ts`, `registerLanguageModelProvider`). Until then the
+   picker is empty and a plain message goes out with no model, which is why a
+   first plain "Hello" used to fail while the second message worked (the
+   failed request's own fallback had resolved the models by then). The bridge
+   therefore fires the change event and calls
+   `vscode.lm.selectChatModels({ vendor: 'kiro-crew' })` right after it
+   registers the provider, before the participants, and the launcher sets
+   `chat.defaultModel` to `kiro-crew` so new chats start on it. The
+   participant never reads `request.model`; the failure happens in the
+   extension host before any handler runs, so it cannot be caught there.
 3. The launcher writes supported chat settings into the server's Machine
    settings. `chat.defaultToCopilotHarness` and
    `chat.editor.preferCopilotHarness` are turned off because 1.146 otherwise
@@ -234,7 +246,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.3.0.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.3.1.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -284,8 +296,12 @@ the bridge sends commands only to the extension host that said hello last.
 
 - Card. The page draws itself as the same card as the Sessions panel:
   `bg-elevated` surface, 1px `--border`, `--radius-xl` (16px) corners,
-  `--shadow-sm`, 8px from the edges of the dashboard's content area
-  (`website/src/components/listShell.ts` `LIST_SHELL_CLS`). It also carries the
+  `--shadow-sm` (`website/src/components/listShell.ts` `LIST_SHELL_CLS`). It
+  sits in `<main>` where the Sessions card does: flush with `<main>`'s left
+  and top edges, which puts it 8px from the icon rail card (the rail's own
+  `mx-2`) with its top level with the rail's, and 8px in from the right and
+  bottom (the drawer's `pb-2`, the rail's `mb-2`). `<main>` has no padding of
+  its own (`App.tsx`). The values are `CARD_MARGIN` in the core module. It also carries the
   `sidebar sidebar-inner` classes that card has, so a theme that retints the
   Sessions panel (for example `kiro-light`) retints this one too. The dashboard
   puts no header or padding around an app page (`AppPage.tsx` renders the
@@ -311,7 +327,15 @@ the bridge sends commands only to the extension host that said hello last.
   to `/apps/vscode-pane?folder=<that folder>` and the page opens it. A chat with
   no project shows a short note and an "Open VS Code" button instead. The chip's
   glyph comes from the host's fixed set (`Package`), because session controls
-  cannot use an app image.
+  cannot use an app image: the chip renders `<AppIcon icon={sc.icon} size={13} />`
+  with no `iconUrl` (`components/chat-input/ContextShelf.tsx` in 0.14, the same
+  call in the shipped 0.13.0-rc.1 bundle), `AppIcon` maps names to eleven
+  lucide icons, the backend's `SessionControlContribution` keeps only `id`,
+  `entryPoint`, `label`, `icon` and `statusPath`, and the control's own
+  component renders only in the popover, not on the chip. Showing the real
+  VS Code mark there needs Kiro Crew to accept an `iconUrl` on session controls
+  (kept by the manifest model, resolved under the app's `ui/`) and pass it to
+  `AppIcon` in `ContextShelf.tsx`.
 - Theme. On mount, on every dashboard theme change and after each server
   restart the page POSTs to `/apps/vscode-pane/api/theme`. The body always has
   `kind` (`"dark"` or `"light"`), taken in this order: the palette name on
@@ -321,7 +345,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.3.0.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.3.1.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -443,11 +467,16 @@ so nothing is downloaded twice:
 
 The smoke test and `stage.mjs` read it.
 
-The stand-in dashboard also has a nav rail, a scrolling `<main id="main-content">`,
+The stand-in dashboard also has the dashboard's shell geometry (a 42px top bar
+row, the icon rail card `mx-2 mt-0 mb-2` in its 74px track, an unpadded,
+scrolling `<main id="main-content">`),
 a Dracula-style dark palette and a light one with the dashboard's token names,
 a chat view whose composer shelf mounts the app's session control, and a router
 that unmounts the page when you leave it. With it the smoke test checks the
-card's radius, border and inset and the frame's clip; that the palette is POSTed
+card's radius and border, that it sits 8px from the rail card with its top and
+bottom level with the rail's, and the frame's clip; that a first plain chat
+message typed into the Chat view of a fresh profile right after the workbench
+renders reaches Kiro Crew; that the palette is POSTed
 on mount and again after switching to light and back, with every value as
 `#rrggbb`; that a palette with no readable tokens POSTs `{kind}` alone (light
 from a `*-light` name, dark from the OS scheme for an unnamed one) and the card
@@ -470,6 +499,13 @@ own machine; swap it for original art before any public release of this app.
 
 ## Known limits
 
+- A chat message sent before VS Code's extension host has started and the
+  bridge has published its model (about half a second after the bridge
+  connects in the smoke runs) still has no model and fails with "Language
+  model unavailable": VS Code takes the model from the picker when the message
+  is submitted (`chatWidget.ts`, `getSelectedModelRequestOptions`) and does
+  not wait for one. The model list is kept in memory only, so every new window
+  has this short window. Sending again works.
 - Same machine only. The iframe points at `127.0.0.1`, which resolves on the
   viewing machine, so this works in the desktop app or a browser on the gateway
   host, not from another computer or through a tunnel. Fixing that needs

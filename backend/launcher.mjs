@@ -239,6 +239,10 @@ function serverUserEnv() {
  *    Kiro Crew runs its own tools.
  *  - chat.titleBar.signIn.enabled / chat.welcomePage.signIn.enabled: hide the
  *    Copilot sign-in buttons.
+ *  - chat.defaultModel "kiro-crew": new chats start on the bridge's Kiro Crew
+ *    model (matched by model id, modelSelection.ts resolveConfiguredModel), so
+ *    a plain first message carries a model even when Copilot models appear
+ *    after a sign-in. The bridge publishes that model at activation.
  */
 const CHAT_SETTINGS = {
   'chat.defaultToCopilotHarness': false,
@@ -247,6 +251,7 @@ const CHAT_SETTINGS = {
   'chat.mcp.autostart': 'never',
   'chat.titleBar.signIn.enabled': false,
   'chat.welcomePage.signIn.enabled': false,
+  'chat.defaultModel': 'kiro-crew',
 };
 
 /**

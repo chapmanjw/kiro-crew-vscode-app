@@ -7,6 +7,23 @@ export const APP_ROUTE = '/apps/vscode-pane';
 export const API = '/apps/vscode-pane/api';
 
 /**
+ * The card's margin inside the dashboard's <main>, in px, matching how the
+ * Kiro Crew Sessions card sits there (0.14 source, read 2026-11-15):
+ *  - <main id="main-content"> has no padding (App.tsx: `p-0` on fixed-height
+ *    routes, no padding class otherwise), and an app page renders straight
+ *    into it (AppPage.tsx -> InstalledAppSurface, no wrapper padding).
+ *  - The icon rail card is `mx-2 mt-0 mb-2` in its grid track
+ *    (shell/nav/navRail.tsx), so its right edge is 8px short of <main> and its
+ *    top is the top of the content row, under the 42px top bar.
+ *  - The Sessions card has no margin of its own (components/listShell.ts
+ *    LIST_SHELL_CLS) and its drawer adds only `pb-2`
+ *    (components/OverlayDrawer.tsx), so it starts at <main>'s left and top:
+ *    8px from the rail card, top aligned with it, bottom 8px up like the rail.
+ * The right side keeps the 8px inset it had.
+ */
+export const CARD_MARGIN = Object.freeze({ top: 0, right: 8, bottom: 8, left: 0 });
+
+/**
  * The dashboard theme tokens sent to the backend (POST /api/theme). Names come
  * from Kiro Crew's website/src/styles/design-tokens.css and theme-palettes.css;
  * every built-in palette and theme pack sets them. `--surface` is not a Kiro

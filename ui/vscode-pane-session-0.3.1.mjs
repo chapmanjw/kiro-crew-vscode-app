@@ -8,7 +8,7 @@
 // navigate closes it first), so to the user the chip acts as a button.
 import React, { useEffect, useRef } from 'react';
 import { useNavigate } from '@kirocrew/app-sdk';
-import { appPageUrl } from './vscode-pane-core-0.3.0.mjs';
+import { appPageUrl } from './vscode-pane-core-0.3.1.mjs';
 
 const h = React.createElement;
 

@@ -1,6 +1,7 @@
 // A minimal stand-in for the Kiro Crew dashboard, served on http://localhost:<port>:
-//  - the dashboard's layout around an app page: a nav rail, and a scrolling
-//    <main id="main-content"> that the routed page renders into
+//  - the dashboard's layout around an app page: the 42px top bar row, the nav
+//    rail card in its 74px track, and a scrolling, unpadded
+//    <main id="main-content"> that the routed page renders into (App.tsx)
 //  - a tiny router: /apps/vscode-pane[?folder=] mounts the app's real page
 //    (ui.entry), /chat shows a composer shelf with the app's session control
 //    chip (contributes.sessionControls), mounted like SessionControlHost does
@@ -86,10 +87,15 @@ const PALETTES = `
   --radius-sm:6px;--radius-md:8px;--radius-lg:12px;--radius-xl:16px;--shadow-sm:0 1px 2px rgba(0,0,0,.06);
 }
 html,body{margin:0;height:100%;background:var(--bg,#808080);color:var(--text,#000);font:13px system-ui}
-#shell{display:grid;grid-template-columns:64px 1fr;height:100vh}
-#rail{margin:8px 0 8px 8px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;gap:6px;padding:8px 0;align-items:center}
+/* The shell grid of website/src/App.tsx: a 42px top bar row over the content
+   row (grid-rows-[42px_minmax(0,1fr)]), the rail track 74px wide when collapsed
+   (hooks/useRailWidth.ts RAIL_W_COLLAPSED), the rail card \`mx-2 mt-0 mb-2\` with
+   rounded-xl and a 1px border (shell/nav/navRail.tsx), and <main> with no padding. */
+#shell{display:grid;grid-template-rows:42px minmax(0,1fr);grid-template-columns:74px minmax(0,1fr);height:100vh}
+#topbar{grid-column:1 / -1;display:flex;align-items:center;padding:0 12px;color:var(--muted)}
+#rail{margin:0 8px 8px 8px;min-width:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;gap:6px;padding:8px 0;align-items:center}
 #rail button{width:44px;height:36px;border-radius:10px;border:0;background:transparent;color:var(--muted);cursor:pointer;font:11px system-ui}
-#main-content{display:flex;flex-direction:column;min-height:0;min-width:0;overflow-x:hidden;overflow-y:auto}
+#main-content{display:flex;flex-direction:column;min-height:0;min-width:0;padding:0;overflow-x:hidden;overflow-y:auto}
 .chat{margin:8px;flex:1;display:flex;flex-direction:column;justify-content:flex-end;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;padding:12px}
 .shelf{display:flex;align-items:center;gap:8px;position:relative}
 .chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;font:12px system-ui}
@@ -111,7 +117,7 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
     },
   })}</script></head>
 <body>
-<div id="shell"><nav id="rail"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">VS Code</button></nav>
+<div id="shell"><header id="topbar">Kiro Crew</header><nav id="rail"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">VS Code</button></nav>
 <main id="main-content"></main></div>
 <script type="module">
 import React from 'react';

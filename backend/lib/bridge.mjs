@@ -219,7 +219,7 @@ function str(v) {
 
 function chatInfo(c) {
   if (!c || typeof c !== 'object') return null;
-  return { participant: c.participant === true, defaultParticipant: c.defaultParticipant === true, model: c.model === true, error: c.error ? str(c.error) : null };
+  return { participant: c.participant === true, defaultParticipant: c.defaultParticipant === true, model: c.model === true, modelPublished: c.modelPublished === true, error: c.error ? str(c.error) : null };
 }
 
 function sel(s) {

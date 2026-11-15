@@ -35,7 +35,7 @@ let statusItem;
 let stopped = false;
 let connected = false;
 let lastError = '';
-const chatState = { participant: false, defaultParticipant: false, model: false, error: null };
+const chatState = { participant: false, defaultParticipant: false, model: false, modelPublished: false, error: null };
 
 function log(msg) {
   output?.appendLine(`[${new Date().toISOString()}] ${msg}`);
@@ -417,7 +417,18 @@ function registerLanguageModel(context) {
     // suitableForAgentMode). Kiro Crew does run tools, on its own side.
     capabilities: { imageInput: false, toolCalling: true },
   };
+  // Registering a provider does not publish its models: the workbench asks a
+  // vendor for them only on selectLanguageModels or this change event
+  // (languageModels.ts, registerLanguageModelProvider / _resolveAllLanguageModels).
+  // Until then the chat picker has no model, a plain message goes out with
+  // none, and the extension host fails it with "Language model unavailable"
+  // before any participant runs (extHostLanguageModels.ts,
+  // getLanguageModelForRequest). That request's own fallback then resolves the
+  // models, which is why the second message used to work.
+  const changed = new vscode.EventEmitter();
+  context.subscriptions.push(changed);
   const provider = {
+    onDidChangeLanguageModelChatInformation: changed.event,
     provideLanguageModelChatInformation: () => [info],
     async provideLanguageModelChatResponse(_model, messages, _options, progress, token) {
       const lastUser = [...messages].reverse().find((m) => m.role === vscode.LanguageModelChatMessageRole.User);
@@ -443,7 +454,31 @@ function registerLanguageModel(context) {
   } catch (e) {
     chatState.error = `language model: ${e.message}`;
     log(chatState.error);
+    return;
   }
+  publishLanguageModel(changed);
+}
+
+/**
+ * Make the workbench resolve the Kiro Crew vendor now, so the chat picker
+ * holds the Kiro Crew model (chat.defaultModel, set by the launcher, names it)
+ * before the user sends anything. selectChatModels goes through
+ * $selectChatModels to the workbench's _resolveAllLanguageModels; the change
+ * event is a second route to the same resolve.
+ */
+async function publishLanguageModel(changed) {
+  const t0 = Date.now();
+  try {
+    changed.fire();
+    const models = typeof vscode.lm.selectChatModels === 'function' ? await vscode.lm.selectChatModels({ vendor: 'kiro-crew' }) : [];
+    chatState.modelPublished = models.some((m) => m.vendor === 'kiro-crew');
+    log(`language model ${chatState.modelPublished ? 'published' : 'not published'} in ${Date.now() - t0} ms`);
+  } catch (e) {
+    chatState.modelPublished = false;
+    log(`language model publish failed: ${e.message}`);
+  }
+  // The launcher may have had the first hello already; tell it the new state.
+  if (connected) sendHello();
 }
 
 function registerChat(context) {

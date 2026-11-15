@@ -20,15 +20,14 @@ import {
   folderFromSearch,
   frameKey,
   framePlacement,
-} from './vscode-pane-core-0.3.0.mjs';
+  CARD_MARGIN,
+} from './vscode-pane-core-0.3.1.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
 // Card geometry of the Kiro Crew Sessions panel (website/src/components/listShell.ts
 // LIST_SHELL_CLS: `rounded-xl` = --radius-xl, 1px --border, --bg-elevated,
-// --shadow-sm) and its 8px inset from the window (App.tsx FOCUS_INSET, the
-// drawer's `pb-2`).
-const INSET = 8;
+// --shadow-sm). Its placement in <main> is CARD_MARGIN (see the core module).
 const RADIUS_FALLBACK = 16;
 
 // useAppApi throws AppApiError on non-2xx in 0.14 and resolved null in older
@@ -56,7 +55,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-3-0';
+const STYLE_ID = 'vscode-pane-style-0-3-1';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to
@@ -73,7 +72,7 @@ const CSS = `
   --vscp-accent-hover:var(--accent-hover,#0258a8);--vscp-ring:var(--ring,#005fb8);--vscp-ok:var(--ok,#388a34);
   --vscp-warn:var(--warn,#bf8803);--vscp-danger:var(--danger,#e51400)}
 .vscp-card{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;box-sizing:border-box;
-  margin:${INSET}px;background:var(--vscp-elev);color:var(--vscp-text);
+  margin:${CARD_MARGIN.top}px ${CARD_MARGIN.right}px ${CARD_MARGIN.bottom}px ${CARD_MARGIN.left}px;background:var(--vscp-elev);color:var(--vscp-text);
   border:1px solid var(--vscp-border);border-radius:var(--radius-xl,${RADIUS_FALLBACK}px);box-shadow:var(--vscp-shadow);
   font-family:var(--font-body,system-ui,sans-serif)}
 .vscp-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:6px;height:34px;min-height:34px;padding:0 8px 0 12px;
@@ -487,7 +486,7 @@ export default function VsCodePane() {
       };
       const rr = root.getBoundingClientRect();
       // Fill the rest of <main> below the card's top, keeping the bottom inset.
-      const want = `${Math.max(240, Math.floor(bounds.top + bounds.height - rr.top - INSET))}px`;
+      const want = `${Math.max(240, Math.floor(bounds.top + bounds.height - rr.top - CARD_MARGIN.bottom))}px`;
       if (want !== lastHeight) {
         root.style.height = want;
         lastHeight = want;

@@ -229,27 +229,41 @@ function portOpen(port) {
 // composer's VS Code chip opening the chat's project folder.
 async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads }) {
   const HEX = /^#[0-9a-f]{6}$/;
-  const frameHost = 'div[data-vscode-pane-frame-host]';
 
   // Item 1: the card matches the Sessions panel card and the frame is clipped to it.
   const card = await page.evaluate(() => {
     const el = document.querySelector('[data-testid="vscode-pane-card"]');
     const host = document.querySelector('div[data-vscode-pane-frame-host]');
     const main = document.getElementById('main-content');
+    const rail = document.getElementById('rail');
     if (!el || !host) return null;
     const cs = getComputedStyle(el);
+    const ms = getComputedStyle(main);
     const r = el.getBoundingClientRect();
     const hr = host.getBoundingClientRect();
     const mr = main.getBoundingClientRect();
+    const rl = rail.getBoundingClientRect();
     return {
       radius: cs.borderTopLeftRadius, border: cs.borderTopWidth, bg: cs.backgroundColor,
       inset: [r.left - mr.left, r.top - mr.top, mr.right - r.right, mr.bottom - r.bottom].map((n) => Math.round(n)),
+      mainPadding: [ms.paddingTop, ms.paddingRight, ms.paddingBottom, ms.paddingLeft].join(' '),
+      railGap: Math.round((r.left - rl.right) * 10) / 10,
+      railTop: Math.round((r.top - rl.top) * 10) / 10,
+      railBottom: Math.round((r.bottom - rl.bottom) * 10) / 10,
+      railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), getComputedStyle(rail).marginBottom].join(' '),
       clip: host.style.clipPath, hostInside: hr.left >= r.left && hr.right <= r.right + 0.5 && hr.bottom <= r.bottom + 0.5 && hr.top >= r.top,
       bar: document.querySelector('[role="toolbar"]').getBoundingClientRect().height,
     };
   });
-  check('pane is an inset card with the Sessions panel radius and border (16px, 1px, 8px inset)',
-    card && card.radius === '16px' && card.border === '1px' && card.inset.every((n) => n === 8), JSON.stringify(card));
+  // The stand-in reproduces App.tsx: <main> unpadded, the rail card's top level
+  // with <main>'s top, 8px from <main> on the right and 8px up from the bottom.
+  check('stand-in reproduces the dashboard shell (unpadded <main>; rail card top at <main> top, 8px right and bottom margins)',
+    card && card.mainPadding === '0px 0px 0px 0px' && card.railShape === '0 8 8px', card && `${card.mainPadding}; rail ${card.railShape}`);
+  // The Sessions card: no margin of its own, drawer pb-2 (listShell.ts, OverlayDrawer.tsx).
+  check('pane card sits where the Sessions card does: 8px from the rail card, top and bottom level with it, flush left and top in <main>, 8px right and bottom',
+    card && card.railGap === 8 && card.railTop === 0 && card.railBottom === 0 && JSON.stringify(card.inset) === '[0,0,8,8]', card && `gap ${card.railGap}, top ${card.railTop}, bottom ${card.railBottom}, inset ${JSON.stringify(card.inset)}`);
+  check('pane card has the Sessions panel radius and border (16px, 1px)',
+    card && card.radius === '16px' && card.border === '1px', JSON.stringify(card && { radius: card.radius, border: card.border }));
   check('frame sits inside the card and is clipped to its rounded bottom corners',
     card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
   check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
@@ -523,6 +537,7 @@ async function main() {
       `${machine['workbench.colorTheme']} ${machine['workbench.colorCustomizations']?.['editor.background']}`,
     );
     check('Copilot sign-in prompts are turned off by setting, not by removing extensions', machine['chat.titleBar.signIn.enabled'] === false && machine['chat.welcomePage.signIn.enabled'] === false && fs.existsSync(path.join(serverDir || DEV.serverDir || '', 'extensions', 'copilot', 'package.json')));
+    check('new chats default to the Kiro Crew model by setting (chat.defaultModel)', machine['chat.defaultModel'] === 'kiro-crew', String(machine['chat.defaultModel']));
     const serverArgsLog = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
     check('launcher log names the frame port', /frame 127\.0\.0\.1:\d+/.test(serverArgsLog));
 
@@ -604,6 +619,51 @@ async function main() {
     }
     check('workbench renders inside a cross-site iframe (localhost page -> 127.0.0.1 frame)', workbenchUp, frameErrors.slice(0, 3).join('; '));
 
+    // 6a. the first chat message in this fresh browser profile is a plain one
+    //     (no @mention), typed into the Chat view as soon as the workbench is
+    //     up. VS Code sends it with the picker's current model; with no model
+    //     selected the extension host fails it with "Language model unavailable"
+    //     before any participant runs (extHostLanguageModels.ts).
+    const firstPrompt = `Hello ${crypto.randomBytes(3).toString('hex')}`;
+    let firstSent = '';
+    if (workbenchUp) {
+      const t6a = Date.now();
+      try {
+        const box = frame.locator('.interactive-input-editor .monaco-editor').first();
+        let open = await box.isVisible().catch(() => false);
+        for (let attempt = 0; attempt < 6 && !open; attempt++) {
+          await frame.locator('.monaco-workbench').click({ position: { x: 700, y: 300 } });
+          await page.keyboard.press('Control+Alt+KeyI');
+          open = await box.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false);
+        }
+        if (!open) throw new Error('the Chat view did not open');
+        await box.click();
+        await page.keyboard.type(firstPrompt, { delay: 10 });
+        await page.keyboard.press('Enter');
+        firstSent = `sent ${Date.now() - t6a} ms after the workbench rendered`;
+      } catch (e) {
+        firstSent = '';
+        console.log(`first chat message not sent: ${e.message}`);
+      }
+    }
+    let firstTurn = null;
+    let firstFailed = false;
+    const t6b = Date.now();
+    while (firstSent && Date.now() - t6b < 90_000) {
+      firstTurn = gatewayMock.rec.turns.find((t) => String(t.message).startsWith(firstPrompt));
+      firstFailed = (await frame.locator('text=Language model unavailable').count().catch(() => 0)) > 0;
+      if (firstTurn || firstFailed) break;
+      await sleep(500);
+    }
+    let firstReply = false;
+    if (firstTurn) firstReply = await frame.locator('text=Kiro Crew mock').first().waitFor({ timeout: 20_000 }).then(() => true, () => false);
+    await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'first-chat.png') }).catch(() => {});
+    if (!check(
+      'a first plain chat message in a fresh profile reaches Kiro Crew and gets its reply (no "Language model unavailable")',
+      firstSent && firstTurn && firstReply && !firstFailed,
+      `${firstSent || 'not sent'}; turn ${firstTurn ? 'seen' : 'missing'}; reply ${firstReply}; model error ${firstFailed}`,
+    )) console.log('workbench console (chat):\n  ' + chatConsole.slice(-20).join('\n  '));
+
     // 6b. a real VS Code terminal sees the user's environment, not the gateway's
     if (process.platform === 'win32' && workbenchUp) {
       const userVar = userOnlyVarName();
@@ -672,7 +732,14 @@ async function main() {
       cs0 && cs0.extension.chat && cs0.extension.chat.defaultParticipant === true && cs0.extension.chat.participant === true,
       JSON.stringify(cs0 && cs0.extension.chat),
     );
+    check(
+      'bridge published the Kiro Crew language model to the workbench at activation',
+      cs0 && cs0.extension.chat && cs0.extension.chat.model === true && cs0.extension.chat.modelPublished === true,
+      JSON.stringify(cs0 && cs0.extension.chat),
+    );
     const prompt = `smoke ${crypto.randomBytes(3).toString('hex')}: say hi`;
+    // Replies already in the Chat view (step 6a), so the check below waits for a new one.
+    const repliesBefore = await frame.locator('text=Kiro Crew mock').count().catch(() => 0);
     const ask = await api('POST', '/api/chat/ask', { prompt });
     check('POST /api/chat/ask opens the VS Code Chat view with the prompt', ask.json && ask.json.ok, JSON.stringify(ask.json));
     let turn = null;
@@ -692,13 +759,10 @@ async function main() {
       turn && `${turn.slot} project=${gatewayMock.rec.slots.get(turn.slot)?.project}`,
     );
     let chatShown = false;
-    try {
-      await frame.locator('text=Kiro Crew mock').first().waitFor({ timeout: 20_000 });
-      chatShown = true;
-    } catch {
-      /* reported below */
+    for (const tr = Date.now(); Date.now() - tr < 20_000 && !chatShown; await sleep(300)) {
+      chatShown = (await frame.locator('text=Kiro Crew mock').count().catch(() => 0)) > repliesBefore;
     }
-    check('the Kiro Crew reply streams into the VS Code Chat view', chatShown);
+    check('the Kiro Crew reply streams into the VS Code Chat view', chatShown, `${repliesBefore} replies before`);
     let cs1 = null;
     const t7b = Date.now();
     while (Date.now() - t7b < 10_000) {

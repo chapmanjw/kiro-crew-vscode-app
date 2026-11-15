@@ -2,7 +2,7 @@
   "name": "kiro-crew-bridge",
   "displayName": "Kiro Crew Bridge",
   "description": "Connects this VS Code to the Kiro Crew vscode-pane app: answers the Chat view with Kiro Crew's own agent harness, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "kiro-crew",
   "license": "MIT",
   "engines": {
