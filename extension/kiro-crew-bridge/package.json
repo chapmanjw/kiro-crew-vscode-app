@@ -4,6 +4,7 @@
   "description": "Connects this VS Code to the Kiro Crew vscode-pane app: makes Kiro Crew a native chat session type (streaming replies, tool cards, approvals and history from Kiro Crew chat sessions), keeps a default participant as the fallback, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
   "version": "0.5.0",
   "publisher": "kiro-crew",
+  "icon": "icon.png",
   "license": "MIT",
   "engines": {
     "vscode": "^1.95.0"

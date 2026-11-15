@@ -399,6 +399,18 @@ the bridge sends commands only to the extension host that said hello last.
   puts no header or padding around an app page (`AppPage.tsx` renders the
   bundle straight into `<main>`), so the page sizes itself to the space left in
   `<main>` whenever the layout changes.
+  The same margins hold with the nav collapsed to the icon rail or expanded
+  to the sidebar: both are one `<nav>` with `mx-2 mt-0 mb-2 rounded-xl`
+  (`shell/nav/navRail.tsx:457`) in a 74px or 236px grid track
+  (`hooks/useRailWidth.ts:20-21`), the same in the 0.13.0-rc.1 bundle.
+- Toolbar. The strip is 45px tall including its 1px bottom border
+  (`BAR_HEIGHT` in the core module). Kiro Crew centres panel headers 23px
+  below the panel's outer top (`components/listShell.ts` `LIST_HEADER_CLS`),
+  and the expanded sidebar draws a hairline under its header 45px below its
+  outer top (1px border, `pt-2`, the 28px logo row, `mb-1.5`, `gap-0.5`;
+  `navRail.tsx:149-154`, `railChrome.tsx`). With the card's 1px top border the
+  toolbar's controls sit on the 23px line and its bottom border on that
+  hairline. The earlier 34px strip put the border 11px above it.
 - VS Code keeps running when you leave the page. The dashboard unmounts an app
   page whenever you go to another route, and an iframe taken out of the
   document is destroyed, which is why 0.2.0 started over each time. The iframe
@@ -829,13 +841,19 @@ so nothing is downloaded twice:
 The smoke test and `stage.mjs` read it.
 
 The stand-in dashboard also has the dashboard's shell geometry (a 42px top bar
-row, the icon rail card `mx-2 mt-0 mb-2` in its 74px track, an unpadded,
-scrolling `<main id="main-content">`),
+row, the nav card `mx-2 mt-0 mb-2` in a 74px track as the collapsed icon rail
+or a 236px track as the expanded sidebar with its header hairline, an
+unpadded, scrolling `<main id="main-content">`),
 a Dracula-style dark palette and a light one with the dashboard's token names,
 a chat view whose composer shelf mounts the app's session control, and a router
 that unmounts the page when you leave it. With it the smoke test checks the
-card's radius and border, that it sits 8px from the rail card with its top and
-bottom level with the rail's, and the frame's clip; that a first plain chat
+card's radius and border, that it sits 8px from the nav card with its top and
+bottom level with it and 8px in on the right, in both nav modes; that the
+toolbar's centre is on the 23px header line and its bottom border on the
+expanded sidebar's hairline; that the frame meets the toolbar and the card's
+inner edges with no gap or overlap and is clipped to the 15px inner radius;
+that the installed bridge extension carries its icons and VS Code's
+Extensions view shows its Kiro Crew icon; that a first plain chat
 message typed into the Chat view of a fresh profile right after the workbench
 renders reaches Kiro Crew; that the palette is POSTed
 on mount and again after switching to light and back, with every value as
@@ -871,7 +889,6 @@ on the selected row. No blue, and nothing tied to one theme.
 | `assets/icon-flat.svg` | `iconPath` | the rail's selected row, the store tile and the detail page |
 | `ui/icon-idle.svg` | `ui.pages[0].iconInactiveUrl` | the rail row when it is not selected |
 | `ui/icon-mono.svg` | `ui.pages[0].iconUrl` | same file as `icon-flat.svg`; the rail reads it only when an app has no `iconPath` |
-| `assets/icon.png` | none | full colour; the avatar of the VS Code chat participant (`installBridgeExtension` in `backend/launcher.mjs`) |
 
 Kiro Crew draws an installed app's rail icon as a plain `<img>`, in 0.13.0-rc.1
 and in the 0.14 source alike (`shell/appShell.tsx:731-745`): only first-party
@@ -885,6 +902,18 @@ lucide glyph can, because it paints in `currentColor`. The only glyph the rail
 gives an installed app is `Package`, and only when the app declares no icon
 at all (`appShell.tsx:732-739`; `glyphAllowed` is false for installed apps,
 `appNav.ts:227`), so the flat VS Code mark is the closer match.
+
+Inside VS Code the bridge extension uses Kiro Crew's own mark.
+`extension/kiro-crew-bridge/icon.png` is Kiro Crew's app icon, copied
+unchanged from `website/public/icon-512.png` in the Kiro Crew source (the same
+bytes the installed dashboard serves as `/icon-512.png`). It is the
+extension's `icon` in the Extensions view and the avatar of the Kiro Crew chat
+participant and sessions. `extension/kiro-crew-bridge/media/kiro-crew.svg`,
+the Kiro Crew view container icon, is the two-ghost crew glyph from Kiro
+Crew's `website/src/assets/crew-member-mark.svg`, drawn in `currentColor` so
+VS Code tints it like its own icons. These are Kiro Crew's marks. The Kiro
+Crew source is Apache-2.0, which grants no trademark rights (section 6), so
+check their use before any public release of this app.
 
 The composer chip keeps the `Package` glyph: it accepts only a name from
 `AppIcon`'s eleven lucide icons, none of which depicts code, and the tunnel's

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Build every icon file from ui/icon.svg (the VS Code product icon copied from
-// an installed VS Code, resources/app/out/media/code-icon.svg), then render the
-// PNG chat avatar and a preview sheet with a local headless Chrome/Edge
+// an installed VS Code, resources/app/out/media/code-icon.svg), then render a
+// preview sheet with a local headless Chrome/Edge
 // (playwright-core from .cache/smoke-deps, or from the `smokeDepsRoot` named in
 // dev-config.json).
 //
-//   node scripts/render-icon.mjs            SVGs, assets/icon.png, .cache/icons/preview.png
+//   node scripts/render-icon.mjs            SVGs and .cache/icons/preview.png
 //   node scripts/render-icon.mjs --svg-only the SVGs only (no browser)
 //
 // Outputs:
@@ -13,9 +13,6 @@
 //                        tile and the rail's selected row)
 //   ui/icon-mono.svg     the same file for ui.pages[0].iconUrl
 //   ui/icon-idle.svg     flat mark, idle colours (ui.pages[0].iconInactiveUrl)
-//   assets/icon.png      full-colour mark; not in the manifest, it is the
-//                        avatar of the VS Code chat participant
-//                        (backend/launcher.mjs, installBridgeExtension)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,18 +46,6 @@ const exe = findBrowser();
 if (!exe) throw new Error('no local Chrome/Edge');
 const pw = await loadPlaywright(depsRoot);
 const browser = await pw.chromium.launch({ executablePath: exe, headless: true });
-
-// Chat avatar: the full-colour mark, 464px on a transparent 512px square.
-{
-  const page = await browser.newPage({ viewport: { width: 512, height: 512 } });
-  const sized = source.replace(/^<svg([^>]*?)\swidth="\d+"\sheight="\d+"/, '<svg$1 width="464" height="464"');
-  await page.setContent(`<html><body style="margin:0;width:512px;height:512px;background:transparent;display:grid;place-items:center">
-<div style="width:464px;height:464px">${sized}</div></body></html>`);
-  const out = path.join(ROOT, 'assets', 'icon.png');
-  await page.screenshot({ path: out, omitBackground: true });
-  await page.close();
-  console.log(`wrote assets/icon.png (${fs.statSync(out).size} bytes)`);
-}
 
 // Preview sheet: four themes (John's Dracula Pro and Kiro Crew's default, each
 // dark and light). Each panel sets the root color-scheme the way Kiro Crew does

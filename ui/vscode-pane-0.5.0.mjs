@@ -29,6 +29,7 @@ import {
   frameKey,
   framePlacement,
   CARD_MARGIN,
+  BAR_HEIGHT,
 } from './vscode-pane-core-0.5.0.mjs';
 
 const h = React.createElement;
@@ -83,7 +84,7 @@ const CSS = `
   margin:${CARD_MARGIN.top}px ${CARD_MARGIN.right}px ${CARD_MARGIN.bottom}px ${CARD_MARGIN.left}px;background:var(--vscp-elev);color:var(--vscp-text);
   border:1px solid var(--vscp-border);border-radius:var(--radius-xl,${RADIUS_FALLBACK}px);box-shadow:var(--vscp-shadow);
   font-family:var(--font-body,system-ui,sans-serif)}
-.vscp-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:6px;height:34px;min-height:34px;padding:0 8px 0 12px;
+.vscp-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:6px;height:${BAR_HEIGHT}px;min-height:${BAR_HEIGHT}px;padding:0 8px 0 12px;
   box-sizing:border-box;border-bottom:1px solid var(--vscp-border);font-size:12px;overflow:hidden;white-space:nowrap}
 .vscp-group{display:flex;align-items:center;gap:4px;min-width:0}
 .vscp-muted{color:var(--vscp-muted)}

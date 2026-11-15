@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { manifestIconFiles, svgProblems, isPng } from './lib/icon-checks.mjs';
+import { extensionIconChecks } from './lib/ext-icon-checks.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
@@ -238,43 +239,80 @@ function portOpen(port) {
 async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads }) {
   const HEX = /^#[0-9a-f]{6}$/;
 
-  // Item 1: the card matches the Sessions panel card and the frame is clipped to it.
-  const card = await page.evaluate(() => {
+  // Item 1: the card matches the Sessions panel card and the frame is clipped to
+  // it, with the nav as the collapsed icon rail and as the expanded sidebar
+  // (the same <nav> classes in a 74px or 236px track; navRail.tsx:457,
+  // useRailWidth.ts:20-21).
+  const measure = () => page.evaluate(() => {
     const el = document.querySelector('[data-testid="vscode-pane-card"]');
     const host = document.querySelector('div[data-vscode-pane-frame-host]');
     const main = document.getElementById('main-content');
     const rail = document.getElementById('rail');
-    if (!el || !host) return null;
+    const shell = document.getElementById('shell');
+    const bar = document.querySelector('[role="toolbar"]');
+    const hair = document.getElementById('rail-hairline');
+    if (!el || !host || !bar) return null;
     const cs = getComputedStyle(el);
     const ms = getComputedStyle(main);
+    const rs = getComputedStyle(rail);
     const r = el.getBoundingClientRect();
     const hr = host.getBoundingClientRect();
     const mr = main.getBoundingClientRect();
     const rl = rail.getBoundingClientRect();
+    const sl = shell.getBoundingClientRect();
+    const br = bar.getBoundingClientRect();
+    const hl = hair.getBoundingClientRect();
+    const r1 = (n) => Math.round(n * 10) / 10;
     return {
-      radius: cs.borderTopLeftRadius, border: cs.borderTopWidth, bg: cs.backgroundColor,
+      railWidth: r1(rl.width + 16),
+      radius: cs.borderTopLeftRadius, border: cs.borderTopWidth, railRadius: rs.borderTopLeftRadius, railBorder: rs.borderTopWidth,
+      bg: cs.backgroundColor,
       inset: [r.left - mr.left, r.top - mr.top, mr.right - r.right, mr.bottom - r.bottom].map((n) => Math.round(n)),
       mainPadding: [ms.paddingTop, ms.paddingRight, ms.paddingBottom, ms.paddingLeft].join(' '),
-      railGap: Math.round((r.left - rl.right) * 10) / 10,
-      railTop: Math.round((r.top - rl.top) * 10) / 10,
-      railBottom: Math.round((r.bottom - rl.bottom) * 10) / 10,
-      railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), getComputedStyle(rail).marginBottom].join(' '),
-      clip: host.style.clipPath, hostInside: hr.left >= r.left && hr.right <= r.right + 0.5 && hr.bottom <= r.bottom + 0.5 && hr.top >= r.top,
-      bar: document.querySelector('[role="toolbar"]').getBoundingClientRect().height,
+      railGap: r1(r.left - rl.right),
+      railTop: r1(r.top - rl.top),
+      railBottom: r1(r.bottom - rl.bottom),
+      // The rail's own left inset, so the card's right inset can be compared with it.
+      railLeft: r1(rl.left - sl.left),
+      railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), rs.marginBottom].join(' '),
+      clip: host.style.clipPath,
+      // Frame edges against the card's inner edges and the toolbar's bottom: 0 = no seam, no overlap.
+      seams: [hr.top - br.bottom, hr.left - (r.left + 1), (r.right - 1) - hr.right, (r.bottom - 1) - hr.bottom].map(r1),
+      bar: r1(br.height),
+      barTop: r1(br.top - r.top),
+      // The toolbar's bottom border (its last 1px) and its content centre, from the card's outer top.
+      barLine: r1(br.bottom - 1 - r.top),
+      barCentre: r1(br.top + (br.height - 1) / 2 - r.top),
+      // The expanded sidebar's header hairline, from the rail's outer top (null when hidden).
+      hairline: hl.height ? r1(hl.top - rl.top) : null,
     };
   });
-  // The stand-in reproduces App.tsx: <main> unpadded, the rail card's top level
-  // with <main>'s top, 8px from <main> on the right and 8px up from the bottom.
-  check('stand-in reproduces the dashboard shell (unpadded <main>; rail card top at <main> top, 8px right and bottom margins)',
-    card && card.mainPadding === '0px 0px 0px 0px' && card.railShape === '0 8 8px', card && `${card.mainPadding}; rail ${card.railShape}`);
-  // The Sessions card: no margin of its own, drawer pb-2 (listShell.ts, OverlayDrawer.tsx).
-  check('pane card sits where the Sessions card does: 8px from the rail card, top and bottom level with it, flush left and top in <main>, 8px right and bottom',
-    card && card.railGap === 8 && card.railTop === 0 && card.railBottom === 0 && JSON.stringify(card.inset) === '[0,0,8,8]', card && `gap ${card.railGap}, top ${card.railTop}, bottom ${card.railBottom}, inset ${JSON.stringify(card.inset)}`);
-  check('pane card has the Sessions panel radius and border (16px, 1px)',
-    card && card.radius === '16px' && card.border === '1px', JSON.stringify(card && { radius: card.radius, border: card.border }));
-  check('frame sits inside the card and is clipped to its rounded bottom corners',
-    card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
-  check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
+  for (const mode of ['collapsed', 'expanded']) {
+    await page.evaluate((m) => window.__standin.setNav(m), mode);
+    await sleep(400);
+    const card = await measure();
+    const tag = `[${mode} nav]`;
+    // The stand-in reproduces App.tsx: <main> unpadded, the rail card's top level
+    // with <main>'s top, 8px from <main> on the right and 8px up from the bottom.
+    check(`${tag} stand-in reproduces the dashboard shell (${mode === 'expanded' ? '236' : '74'}px track; unpadded <main>; rail card top at <main> top, 8px right and bottom margins; header hairline ${mode === 'expanded' ? 'at 45px' : 'hidden'})`,
+      card && card.mainPadding === '0px 0px 0px 0px' && card.railShape === '0 8 8px' && card.railWidth === (mode === 'expanded' ? 236 : 74) &&
+        card.hairline === (mode === 'expanded' ? 45 : null),
+      card && `${card.mainPadding}; rail ${card.railShape}, track ${card.railWidth}, hairline ${card.hairline}`);
+    // The Sessions card: no margin of its own, drawer pb-2 (listShell.ts, OverlayDrawer.tsx).
+    check(`${tag} pane card sits where the Sessions card does: 8px from the rail card, top and bottom level with it, flush left and top in <main>, 8px right and bottom (= the rail's 8px left inset)`,
+      card && card.railGap === 8 && card.railTop === 0 && card.railBottom === 0 && JSON.stringify(card.inset) === '[0,0,8,8]' && card.railLeft === 8,
+      card && `gap ${card.railGap}, top ${card.railTop}, bottom ${card.railBottom}, inset ${JSON.stringify(card.inset)}, rail left ${card.railLeft}`);
+    check(`${tag} pane card has the rail and Sessions panel radius and border (16px, 1px)`,
+      card && card.radius === '16px' && card.border === '1px' && card.radius === card.railRadius && card.border === card.railBorder,
+      JSON.stringify(card && { radius: card.radius, border: card.border, rail: [card.railRadius, card.railBorder] }));
+    check(`${tag} frame fills the card below the toolbar with no seam or overlap, clipped to the 15px inner radius`,
+      card && card.seams.every((n) => Math.abs(n) <= 0.5) && /round 0px 0px 15px 15px/.test(card.clip), card && `${JSON.stringify(card.seams)}; ${card.clip}`);
+    check(`${tag} toolbar: 45px strip under the card's top border, centre on the 23px header line, bottom border at 45px${mode === 'expanded' ? ' level with the sidebar hairline' : ''}`,
+      card && card.bar === 45 && card.barTop === 1 && card.barCentre === 23 && card.barLine === 45 && (mode !== 'expanded' || card.barLine === card.hairline),
+      card && `bar ${card.bar}, top ${card.barTop}, centre ${card.barCentre}, line ${card.barLine}, hairline ${card.hairline}`);
+  }
+  await page.evaluate(() => window.__standin.setNav('collapsed'));
+  await sleep(300);
 
   // The frame is placed on change, not every animation frame, and still
   // follows the card through a window resize and a layout shift.
@@ -721,6 +759,7 @@ async function main() {
       }
       await historyChecks({ frame, api, check, slot: native.s1, since: tR });
       await sessionTargetChecks({ page, frame, check, shotDir: path.join(ROOT, '.cache', 'smoke') });
+      await extensionIconChecks({ page, frame, check, appRoot: APP_ROOT, dataDir, shotDir: path.join(ROOT, '.cache', 'smoke') });
       await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'native-chat.png') }).catch(() => {});
     } else {
       check('native chat session checks ran', false, 'the workbench or the first chat turn was missing');

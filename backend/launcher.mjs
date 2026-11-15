@@ -274,9 +274,8 @@ function installBridgeExtension() {
   const dest = path.join(extDir, folderName);
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
-  // The app icon doubles as the chat participant's avatar.
-  const icon = path.join(APP_ROOT, 'assets', 'icon.png');
-  if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(dest, 'icon.png'));
+  // The extension ships its own icon.png (the Kiro Crew mark): it is the
+  // Extensions-view icon and the chat participant's and sessions' avatar.
   for (const stale of staleBridgeFolders(listDirs(extDir), folderName)) {
     fs.rmSync(path.join(extDir, stale), { recursive: true, force: true });
   }

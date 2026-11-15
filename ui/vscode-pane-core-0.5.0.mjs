@@ -20,8 +20,26 @@ export const API = '/apps/vscode-pane/api';
  *    (components/OverlayDrawer.tsx), so it starts at <main>'s left and top:
  *    8px from the rail card, top aligned with it, bottom 8px up like the rail.
  * The right side keeps the 8px inset it had.
+ *
+ * The same values hold for the collapsed icon rail and the expanded sidebar:
+ * both are one <nav> with the same `mx-2 mt-0 mb-2 rounded-xl` classes
+ * (navRail.tsx:457); only its grid track changes, 74px or 236px
+ * (hooks/useRailWidth.ts:20-21, App.tsx grid-template-columns). The shipped
+ * 0.13.0-rc.1 bundle has the same classes and widths.
  */
 export const CARD_MARGIN = Object.freeze({ top: 0, right: 8, bottom: 8, left: 0 });
+
+/**
+ * Height of the card's toolbar strip, border-box, including its 1px bottom
+ * border. Kiro Crew lines panel headers up on one line 23px below the panel's
+ * outer top (components/listShell.ts LIST_HEADER_CLS; shell/nav/railChrome.tsx),
+ * and the expanded sidebar draws a hairline under its header at
+ * 1 (card border) + 8 (pt-2) + 28 (w-7 h-7 logo row) + 6 (mb-1.5) + 2 (gap-0.5)
+ * = 45px below its outer top (navRail.tsx:149-154). With the card's 1px top
+ * border, a 45px strip puts our bottom border on that hairline (45-46px) and
+ * our controls' centre on the 23px line (1 + 44 / 2).
+ */
+export const BAR_HEIGHT = 45;
 
 /**
  * The dashboard theme tokens sent to the backend (POST /api/theme). Names come

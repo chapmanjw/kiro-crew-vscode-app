@@ -74,9 +74,30 @@ test('the flat marks are what scripts/render-icon.mjs builds from ui/icon.svg', 
   assert.ok(marks.lit.includes(`.b{fill:var(--ico-b,${NEUTRAL.lit.light.b})}`));
 });
 
-test('the full-colour PNG stays only as the VS Code chat avatar', () => {
-  assert.ok(isPng(fs.readFileSync(path.join(ROOT, 'assets', 'icon.png'))));
-  assert.match(read('backend/launcher.mjs'), /path\.join\(APP_ROOT, 'assets', 'icon\.png'\)/);
+test('the bridge extension ships the Kiro Crew mark: a PNG icon >= 128px and a currentColor container SVG', () => {
+  const ext = path.join(ROOT, 'extension', 'kiro-crew-bridge');
+  const pkg = JSON.parse(fs.readFileSync(path.join(ext, 'package.json'), 'utf8'));
+  assert.equal(pkg.icon, 'icon.png');
+  const png = fs.readFileSync(path.join(ext, pkg.icon));
+  assert.ok(isPng(png), 'icon.png is a PNG');
+  // IHDR: width and height are the big-endian words at bytes 16 and 20.
+  const [w, h] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+  assert.ok(w >= 128 && h >= 128 && w === h, `${w}x${h}`);
+  // The participant and session avatars load the same file (extension.js, sessions.js),
+  // and the launcher no longer overwrites it with the VS Code mark.
+  assert.match(fs.readFileSync(path.join(ext, 'extension.js'), 'utf8'), /joinPath\(context\.extensionUri, 'icon\.png'\)/);
+  assert.doesNotMatch(read('backend/launcher.mjs'), /assets', 'icon\.png'/);
+  const icons = new Set([
+    ...pkg.contributes.viewsContainers.secondarySidebar.map((c) => c.icon),
+    ...Object.values(pkg.contributes.views).flat().map((v) => v.icon).filter(Boolean),
+  ]);
+  assert.deepEqual([...icons], ['media/kiro-crew.svg']);
+  const svg = fs.readFileSync(path.join(ext, 'media', 'kiro-crew.svg'), 'utf8');
+  assert.deepEqual(svgProblems(svg), []);
+  assert.match(svg, /stroke="currentColor"/);
+  // Monochrome: currentColor is the only paint.
+  const paints = [...svg.matchAll(/(?:fill|stroke)="([^"]+)"/g)].map((m) => m[1]).filter((v) => v !== 'none');
+  assert.ok(paints.length && paints.every((v) => v === 'currentColor'), JSON.stringify(paints));
 });
 
 test('svgProblems rejects broken or scripted SVG', () => {

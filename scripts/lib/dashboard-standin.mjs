@@ -167,9 +167,25 @@ html,body{margin:0;height:100%;background:var(--bg,#808080);color:var(--text,#00
    (hooks/useRailWidth.ts RAIL_W_COLLAPSED), the rail card \`mx-2 mt-0 mb-2\` with
    rounded-xl and a 1px border (shell/nav/navRail.tsx), and <main> with no padding. */
 #shell{display:grid;grid-template-rows:42px minmax(0,1fr);grid-template-columns:74px minmax(0,1fr);height:100vh}
+/* The expanded sidebar: the same <nav> in a 236px track (RAIL_W_EXPANDED). */
+#shell[data-nav="expanded"]{grid-template-columns:236px minmax(0,1fr)}
 #topbar{grid-column:1 / -1;display:flex;align-items:center;padding:0 12px;color:var(--muted)}
-#rail{margin:0 8px 8px 8px;min-width:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;gap:6px;padding:8px 0;align-items:center}
+#rail{margin:0 8px 8px 8px;min-width:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--shadow-sm)}
+/* navRail.tsx:149-154: \`shrink-0 flex flex-col gap-0.5 px-2 pt-2\` holding the
+   brand row (railChrome.tsx: \`mb-1.5\`, a w-7 h-7 logo expanded, w-9 h-9 + mt-1
+   collapsed) and, expanded only, the \`h-px bg-border mb-[7px]\` hairline. */
+#rail-head{flex:none;display:flex;flex-direction:column;gap:2px;padding:8px 8px 0}
+#rail-brand{display:flex;align-items:center;gap:10px;margin-bottom:6px;color:var(--muted);font:700 13px system-ui;letter-spacing:.14em;white-space:nowrap;overflow:hidden}
+#rail-logo{flex:none;width:36px;height:36px;margin-top:4px;border-radius:10px;background:var(--accent)}
+#rail-brand span{display:none}
+#rail-hairline{display:none;height:1px;background:var(--border);margin-bottom:7px}
+#shell[data-nav="expanded"] #rail-logo{width:28px;height:28px;margin-top:0}
+#shell[data-nav="expanded"] #rail-brand span{display:inline}
+#shell[data-nav="expanded"] #rail-hairline{display:block}
+#rail-items{display:flex;flex-direction:column;gap:6px;align-items:center;padding:8px 0}
 #rail button{width:44px;height:36px;border-radius:10px;border:0;background:transparent;color:var(--muted);cursor:pointer;font:11px system-ui}
+#shell[data-nav="expanded"] #rail-items{align-items:stretch;padding:0 8px}
+#shell[data-nav="expanded"] #rail button{width:auto;text-align:left;padding:0 10px}
 #main-content{display:flex;flex-direction:column;min-height:0;min-width:0;padding:0;overflow-x:hidden;overflow-y:auto}
 .chat{margin:8px;flex:1;display:flex;flex-direction:column;justify-content:flex-end;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;padding:12px}
 .shelf{display:flex;align-items:center;gap:8px;position:relative}
@@ -196,7 +212,7 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
     },
   })}</script></head>
 <body>
-<div id="shell"><header id="topbar">Kiro Crew</header><nav id="rail"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">VS Code</button></nav>
+<div id="shell"><header id="topbar">Kiro Crew</header><nav id="rail"><div id="rail-head"><div id="rail-brand"><i id="rail-logo"></i><span>KIRO CREW</span></div><div id="rail-hairline"></div></div><div id="rail-items"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">VS Code</button></div></nav>
 <main id="main-content"></main></div>
 <script type="module">
 import React from 'react';
@@ -218,6 +234,7 @@ const listeners = new Set();
 window.__standin = {
   navigate(p) { history.pushState(null, '', p); listeners.forEach((f) => f()); },
   setTheme(name) { document.documentElement.dataset.theme = name; },
+  setNav(mode) { document.getElementById('shell').dataset.nav = mode; },
   mounts: 0, unmounts: 0,
 };
 window.addEventListener('popstate', () => listeners.forEach((f) => f()));
