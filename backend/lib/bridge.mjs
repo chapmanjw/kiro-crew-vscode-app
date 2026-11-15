@@ -2,8 +2,10 @@
 // shared between the launcher API and the extension's long poll.
 
 export class Bridge {
-  constructor({ now = () => Date.now(), connectedWindowMs = 40_000, maxQueue = 100 } = {}) {
+  constructor({ now = () => Date.now(), connectedWindowMs = 40_000, maxQueue = 100, commandTtlMs = 60_000 } = {}) {
     this.now = now;
+    this.commandTtlMs = commandTtlMs;
+    this.expiry = new Map(); // command id -> expiry time; a command older than this is dropped undelivered
     this.connectedWindowMs = connectedWindowMs;
     this.maxQueue = maxQueue;
     this.queue = [];
@@ -22,11 +24,24 @@ export class Bridge {
     return this.activePolls > 0 || this.now() - this.lastSeen < this.connectedWindowMs;
   }
 
+  /** Drop queued commands past their TTL so a late VS Code does not replay stale requests. */
+  prune() {
+    const now = this.now();
+    if (!this.queue.length) return;
+    this.queue = this.queue.filter((c) => {
+      const keep = (this.expiry.get(c.id) ?? Infinity) > now;
+      if (!keep) this.expiry.delete(c.id);
+      return keep;
+    });
+  }
+
   /** Queue a command; resolves with the extension's result or {ok:false, timeout:true}. */
   enqueue(command, timeoutMs = 8000) {
+    this.prune();
     const id = String(this.nextId++);
     const entry = { id, ...command };
-    if (this.queue.length >= this.maxQueue) this.queue.shift();
+    this.expiry.set(id, this.now() + this.commandTtlMs);
+    if (this.queue.length >= this.maxQueue) this.expiry.delete(this.queue.shift().id);
     this.queue.push(entry);
     const done = new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -45,10 +60,12 @@ export class Bridge {
   }
 
   flush() {
+    this.prune();
     if (!this.queue.length) return;
     for (const w of this.waiters) {
       this.waiters.delete(w);
       const batch = this.queue.splice(0);
+      for (const c of batch) this.expiry.delete(c.id);
       w(batch);
       return;
     }
@@ -60,7 +77,12 @@ export class Bridge {
    */
   take(waitMs = 25_000, signal) {
     this.lastSeen = this.now();
-    if (this.queue.length) return Promise.resolve(this.queue.splice(0));
+    this.prune();
+    if (this.queue.length) {
+      const batch = this.queue.splice(0);
+      for (const c of batch) this.expiry.delete(c.id);
+      return Promise.resolve(batch);
+    }
     if (signal?.aborted) return Promise.resolve([]);
     this.activePolls++;
     return new Promise((resolve) => {
@@ -83,9 +105,10 @@ export class Bridge {
     });
   }
 
-  /** Put undelivered commands back at the front of the queue. */
+  /** Put undelivered commands back at the front of the queue (with a fresh TTL). */
   requeue(batch) {
     if (batch && batch.length) {
+      for (const c of batch) this.expiry.set(c.id, this.now() + this.commandTtlMs);
       this.queue.unshift(...batch);
       this.flush();
     }
@@ -107,6 +130,7 @@ export class Bridge {
         this.extension = {
           version: str(ev.version),
           workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
+          spawnTracked: ev.spawnTracked === true,
           at,
         };
         return true;
@@ -128,7 +152,16 @@ export class Bridge {
     }
   }
 
+  /** The extension host went away (server restart): forget it until it says hello again. */
+  resetConnection() {
+    this.cancelWaiters();
+    this.lastSeen = 0;
+    this.extension = null;
+    this.editor = null;
+  }
+
   snapshot() {
+    this.prune();
     return {
       connected: this.connected,
       extension: this.extension,

@@ -1,6 +1,6 @@
 {
   "name": "vscode-pane",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "VS Code",
   "description": "A full VS Code in a Kiro Crew pane. The app runs the official VS Code server on this machine and shows its workbench in the page, with a bridge so Kiro Crew can open files in VS Code and see which file VS Code has open.",
   "author": "John Chapman",
@@ -26,7 +26,7 @@
     "healthCheck": "/health"
   },
   "ui": {
-    "entry": "vscode-pane-0.1.0.mjs",
+    "entry": "vscode-pane-0.2.0.mjs",
     "pages": [
       {
         "route": "/apps/vscode-pane",

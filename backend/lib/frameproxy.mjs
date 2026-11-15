@@ -145,3 +145,22 @@ export function createFrameProxy(getTarget) {
 
   return { handleRequest, handleUpgrade };
 }
+
+/** Host header names a loopback address (blocks DNS rebinding to the launcher). */
+export function isLoopbackHost(hostHeader) {
+  const h = String(hostHeader || '').replace(/:\d+$/, '').toLowerCase();
+  return h === '127.0.0.1' || h === 'localhost' || h === '[::1]';
+}
+
+/**
+ * A WebSocket upgrade to the workbench must come to a loopback Host and either
+ * carry no Origin (non-browser clients) or the frame's own origin
+ * `http://127.0.0.1:<launcher port>`, which is what the workbench in the
+ * dashboard's iframe sends. Any other web page is refused.
+ */
+export function upgradeAllowed({ host, origin, listenPort }) {
+  if (!isLoopbackHost(host)) return false;
+  if (origin === undefined || origin === null || origin === '') return true;
+  const o = String(origin).toLowerCase();
+  return o === `http://127.0.0.1:${listenPort}` || o === `http://localhost:${listenPort}`;
+}

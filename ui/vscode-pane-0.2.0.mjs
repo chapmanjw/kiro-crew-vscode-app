@@ -106,7 +106,8 @@ export default function VsCodePane() {
     let timer;
     const tick = async () => {
       await loadSession();
-      if (alive) timer = setTimeout(tick, ready ? 10000 : 1500);
+      // Every 2 s while the frame is up, so a server restart (new generation) is seen quickly.
+      if (alive) timer = setTimeout(tick, ready ? 2000 : 1500);
     };
     tick();
     return () => {
@@ -148,7 +149,9 @@ export default function VsCodePane() {
 
   // Keep the iframe on one URL per folder/reload so polling never reloads it.
   if (ready) {
-    const key = `${session.url}#${frameNonce}`;
+    // A new server generation means the open workbench cannot reconnect (the new
+    // server does not know its reconnection token), so remount the frame.
+    const key = `${session.url}#${frameNonce}#${session.generation || 0}`;
     if (!frameUrl.current || frameUrl.current.key !== key) {
       frameUrl.current = { key, url: session.url };
     }

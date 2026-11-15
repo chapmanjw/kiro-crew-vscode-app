@@ -2,7 +2,7 @@
   "name": "kiro-crew-bridge",
   "displayName": "Kiro Crew Bridge",
   "description": "Connects this VS Code to the Kiro Crew vscode-pane app: opens files Kiro Crew asks for and reports the active editor back.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "kiro-crew",
   "license": "MIT",
   "engines": {

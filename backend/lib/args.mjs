@@ -34,23 +34,71 @@ export const STRIPPED_ENV = [
   'VSCODE_PANE_DATA_DIR',
 ];
 
+/** Gateway tracking variables: kept on the server process, removed from terminals. */
+export const TRACKING_ENV = ['KIROCREW_SPAWNED', 'KIROCREW_SPAWN_INSTANCE'];
+
 /**
- * Environment for the server: the launcher's own env minus secrets, plus the
- * bridge address and secret the companion extension reads.
- * KIROCREW_SPAWNED/KIROCREW_SPAWN_INSTANCE stay so the gateway can reap the tree.
+ * Environment for the server.
+ *
+ * With `userEnv` (Windows: the user's logon environment from userenv.mjs) the
+ * server starts from that instead of the gateway's allowlisted env, so VS Code
+ * terminals look like terminals the user opened. Only the gateway's tracking
+ * variables are carried over from the launcher, so the gateway's Linux orphan
+ * reap still recognises the server's process group; terminals drop them again
+ * through terminalEnvSettings(). Without `userEnv` the launcher env is used.
+ * Secrets in STRIPPED_ENV and any host VSCODE_* variables are always removed.
  */
-export function buildServerEnv(baseEnv, { bridgeUrl, bridgeSecret }) {
+export function buildServerEnv(baseEnv, { bridgeUrl, bridgeSecret, userEnv = null }) {
   const env = {};
   const stripped = new Set(STRIPPED_ENV.map((k) => k.toUpperCase()));
-  for (const [k, v] of Object.entries(baseEnv)) {
-    if (v === undefined) continue;
-    if (stripped.has(k.toUpperCase())) continue;
-    if (k.toUpperCase().startsWith('VSCODE_')) continue; // never let a host VS Code's IPC vars bleed in
-    env[k] = v;
+  const add = (k, v) => {
+    if (v === undefined || v === null) return;
+    if (stripped.has(k.toUpperCase())) return;
+    if (k.toUpperCase().startsWith('VSCODE_')) return; // never let a host VS Code's IPC vars bleed in
+    env[k] = String(v);
+  };
+  if (userEnv) {
+    for (const [k, v] of Object.entries(userEnv)) add(k, v);
+    for (const name of TRACKING_ENV) {
+      const k = Object.keys(baseEnv).find((x) => x.toUpperCase() === name);
+      if (k) add(name, baseEnv[k]);
+    }
+  } else {
+    for (const [k, v] of Object.entries(baseEnv)) add(k, v);
   }
   env.KIROCREW_VSCODE_BRIDGE_URL = bridgeUrl;
   env.KIROCREW_VSCODE_BRIDGE_SECRET = bridgeSecret;
   return env;
+}
+
+/** Variables VS Code terminals must not inherit from the server process. */
+export const TERMINAL_UNSET = [...TRACKING_ENV, 'KIROCREW_VSCODE_BRIDGE_URL', 'KIROCREW_VSCODE_BRIDGE_SECRET'];
+
+/**
+ * Rewrite the server's Machine settings.json so integrated terminals unset
+ * TERMINAL_UNSET (`terminal.integrated.env.<os>` with `null` deletes a
+ * variable). Other settings are kept. Returns null when the existing file is
+ * not plain JSON (for example it has comments), so a user's file is never
+ * clobbered.
+ */
+export function terminalEnvSettings(existingText) {
+  let obj = {};
+  if (existingText && existingText.trim()) {
+    try {
+      obj = JSON.parse(existingText);
+    } catch {
+      return null;
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  }
+  for (const osName of ['windows', 'linux', 'osx']) {
+    const key = `terminal.integrated.env.${osName}`;
+    const cur = obj[key] && typeof obj[key] === 'object' ? obj[key] : {};
+    const next = { ...cur };
+    for (const name of TERMINAL_UNSET) next[name] = null;
+    obj[key] = next;
+  }
+  return JSON.stringify(obj, null, 2) + '\n';
 }
 
 /**

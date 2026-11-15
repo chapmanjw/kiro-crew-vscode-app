@@ -340,7 +340,7 @@ test('downloadFile follows a redirect and extractArchive unpacks a zip build', {
     });
     await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
     const dest = path.join(tmp, 'dl.zip');
-    const { bytes } = await downloadFile(`http://127.0.0.1:${srv.address().port}/redirect`, dest);
+    const { bytes } = await downloadFile(`http://127.0.0.1:${srv.address().port}/redirect`, dest, { allowHttp: true });
     srv.close();
     assert.equal(bytes, fs.statSync(zip).size);
     const out = path.join(tmp, 'out');

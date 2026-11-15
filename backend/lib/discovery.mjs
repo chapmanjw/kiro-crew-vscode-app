@@ -88,3 +88,11 @@ export function serverDownloadUrl(commit, platform = process.platform, arch = pr
   if (!slug) throw new Error(`no VS Code server build for ${platform}/${arch}`);
   return `https://update.code.visualstudio.com/commit:${commit}/server-${slug}-web/stable`;
 }
+
+/** Update-service metadata for a server build: `{url, sha256hash, version, ...}`. */
+export function serverMetadataUrl(commit, platform = process.platform, arch = process.arch) {
+  if (!COMMIT_RE.test(commit || '')) throw new Error('invalid commit id');
+  const slug = serverPlatformSlug(platform, arch);
+  if (!slug) throw new Error(`no VS Code server build for ${platform}/${arch}`);
+  return `https://update.code.visualstudio.com/api/versions/commit:${commit}/server-${slug}-web/stable`;
+}

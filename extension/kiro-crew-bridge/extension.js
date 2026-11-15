@@ -143,6 +143,9 @@ function sendHello() {
     type: 'hello',
     version: VERSION,
     workspaceFolders: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath),
+    // Whether this extension host (and so the server process) still carries the
+    // gateway's process-tracking variable. A boolean only, never the value.
+    spawnTracked: !!process.env.KIROCREW_SPAWN_INSTANCE,
   });
 }
 
@@ -202,6 +205,8 @@ function activate(context) {
   );
 
   log(`starting bridge to ${BRIDGE_URL}`);
+  // Say hello right away; the first long poll may not return for 25 s.
+  sendHello().then(() => sendEditor(vscode.window.activeTextEditor));
   pollLoop();
 }
 

@@ -23,6 +23,30 @@ import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const KEEP = argv.includes('--keep');
+// --minimal-env starts the launcher with only the variables the Kiro Crew
+// gateway passes to app backends (kiro_crew/apps/registry_pipeline/
+// subprocess_env.py, _SAFE_ENV_KEYS), like a real install.
+const MINIMAL_ENV = argv.includes('--minimal-env');
+const GATEWAY_SAFE_ENV = new Set([
+  'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TMPDIR', 'APPDATA', 'COMSPEC',
+  'LOCALAPPDATA', 'PATHEXT', 'PROGRAMDATA', 'PROGRAMFILES', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE', 'WINDIR',
+  'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID',
+  'JAVA_HOME', 'NODE_PATH', 'NVM_DIR', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_DEFAULT_ENV', 'CONDA_PREFIX', 'ANT_HOME',
+  'GRADLE_USER_HOME', 'MAVEN_OPTS', 'GIT_SSH', 'GIT_SSH_COMMAND',
+]);
+function launcherBaseEnv() {
+  if (!MINIMAL_ENV) return { ...process.env };
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => GATEWAY_SAFE_ENV.has(k.toUpperCase())));
+}
+
+/** Names (never values) of the user's own HKCU variables the gateway does not pass on. */
+function userOnlyVarName() {
+  const r = spawnSync('reg', ['query', 'HKCU\\Environment'], { encoding: 'utf8', windowsHide: true });
+  const names = [...String(r.stdout || '').matchAll(/^\s{4}(\S+)\s+REG_/gm)].map((m) => m[1]);
+  const pick = names.find((n) => n.toUpperCase() === 'GOPATH') ||
+    names.find((n) => !GATEWAY_SAFE_ENV.has(n.toUpperCase()) && !['PATH', 'TEMP', 'TMP'].includes(n.toUpperCase()));
+  return pick || null;
+}
 const serverDirArg = argv.includes('--server-dir') ? argv[argv.indexOf('--server-dir') + 1] : null;
 // --app-root runs the launcher and UI from a staged copy (scripts/stage.mjs) and
 // lets it find the server build through its own dev-config.json.
@@ -92,19 +116,19 @@ async function api(method, p, json) {
   return { ...r, json: parsed };
 }
 
-function wsUpgrade(port, p) {
+function wsUpgrade(port, p, { origin = `http://127.0.0.1:${port}`, host = `127.0.0.1:${port}` } = {}) {
   return new Promise((resolve) => {
     const sock = net.connect(port, '127.0.0.1', () => {
       const key = crypto.randomBytes(16).toString('base64');
       sock.write(
         [
           `GET ${p} HTTP/1.1`,
-          `Host: 127.0.0.1:${port}`,
+          `Host: ${host}`,
           'Upgrade: websocket',
           'Connection: Upgrade',
           `Sec-WebSocket-Key: ${key}`,
           'Sec-WebSocket-Version: 13',
-          'Origin: http://127.0.0.1:' + port,
+          ...(origin ? [`Origin: ${origin}`] : []),
           '',
           '',
         ].join('\r\n'),
@@ -182,13 +206,16 @@ async function main() {
 
   SECRET = crypto.randomBytes(24).toString('hex');
   PORT = await freePort();
-  console.log(`run dir ${runDir}\nserver build ${serverDir}\nlauncher port ${PORT}`);
+  console.log(`run dir ${runDir}\nserver build ${serverDir}\nlauncher port ${PORT}${MINIMAL_ENV ? '\nlauncher env: gateway minimal_env allowlist only' : ''}`);
 
   const launcher = spawn(process.execPath, [path.join(APP_ROOT, 'backend', 'launcher.mjs')], {
     cwd: APP_ROOT,
     env: {
-      ...process.env,
+      ...launcherBaseEnv(),
       PORT: String(PORT),
+      // What the gateway sets on every backend; terminals must not inherit them.
+      KIROCREW_SPAWNED: '1',
+      KIROCREW_SPAWN_INSTANCE: `smoke${crypto.randomBytes(4).toString('hex')}`,
       KIROCREW_PROXY_SECRET: SECRET,
       KIROCREW_APP_NAME: 'vscode-pane',
       VSCODE_PANE_DATA_DIR: dataDir,
@@ -258,6 +285,13 @@ async function main() {
     // 5. websocket
     const wsLine = await wsUpgrade(PORT, `${wbUrl.pathname}?reconnectionToken=${crypto.randomUUID()}&reconnection=false&skipWebSocketFrames=false`);
     check('WebSocket upgrade through the launcher returns 101', /^HTTP\/1\.1 101/.test(wsLine), wsLine);
+    const wsPath = `${wbUrl.pathname}?reconnectionToken=${crypto.randomUUID()}&reconnection=false&skipWebSocketFrames=false`;
+    const foreign = await wsUpgrade(PORT, wsPath, { origin: 'https://evil.example' });
+    check('WebSocket upgrade from a foreign Origin is refused', /^HTTP\/1\.1 403/.test(foreign), foreign);
+    const dash = await wsUpgrade(PORT, wsPath, { origin: 'http://localhost:5476' });
+    check('WebSocket upgrade from the dashboard origin itself is refused (only the frame may connect)', /^HTTP\/1\.1 403/.test(dash), dash);
+    const rebound = await rawRequest({ port: PORT, path: wbUrl.pathname, headers: { host: 'rebound.example' } });
+    check('workbench request with a non-loopback Host is refused', rebound.status === 403, String(rebound.status));
 
     // 6. headless browser loads the app's real UI page in a dashboard stand-in on
     //    http://localhost:<port>; the page frames the workbench on 127.0.0.1 (cross-site).
@@ -296,6 +330,44 @@ async function main() {
     }
     check('workbench renders inside a cross-site iframe (localhost page -> 127.0.0.1 frame)', workbenchUp, frameErrors.slice(0, 3).join('; '));
 
+    // 6b. a real VS Code terminal sees the user's environment, not the gateway's
+    if (process.platform === 'win32' && workbenchUp) {
+      const userVar = userOnlyVarName();
+      const names = ['PSModulePath', 'USERNAME', 'ProgramFiles(x86)', ...(userVar ? [userVar] : []), 'KIROCREW_SPAWNED', 'KIROCREW_SPAWN_INSTANCE', 'KIROCREW_VSCODE_BRIDGE_SECRET', 'KIROCREW_PROXY_SECRET'];
+      const outFile = path.join(runDir, 'terminal-env.txt');
+      // Writes only set/unset/unexpanded per name, never a value.
+      const probe = path.join(runDir, 'terminal-probe.ps1');
+      fs.writeFileSync(
+        probe,
+        `${names.map((n) => `'${n}'`).join(',')} | ForEach-Object { $v = [Environment]::GetEnvironmentVariable($_); $s = if (-not $v) { 'unset' } elseif ($v -like '*%*') { 'unexpanded' } else { 'set' }; "$_=$s" } | Set-Content -Path '${outFile}'\r\n`,
+      );
+      const cmd = `& '${probe}'`;
+      let termResult = null;
+      try {
+        await frame.locator('.monaco-workbench').click({ position: { x: 700, y: 400 } });
+        await page.keyboard.press('Control+Backquote');
+        // The terminal renders to a canvas, so there is no prompt text to wait for:
+        // wait for its input element, give the shell time to start, and retry.
+        await frame.locator('.xterm-helper-textarea').first().waitFor({ state: 'attached', timeout: 30_000 });
+        await sleep(6000);
+        for (let attempt = 0; attempt < 3 && !fs.existsSync(outFile); attempt++) {
+          await frame.locator('.xterm-helper-textarea').first().focus();
+          await page.keyboard.type(cmd, { delay: 5 });
+          await page.keyboard.press('Enter');
+          for (let i = 0; i < 20 && !fs.existsSync(outFile); i++) await sleep(500);
+        }
+        await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'terminal.png') }).catch(() => {});
+        await sleep(300);
+        termResult = Object.fromEntries(fs.readFileSync(outFile, 'utf8').trim().split(/\r?\n/).map((l) => l.split('=')));
+      } catch (e) {
+        termResult = { error: e.message };
+      }
+      const show = JSON.stringify(termResult);
+      check('VS Code terminal sees PSModulePath, USERNAME and ProgramFiles(x86)', termResult && termResult.PSModulePath === 'set' && termResult.USERNAME === 'set' && termResult['ProgramFiles(x86)'] === 'set', show);
+      check(`VS Code terminal sees the user's own variable${userVar ? ` (${userVar})` : ''}, expanded`, userVar && termResult && termResult[userVar] === 'set', show);
+      check('VS Code terminal does not inherit gateway tracking vars, the bridge secret or the proxy secret', termResult && ['KIROCREW_SPAWNED', 'KIROCREW_SPAWN_INSTANCE', 'KIROCREW_VSCODE_BRIDGE_SECRET', 'KIROCREW_PROXY_SECRET'].every((n) => termResult[n] === 'unset'), show);
+    }
+
     // 7. bridge connects (the workbench starts the remote extension host)
     let st;
     const t1 = Date.now();
@@ -305,6 +377,7 @@ async function main() {
       await sleep(1000);
     }
     check('bridge extension connected and said hello', st && st.connected && st.extension, st && JSON.stringify(st.extension));
+    check('server process keeps the gateway tracking var (seen from the extension host)', st && st.extension && st.extension.spawnTracked === true, st && st.extension && String(st.extension.spawnTracked));
 
     // 8. Kiro Crew -> VS Code: open a file at a line
     const open = await api('POST', '/api/open', { path: target, line: 3, column: 6 });
@@ -385,6 +458,24 @@ async function main() {
       }
       check('killed VS Code server is restarted and ready again', !!back, back ? `new pid ${back[1]} port ${back[2]} after ${Date.now() - t5} ms` : '');
       if (back) serverPort = Number(back[2]);
+      const after = (await api('GET', '/api/session')).json;
+      check('frame URL is unchanged across the restart', after && after.url === session.url);
+      check('server generation advanced', after && after.generation > (session.generation || 0), `${session.generation} -> ${after && after.generation}`);
+      // No page action: the UI notices the new generation, remounts the frame,
+      // and the new extension host's bridge says hello again.
+      let rehello = null;
+      const t6 = Date.now();
+      while (Date.now() - t6 < 60_000) {
+        const st2 = (await api('GET', '/api/state')).json;
+        if (st2 && st2.extension && Date.parse(st2.extension.at) > t5) {
+          rehello = st2.extension.at;
+          break;
+        }
+        await sleep(500);
+      }
+      check('bridge reconnects after the restart with no user action', !!rehello, rehello ? `${Date.now() - t5} ms after the kill` : '');
+      const reopen = await api('POST', '/api/open', { path: target, line: 4 });
+      check('POST /api/open works again after the restart', reopen.json && reopen.json.ok, JSON.stringify(reopen.json));
     }
   } catch (e) {
     check('smoke run completed without exception', false, e.message);

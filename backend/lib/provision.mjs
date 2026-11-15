@@ -5,40 +5,100 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { isServerBuild } from './discovery.mjs';
 
-/** GET `url` into `dest`, following up to 5 redirects. Reports progress via onProgress(received, total). */
-export function downloadFile(url, dest, { onProgress, maxRedirects = 5, timeoutMs = 60_000 } = {}) {
+/**
+ * Whether a download may go to `url`. Only https, so a redirect cannot
+ * downgrade the download to plain http. `allowHttp` exists for local tests.
+ */
+export function urlAllowed(url, { allowHttp = false } = {}) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  return u.protocol === 'https:' || (allowHttp && u.protocol === 'http:');
+}
+
+function get(url, { allowHttp, maxRedirects, timeoutMs }, onResponse, reject) {
+  const step = (u, left) => {
+    if (!urlAllowed(u, { allowHttp })) return reject(new Error(`refusing non-https download URL ${new URL(u).protocol}//${new URL(u).host}`));
+    const mod = u.startsWith('https:') ? https : http;
+    const req = mod.get(u, { headers: { 'user-agent': 'kiro-crew-vscode-pane' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (left <= 0) return reject(new Error('too many redirects'));
+        return step(new URL(res.headers.location, u).toString(), left - 1);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`download failed: HTTP ${res.statusCode}`));
+      }
+      onResponse(res);
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('download timed out')));
+    req.on('error', reject);
+  };
+  step(url, maxRedirects);
+}
+
+/** GET a small JSON document (https only unless allowHttp). */
+export function fetchJson(url, { allowHttp = false, maxRedirects = 5, timeoutMs = 30_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const get = (u, left) => {
-      const mod = u.startsWith('https:') ? https : http;
-      const req = mod.get(u, { headers: { 'user-agent': 'kiro-crew-vscode-pane' } }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          if (left <= 0) return reject(new Error('too many redirects'));
-          return get(new URL(res.headers.location, u).toString(), left - 1);
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`download failed: HTTP ${res.statusCode}`));
-        }
-        const total = Number(res.headers['content-length']) || 0;
-        let received = 0;
-        const out = fs.createWriteStream(dest);
-        res.on('data', (c) => {
-          received += c.length;
-          onProgress?.(received, total);
-        });
-        res.pipe(out);
-        out.on('finish', () => out.close(() => resolve({ bytes: received })));
-        out.on('error', reject);
-        res.on('error', reject);
+    get(url, { allowHttp, maxRedirects, timeoutMs }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > 1024 * 1024) res.destroy(new Error('metadata too large'));
+        else chunks.push(c);
       });
-      req.setTimeout(timeoutMs, () => req.destroy(new Error('download timed out')));
-      req.on('error', reject);
-    };
-    get(url, maxRedirects);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (e) {
+          reject(new Error(`bad metadata JSON: ${e.message}`));
+        }
+      });
+      res.on('error', reject);
+    }, reject);
+  });
+}
+
+/**
+ * GET `url` into `dest`, following up to 5 https redirects. With
+ * `expectedSha256` the file is hashed while it streams and a mismatch fails
+ * the download (and deletes the file).
+ */
+export function downloadFile(url, dest, { onProgress, maxRedirects = 5, timeoutMs = 60_000, allowHttp = false, expectedSha256 } = {}) {
+  return new Promise((resolve, reject) => {
+    get(url, { allowHttp, maxRedirects, timeoutMs }, (res) => {
+      const total = Number(res.headers['content-length']) || 0;
+      let received = 0;
+      const hash = crypto.createHash('sha256');
+      const out = fs.createWriteStream(dest);
+      res.on('data', (c) => {
+        received += c.length;
+        hash.update(c);
+        onProgress?.(received, total);
+      });
+      res.pipe(out);
+      out.on('finish', () =>
+        out.close(() => {
+          const sha256 = hash.digest('hex');
+          if (expectedSha256 && sha256.toLowerCase() !== String(expectedSha256).toLowerCase()) {
+            fs.rmSync(dest, { force: true });
+            return reject(new Error(`checksum mismatch: expected ${expectedSha256}, got ${sha256}`));
+          }
+          resolve({ bytes: received, sha256 });
+        }),
+      );
+      out.on('error', reject);
+      res.on('error', reject);
+    }, reject);
   });
 }
 
@@ -76,7 +136,7 @@ export function locateBuildRoot(dir, exists = fs.existsSync, platform = process.
  * Staged under a temp name and renamed into place so a half-unpacked build is
  * never picked up by discovery.
  */
-export async function provisionServer({ url, dataDir, commit, onStatus }) {
+export async function provisionServer({ metadataUrl, dataDir, commit, onStatus, allowHttp = false }) {
   const root = path.join(dataDir, 'server');
   const final = path.join(root, commit);
   fs.mkdirSync(root, { recursive: true });
@@ -84,8 +144,17 @@ export async function provisionServer({ url, dataDir, commit, onStatus }) {
   const archive = path.join(root, `.download-${stamp}.zip`);
   const staging = path.join(root, `.staging-${stamp}`);
   try {
+    // The update service answers with the archive URL and its SHA-256.
+    onStatus?.('Looking up VS Code server download');
+    const meta = await fetchJson(metadataUrl, { allowHttp });
+    if (!meta || typeof meta.url !== 'string' || !/^[0-9a-f]{64}$/i.test(meta.sha256hash || '')) {
+      throw new Error('update service returned no download URL or SHA-256');
+    }
+    if (meta.version && meta.version !== commit) throw new Error(`update service returned commit ${meta.version}, expected ${commit}`);
     let last = 0;
-    await downloadFile(url, archive, {
+    await downloadFile(meta.url, archive, {
+      allowHttp,
+      expectedSha256: meta.sha256hash,
       onProgress: (got, total) => {
         const now = Date.now();
         if (now - last > 1000) {

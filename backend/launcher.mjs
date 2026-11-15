@@ -18,13 +18,15 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { resolveDataDir, parseConfig, effectiveConfig } from './lib/config.mjs';
-import { parseCodeVersion, findServerBuild, serverDownloadUrl, nodeExeName } from './lib/discovery.mjs';
-import { buildServerArgs, buildServerEnv, workbenchUrl } from './lib/args.mjs';
+import { parseCodeVersion, findServerBuild, serverMetadataUrl, nodeExeName } from './lib/discovery.mjs';
+import { buildServerArgs, buildServerEnv, workbenchUrl, terminalEnvSettings } from './lib/args.mjs';
 import { verifyProxySignature, checkBridgeSecret, randomSecret, PROXY_HEADER, BRIDGE_HEADER } from './lib/auth.mjs';
 import { matchRoute, parseOpenRequest, fileMenuToCommand } from './lib/router.mjs';
 import { Bridge } from './lib/bridge.mjs';
 import { BRIDGE_ID, bridgeFolderName, upsertBridgeEntry, staleBridgeFolders } from './lib/extensions.mjs';
-import { createFrameProxy } from './lib/frameproxy.mjs';
+import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/frameproxy.mjs';
+import { RetryPolicy } from './lib/retry.mjs';
+import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
 
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -64,7 +66,12 @@ const config = effectiveConfig(fileConfig, env, { homedir: os.homedir(), appRoot
 const FRAME_KEY = randomSecret(18);
 const BASE_PATH = `/vsc-${FRAME_KEY}`;
 const BRIDGE_SECRET = randomSecret(24);
+// One connection token per launcher run, not per server start: the workbench
+// keeps the token from its config, so a reload after a server restart must
+// not need a new one. The frame path and token stay stable across restarts.
+const CONNECTION_TOKEN = randomSecret(24);
 const bridge = new Bridge();
+const retry = new RetryPolicy();
 
 const state = {
   status: 'idle', // idle | provisioning | starting | ready | error | stopped
@@ -75,7 +82,8 @@ const state = {
   token: null,
   child: null,
   startedAt: null,
-  restarts: 0,
+  generation: 0, // bumps every time a server becomes ready; the UI reloads its frame on change
+  autoRetry: true,
   stopping: false,
 };
 
@@ -113,6 +121,10 @@ function listDirs(p) {
   return fs.readdirSync(p, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
 }
 
+function provisionError(message) {
+  return Object.assign(new Error(message), { kind: 'provision' });
+}
+
 async function ensureBuild() {
   const commit = config.serverDir ? null : detectCodeVersion().commit;
   const found = findServerBuild({
@@ -129,23 +141,48 @@ async function ensureBuild() {
     try {
       setStatus('provisioning', 'Downloading VS Code server');
       const dir = await provisionServer({
-        url: serverDownloadUrl(commit),
+        metadataUrl: serverMetadataUrl(commit),
         dataDir: DATA_DIR,
         commit,
         onStatus: (m) => setStatus('provisioning', m),
       });
       return { dir, source: 'download', commit };
     } catch (e) {
-      if (!found) throw e;
+      if (!found) throw provisionError(`VS Code server download failed: ${e.message}`);
       log('download failed, using older build', e.message);
     }
   }
   if (found) return found;
-  throw new Error(
+  throw provisionError(
     commit
       ? 'No VS Code server build found and downloads are disabled. Set serverDir in data/config.json.'
       : 'No VS Code server build found and the `code` CLI is not available to say which build to download. Set serverDir in data/config.json.',
   );
+}
+
+// The user's logon environment for the server (Windows), read once per run.
+let userEnvCache;
+function serverUserEnv() {
+  if (userEnvCache !== undefined) return userEnvCache;
+  userEnvCache = process.platform === 'win32' ? windowsUserEnv(env) : null;
+  log('server env', userEnvCache ? `user logon environment (${Object.keys(userEnvCache).length} variables)` : 'launcher environment');
+  return userEnvCache;
+}
+
+/** Make VS Code terminals unset the gateway tracking and bridge variables. */
+function writeTerminalSettings() {
+  const dir = path.join(DATA_DIR, 'server-data', 'data', 'Machine');
+  const file = path.join(dir, 'settings.json');
+  fs.mkdirSync(dir, { recursive: true });
+  let existing = '';
+  try {
+    existing = fs.readFileSync(file, 'utf8');
+  } catch {
+    /* first run */
+  }
+  const next = terminalEnvSettings(existing);
+  if (next === null) log('Machine settings.json is not plain JSON; left unchanged');
+  else if (next !== existing) fs.writeFileSync(file, next);
 }
 
 function installBridgeExtension() {
@@ -227,6 +264,7 @@ function killTree(pid) {
 
 let restartTimer = null;
 let launching = false;
+let restartPending = false;
 
 async function launchServer() {
   if (launching || state.stopping) return;
@@ -239,10 +277,10 @@ async function launchServer() {
     }
     setStatus('starting', 'Starting VS Code server');
     installBridgeExtension();
+    writeTerminalSettings();
     const port = await freePort();
-    const token = randomSecret(24);
     const tokenFile = path.join(DATA_DIR, 'run', 'connection-token');
-    fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+    fs.writeFileSync(tokenFile, CONNECTION_TOKEN, { mode: 0o600 });
     fs.mkdirSync(path.join(DATA_DIR, 'server-data'), { recursive: true });
     const args = buildServerArgs({
       port,
@@ -251,7 +289,11 @@ async function launchServer() {
       workspace: fs.existsSync(config.workspace) ? config.workspace : null,
       basePath: BASE_PATH,
     });
-    const childEnv = buildServerEnv(env, { bridgeUrl: `http://${HOST}:${listenPort}`, bridgeSecret: BRIDGE_SECRET });
+    const childEnv = buildServerEnv(env, {
+      bridgeUrl: `http://${HOST}:${listenPort}`,
+      bridgeSecret: BRIDGE_SECRET,
+      userEnv: serverUserEnv(),
+    });
     const nodeExe = path.join(state.build.dir, nodeExeName());
     const serverLog = fs.createWriteStream(path.join(DATA_DIR, 'logs', 'vscode-server.log'), { flags: 'a' });
     const child = spawn(nodeExe, args, {
@@ -265,7 +307,7 @@ async function launchServer() {
     child.stderr.pipe(serverLog, { end: false });
     state.child = child;
     state.serverPort = port;
-    state.token = token;
+    state.token = CONNECTION_TOKEN;
     log('server spawned pid', child.pid, 'port', port);
     child.on('exit', (code, signal) => {
       log('server exited', code, signal);
@@ -274,8 +316,10 @@ async function launchServer() {
         state.child = null;
         state.serverPort = 0;
         state.token = null;
+        bridge.resetConnection();
       }
-      if (!state.stopping && !child.__replaced) scheduleRestart(`VS Code server exited (${code ?? signal})`);
+      // Exits before "ready" are handled by the launch's own failure path.
+      if (!state.stopping && !child.__replaced && child.__ready) onCrash(`VS Code server exited (${code ?? signal})`);
     });
     child.on('error', (e) => log('server spawn error', e.message));
     const ok = await waitReady(port, child);
@@ -283,30 +327,56 @@ async function launchServer() {
       killTree(child.pid);
       throw new Error('VS Code server did not become ready; see data/logs/vscode-server.log');
     }
+    child.__ready = true;
     state.startedAt = new Date().toISOString();
-    state.restarts = 0;
+    state.generation += 1;
+    state.autoRetry = true;
+    retry.recordSuccess();
     setStatus('ready', 'VS Code is running');
   } catch (e) {
-    setStatus('error', 'VS Code server failed to start', e.message);
-    if (!state.child) scheduleRestart(e.message, true);
+    const decision = retry.recordStartFailure(e.kind);
+    if (decision.retry) {
+      setStatus('error', 'VS Code server failed to start', `${e.message} (retrying in ${Math.round(decision.delayMs / 1000)} s)`);
+      scheduleRestart(decision.delayMs);
+    } else {
+      stopRetrying(decision.reason, e.message);
+    }
   } finally {
     launching = false;
+    if (restartPending && !state.stopping) {
+      restartPending = false;
+      restartServer();
+    }
   }
 }
 
-function scheduleRestart(reason, keepError = false) {
+function stopRetrying(reason, detail) {
+  state.autoRetry = false;
+  setStatus('error', `Stopped: ${reason}`, `${detail} Use Restart server to try again.`);
+}
+
+function onCrash(reason) {
+  const decision = retry.recordCrash();
+  if (!decision.retry) return stopRetrying(decision.reason, reason + '.');
+  setStatus('starting', `${reason}; restarting in ${Math.round(decision.delayMs / 1000)} s`);
+  scheduleRestart(decision.delayMs);
+}
+
+function scheduleRestart(delayMs) {
   if (state.stopping || restartTimer) return;
-  state.restarts += 1;
-  const delay = Math.min(30_000, 1000 * 2 ** Math.min(state.restarts - 1, 5));
-  if (!keepError) setStatus('starting', `${reason}; restarting in ${Math.round(delay / 1000)} s`);
   restartTimer = setTimeout(() => {
     restartTimer = null;
     launchServer();
-  }, delay);
+  }, delayMs);
   restartTimer.unref?.();
 }
 
+/** Manual restart (UI "Restart server" / "Try again"): resets the retry budget. */
 async function restartServer() {
+  if (launching) {
+    restartPending = true; // applied when the launch in flight settles
+    return;
+  }
   const old = state.child;
   if (old) {
     old.__replaced = true;
@@ -315,9 +385,11 @@ async function restartServer() {
   state.child = null;
   state.serverPort = 0;
   state.token = null;
+  bridge.resetConnection();
   clearTimeout(restartTimer);
   restartTimer = null;
-  state.restarts = 0;
+  retry.reset();
+  state.autoRetry = true;
   await launchServer();
 }
 
@@ -358,10 +430,6 @@ function parseJson(buf) {
   }
 }
 
-function isLoopbackHost(hostHeader) {
-  const h = String(hostHeader || '').replace(/:\d+$/, '').toLowerCase();
-  return h === '127.0.0.1' || h === 'localhost' || h === '[::1]';
-}
 
 function sessionBody(folderParam) {
   const folder = folderParam || (fs.existsSync(config.workspace) ? config.workspace : null);
@@ -374,6 +442,8 @@ function sessionBody(folderParam) {
     url: ready ? workbenchUrl({ host: HOST, port: listenPort, basePath: BASE_PATH, folder }) : null,
     folder,
     defaultFolder: config.workspace,
+    generation: state.generation,
+    autoRetry: state.autoRetry,
     server: state.build ? { source: state.build.source, commit: state.build.commit, startedAt: state.startedAt } : null,
     bridge: { connected: bridge.connected, extension: bridge.extension },
   };
@@ -388,8 +458,8 @@ async function handle(req, res) {
   const route = matchRoute(req.method, url.pathname, BASE_PATH);
   if (route.error) return sendJson(res, route.error, { error: route.error === 404 ? 'not found' : 'method not allowed' });
 
-  if (route.auth === 'frame') return frameProxy.handleRequest(req, res);
   if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
+  if (route.auth === 'frame') return frameProxy.handleRequest(req, res);
 
   let body;
   try {
@@ -477,8 +547,13 @@ const server = http.createServer((req, res) => {
 });
 server.on('upgrade', (req, socket, head) => {
   const p = (req.url || '').split('?')[0];
-  if (p === BASE_PATH || p.startsWith(BASE_PATH + '/')) return frameProxy.handleUpgrade(req, socket, head);
-  socket.destroy();
+  if (p !== BASE_PATH && !p.startsWith(BASE_PATH + '/')) return socket.destroy();
+  if (!upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort })) {
+    log('refused WebSocket upgrade', `host=${String(req.headers.host).slice(0, 80)}`, `origin=${String(req.headers.origin).slice(0, 80)}`);
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  return frameProxy.handleUpgrade(req, socket, head);
 });
 // Long polls and VS Code's long-lived requests must not be cut by Node's defaults.
 server.requestTimeout = 0;
