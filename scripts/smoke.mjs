@@ -20,6 +20,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
+import { manifestIconFiles, svgProblems, isPng } from './lib/icon-checks.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
@@ -597,6 +598,25 @@ async function main() {
     const profileDir = path.join(runDir, 'browser-profile');
     browser = await pw.chromium.launchPersistentContext(profileDir, { executablePath: exe, headless: true, viewport: { width: 1400, height: 900 } });
     const page = browser.pages()[0] || (await browser.newPage());
+    {
+      // The icon files app.json names, from the copy under test (the staged
+      // copy with --app-root): present, and SVGs parse as SVG in a real parser.
+      const icons = manifestIconFiles(APP_ROOT);
+      const bad = [];
+      for (const { field, file } of icons) {
+        if (!fs.existsSync(file)) { bad.push(`${field} missing`); continue; }
+        const buf = fs.readFileSync(file);
+        if (file.endsWith('.png')) { if (!isPng(buf)) bad.push(`${field} not a PNG`); continue; }
+        const text = buf.toString('utf8');
+        const local = svgProblems(text);
+        const parsed = await page.evaluate((t) => {
+          const d = new DOMParser().parseFromString(t, 'image/svg+xml');
+          return d.querySelector('parsererror') ? 'parsererror' : d.documentElement.namespaceURI + ' ' + d.documentElement.localName;
+        }, text);
+        if (local.length || parsed !== 'http://www.w3.org/2000/svg svg') bad.push(`${field}: ${[...local, parsed].join('; ')}`);
+      }
+      check('app.json icon files exist and parse as SVG/PNG', icons.length >= 4 && !bad.length, bad.join(' | ') || `${icons.length} files`);
+    }
     const frameErrors = [];
     const pageErrors = [];
     // Every workbench page load (the frame's own document), to prove a remount does not reload it.

@@ -746,7 +746,7 @@ node scripts/smoke.mjs            # end-to-end against the cached server build
 node scripts/smoke.mjs --minimal-env   # same, launcher started with only the gateway's env allowlist
 node scripts/stage.mjs            # clean install copy
 node scripts/smoke.mjs --app-root .cache/stage/vscode-pane   # same, from the staged copy
-node scripts/render-icon.mjs      # re-render assets/icon.png from ui/icon.svg
+node scripts/render-icon.mjs      # rebuild the icon files from ui/icon.svg, plus .cache/icons/preview.png
 ```
 
 The smoke test starts the launcher like the gateway would (random `PORT` and
@@ -852,11 +852,40 @@ palette. The pane then goes back to the workspace folder for the restart checks.
 
 ## Icon
 
-`ui/icon.svg` (sidebar) and `assets/icon.png` (store, rendered from it) are the
-real Visual Studio Code icon, copied from an installed VS Code
-(`resources/app/out/media/code-icon.svg`), not the Code-OSS art. The icon is a
-Microsoft trademark. Using it here is fine only for John's personal use on his
-own machine; swap it for original art before any public release of this app.
+`ui/icon.svg` is the real Visual Studio Code icon, copied from an installed
+VS Code (`resources/app/out/media/code-icon.svg`), not the Code-OSS art. The
+icon is a Microsoft trademark. Using it here is fine only for John's personal
+use on his own machine; swap it for original art before any public release of
+this app.
+
+`node scripts/render-icon.mjs` builds every other icon file from it. The
+full-colour mark becomes `assets/icon.png`. The flat marks use the same
+outline with two flat fills and no blue: the body takes `--ico-a` and the
+right-hand panel takes `--ico-b`, the two tokens Kiro Crew's built-in icons
+paint with. Their fallback colours come from John's Dracula Pro theme.
+
+| File | Manifest field | Shown |
+| --- | --- | --- |
+| `assets/icon.png` | `iconPath` | store, and the rail's selected row in light mode |
+| `assets/icon-dark.svg` | `iconPathDark` | store and the rail's selected row in dark mode (accent body, text panel) |
+| `ui/icon-idle.svg` | `ui.pages[0].iconInactiveUrl` | the rail row when it is not selected (muted body, accent panel), light or dark |
+| `ui/icon-mono.svg` | `ui.pages[0].iconUrl` | nowhere today; the rail reads a page `iconUrl` only when the app has no `iconPath` |
+
+Kiro Crew draws an installed app's rail icon as a plain `<img>`, in 0.13.0-rc.1
+and in the 0.14 source alike (`shell/appShell.tsx:731-745`): only first-party
+`/app-assets/<a>/<b>.svg` files are inlined so theme variables reach them
+(`components/AppIcon.tsx:51`), and an installed app cannot place files there. So
+the colours are fixed per file. `ui/icon-idle.svg` and `ui/icon-mono.svg` carry
+a light and a dark palette and pick one with `@media (prefers-color-scheme:
+dark)`. Chromium answers that query inside an `<img>` from the page's
+`color-scheme`, which Kiro Crew sets per mode, so they follow dark and light.
+They do not pick up another theme's hues, and in light mode the selected row
+still shows the blue `icon.png`, because the store and the rail share
+`iconPath`. The composer chip keeps the `Package` glyph: it accepts only a
+name from `AppIcon`'s eleven lucide icons, none of which depicts code, and the
+tunnel's chip-hiding CSS matches it by that glyph. The Kiro Crew change that
+would make all of these follow the theme is written up in
+`research/kirocrew-icon-proposal.md`.
 
 ## Known limits
 

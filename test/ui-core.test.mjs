@@ -151,8 +151,9 @@ test('manifest: version, bundle names, permissions, icons and the composer contr
   assert.ok(['Shield', 'Bot', 'Search', 'Tag', 'Users', 'Zap', 'Star', 'Package', 'Cat', 'AudioLines', 'Mic'].includes(ctl.icon));
   assert.ok(fs.existsSync(path.join(ROOT, manifest.iconPath)));
   assert.ok(fs.existsSync(path.join(ROOT, 'ui', manifest.ui.pages[0].iconUrl)));
-  // The real VS Code mark (Microsoft's blue gradient), not the Code-OSS art.
-  const svg = fs.readFileSync(path.join(ROOT, 'ui', manifest.ui.pages[0].iconUrl), 'utf8');
+  // The source art is the real VS Code mark (Microsoft's blue gradient), not the
+  // Code-OSS art; the page icons are flat marks built from it (icons.test.mjs).
+  const svg = fs.readFileSync(path.join(ROOT, 'ui', 'icon.svg'), 'utf8');
   for (const c of ['#0065A9', '#007ACC', '#1F9CF0']) assert.ok(svg.includes(c), c);
   // Every UI module the page imports by relative path ships with the same version.
   for (const f of [manifest.ui.entry, ctl.entryPoint]) {

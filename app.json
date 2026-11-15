@@ -22,6 +22,7 @@
     "requiresDesktopApp": true
   },
   "iconPath": "assets/icon.png",
+  "iconPathDark": "assets/icon-dark.svg",
   "permissions": {
     "api": [
       "/apps/vscode-pane/api",
@@ -44,7 +45,8 @@
       {
         "route": "/apps/vscode-pane",
         "label": "VS Code",
-        "iconUrl": "icon.svg"
+        "iconUrl": "icon-mono.svg",
+        "iconInactiveUrl": "icon-idle.svg"
       }
     ]
   },
