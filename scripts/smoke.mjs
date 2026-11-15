@@ -19,6 +19,20 @@ import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
+import { createGatewayMock } from '../test/support/gateway-mock.mjs';
+import { toVsCodeTheme } from '../backend/lib/theme.mjs';
+import { slotNameFor } from '../backend/lib/gateway.mjs';
+
+// Two Kiro Crew palettes: one saved before the first start (seeded into the
+// server's settings), one posted live through POST /api/theme.
+const SEEDED_THEME = {
+  kind: 'dark',
+  vars: { '--bg': '#282a36', '--surface': '#343746', '--panel': '#21222c', '--border': '#44475a', '--text': '#f8f8f2', '--muted': '#a5a9c0', '--accent': '#bd93f9' },
+};
+const POSTED_THEME = {
+  kind: 'light',
+  vars: { '--bg': '#fbf7ef', '--surface': '#ffffff', '--panel': '#f2ecdf', '--border': '#d8cfbd', '--text': '#2b2620', '--muted': '#6f6658', '--accent': '#b4552d' },
+};
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -61,7 +75,20 @@ function check(name, ok, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A worktree has no .cache of its own; its gitignored dev-config.json names the
+// cached server build and where playwright-core is already installed.
+function devConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, 'dev-config.json'), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+const DEV = devConfig();
+const DEPS_ROOT = DEV.smokeDepsRoot && fs.existsSync(DEV.smokeDepsRoot) ? DEV.smokeDepsRoot : ROOT;
+
 function findCachedServer() {
+  if (DEV.serverDir && fs.existsSync(path.join(DEV.serverDir, 'out', 'server-main.js'))) return DEV.serverDir;
   const root = path.join(ROOT, '.cache', 'serve-web', 'cli-data', 'serve-web');
   if (!fs.existsSync(root)) return null;
   for (const name of fs.readdirSync(root)) {
@@ -208,31 +235,49 @@ async function main() {
   PORT = await freePort();
   console.log(`run dir ${runDir}\nserver build ${serverDir}\nlauncher port ${PORT}${MINIMAL_ENV ? '\nlauncher env: gateway minimal_env allowlist only' : ''}`);
 
-  const launcher = spawn(process.execPath, [path.join(APP_ROOT, 'backend', 'launcher.mjs')], {
-    cwd: APP_ROOT,
-    env: {
-      ...launcherBaseEnv(),
-      PORT: String(PORT),
-      // What the gateway sets on every backend; terminals must not inherit them.
-      KIROCREW_SPAWNED: '1',
-      KIROCREW_SPAWN_INSTANCE: `smoke${crypto.randomBytes(4).toString('hex')}`,
-      KIROCREW_PROXY_SECRET: SECRET,
-      KIROCREW_APP_NAME: 'vscode-pane',
-      VSCODE_PANE_DATA_DIR: dataDir,
-      VSCODE_PANE_WORKSPACE: workspace,
-      ...(APP ? {} : { VSCODE_PANE_SERVER_DIR: serverDir }),
-      VSCODE_PANE_NO_DOWNLOAD: '1',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  launcher.stdout.on('data', (d) => process.stdout.write(`[launcher] ${d}`));
-  launcher.stderr.on('data', (d) => process.stdout.write(`[launcher:err] ${d}`));
+  // A mock Kiro Crew gateway for the chat round trip; the launcher trades the
+  // proxy secret for an app token there, as it would against the real one.
+  const gatewayMock = createGatewayMock({ appName: 'vscode-pane', secret: SECRET });
+  const gatewayOrigin = await gatewayMock.listen();
+
+  // A theme saved by an earlier run: the launcher must seed it into the
+  // server's settings before VS Code paints.
+  fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'state', 'theme.json'), JSON.stringify({ ...SEEDED_THEME, updatedAt: new Date().toISOString() }));
+
+  function startLauncher(port) {
+    const child = spawn(process.execPath, [path.join(APP_ROOT, 'backend', 'launcher.mjs')], {
+      cwd: APP_ROOT,
+      env: {
+        ...launcherBaseEnv(),
+        PORT: String(port),
+        // What the gateway sets on every backend; terminals must not inherit them.
+        KIROCREW_SPAWNED: '1',
+        KIROCREW_SPAWN_INSTANCE: `smoke${crypto.randomBytes(4).toString('hex')}`,
+        KIROCREW_PROXY_SECRET: SECRET,
+        KIROCREW_APP_NAME: 'vscode-pane',
+        KIROCREW_GATEWAY_ORIGIN: gatewayOrigin,
+        VSCODE_PANE_DATA_DIR: dataDir,
+        VSCODE_PANE_WORKSPACE: workspace,
+        ...(APP ? {} : { VSCODE_PANE_SERVER_DIR: serverDir }),
+        VSCODE_PANE_NO_DOWNLOAD: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    child.stdout.on('data', (d) => process.stdout.write(`[launcher] ${d}`));
+    child.stderr.on('data', (d) => process.stdout.write(`[launcher:err] ${d}`));
+    return child;
+  }
+  let launcher = startLauncher(PORT);
+  const firstLauncherPort = PORT;
 
   let browser;
   let hostServer;
   let tree = [];
+  let earlierTree = [];
   let serverPort = 0;
+  let framePort = 0;
   try {
     // 1. health
     let health;
@@ -265,17 +310,34 @@ async function main() {
     console.log(`workbench ${wbUrl.origin}${wbUrl.pathname.replace(/vsc-[^/]+/, 'vsc-<key>')}${wbUrl.search}`);
     const logText = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
     serverPort = Number((/server spawned pid \d+ port (\d+)/.exec(logText) || [])[1] || 0);
-    check('session URL uses 127.0.0.1 and the launcher port', wbUrl.hostname === '127.0.0.1' && Number(wbUrl.port) === PORT);
+    framePort = Number(wbUrl.port);
+    check('session URL uses 127.0.0.1 and the frame port, not the API port', wbUrl.hostname === '127.0.0.1' && framePort > 0 && framePort !== PORT, `frame ${framePort}, api ${PORT}`);
     check('session URL carries no connection token', !wbUrl.search.includes('tkn='));
+    const savedFrame = JSON.parse(fs.readFileSync(path.join(dataDir, 'state', 'frame.json'), 'utf8'));
+    check('frame port and path key are saved in the data dir', savedFrame.port === framePort && wbUrl.pathname.startsWith(`/vsc-${savedFrame.key}/`));
+    const apiFrame = await rawRequest({ port: PORT, path: wbUrl.pathname });
+    check('the API port does not serve the workbench', apiFrame.status === 404, String(apiFrame.status));
+
+    // 3b. the theme saved before this start is seeded into the server's Machine settings
+    const machine = JSON.parse(fs.readFileSync(path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json'), 'utf8'));
+    const seeded = toVsCodeTheme(SEEDED_THEME);
+    check(
+      'saved Kiro Crew theme is seeded into Machine settings before first paint',
+      machine['workbench.colorTheme'] === 'Dark Modern' && machine['workbench.colorCustomizations']?.['editor.background'] === seeded.colorCustomizations['editor.background'],
+      `${machine['workbench.colorTheme']} ${machine['workbench.colorCustomizations']?.['editor.background']}`,
+    );
+    check('Copilot sign-in prompts are turned off by setting, not by removing extensions', machine['chat.titleBar.signIn.enabled'] === false && machine['chat.welcomePage.signIn.enabled'] === false && fs.existsSync(path.join(serverDir || DEV.serverDir || '', 'extensions', 'copilot', 'package.json')));
+    const serverArgsLog = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
+    check('launcher log names the frame port', /frame 127\.0\.0\.1:\d+/.test(serverArgsLog));
 
     // 4. workbench HTML
-    const wb = await rawRequest({ port: PORT, path: wbUrl.pathname + wbUrl.search, headers: { cookie: 'mc_token_5476=dashboard-secret' } });
+    const wb = await rawRequest({ port: framePort, path: wbUrl.pathname + wbUrl.search, headers: { cookie: 'mc_token_5476=dashboard-secret' } });
     const csp = String(wb.headers['content-security-policy'] || '');
     check('workbench GET returns 200', wb.status === 200, `${wb.status}, ${wb.body.length} bytes`);
     check('workbench has no X-Frame-Options', !wb.headers['x-frame-options']);
     check('workbench CSP has no frame-ancestors', !/frame-ancestors/i.test(csp));
     check('workbench does not hand the token cookie to the browser', !String(wb.headers['set-cookie'] || '').includes('vscode-tkn'));
-    const wrong = await rawRequest({ port: PORT, path: '/vsc-wrongkey/' });
+    const wrong = await rawRequest({ port: framePort, path: '/vsc-wrongkey/' });
     check('wrong frame prefix is 404', wrong.status === 404, String(wrong.status));
     if (serverPort) {
       const direct = await rawRequest({ port: serverPort, path: '/' });
@@ -283,31 +345,42 @@ async function main() {
     }
 
     // 5. websocket
-    const wsLine = await wsUpgrade(PORT, `${wbUrl.pathname}?reconnectionToken=${crypto.randomUUID()}&reconnection=false&skipWebSocketFrames=false`);
+    const wsLine = await wsUpgrade(framePort, `${wbUrl.pathname}?reconnectionToken=${crypto.randomUUID()}&reconnection=false&skipWebSocketFrames=false`);
     check('WebSocket upgrade through the launcher returns 101', /^HTTP\/1\.1 101/.test(wsLine), wsLine);
     const wsPath = `${wbUrl.pathname}?reconnectionToken=${crypto.randomUUID()}&reconnection=false&skipWebSocketFrames=false`;
-    const foreign = await wsUpgrade(PORT, wsPath, { origin: 'https://evil.example' });
+    const foreign = await wsUpgrade(framePort, wsPath, { origin: 'https://evil.example' });
     check('WebSocket upgrade from a foreign Origin is refused', /^HTTP\/1\.1 403/.test(foreign), foreign);
-    const dash = await wsUpgrade(PORT, wsPath, { origin: 'http://localhost:5476' });
+    const dash = await wsUpgrade(framePort, wsPath, { origin: 'http://localhost:5476' });
     check('WebSocket upgrade from the dashboard origin itself is refused (only the frame may connect)', /^HTTP\/1\.1 403/.test(dash), dash);
-    const rebound = await rawRequest({ port: PORT, path: wbUrl.pathname, headers: { host: 'rebound.example' } });
+    const apiWs = await wsUpgrade(PORT, wsPath);
+    check('the API port refuses WebSocket upgrades', !/^HTTP\/1\.1 101/.test(apiWs), apiWs || 'closed');
+    const rebound = await rawRequest({ port: framePort, path: wbUrl.pathname, headers: { host: 'rebound.example' } });
     check('workbench request with a non-loopback Host is refused', rebound.status === 403, String(rebound.status));
 
     // 6. headless browser loads the app's real UI page in a dashboard stand-in on
     //    http://localhost:<port>; the page frames the workbench on 127.0.0.1 (cross-site).
     const exe = findBrowser();
     if (!check('found a local Chrome/Edge', !!exe, exe || '')) throw new Error('no browser');
-    const pw = await loadPlaywright(ROOT);
+    const pw = await loadPlaywright(DEPS_ROOT);
     const hostPort = await freePort();
     hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
     await new Promise((ok) => hostServer.listen(hostPort, '127.0.0.1', ok));
-    browser = await pw.chromium.launch({ executablePath: exe, headless: true });
-    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    // A persistent profile, so browser-side VS Code state can be checked across
+    // a launcher restart (step 15).
+    const profileDir = path.join(runDir, 'browser-profile');
+    browser = await pw.chromium.launchPersistentContext(profileDir, { executablePath: exe, headless: true, viewport: { width: 1400, height: 900 } });
+    const page = browser.pages()[0] || (await browser.newPage());
     const frameErrors = [];
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(e.message));
+    // Workbench console lines about chat participants and API proposals, shown when a chat check fails.
+    const chatConsole = [];
+    page.on('console', (m) => {
+      const t = m.text();
+      if (/participant|proposal|kiro-crew|defaultChat|No default agent/i.test(t)) chatConsole.push(t.slice(0, 300));
+    });
     page.on('response', (r) => {
-      if (r.url().startsWith(`http://127.0.0.1:${PORT}/`) && r.status() >= 400) frameErrors.push(`${r.status()} ${r.url().replace(/vsc-[^/]+/, 'vsc-<key>').slice(0, 120)}`);
+      if (r.url().startsWith(`http://127.0.0.1:${framePort}/`) && r.status() >= 400) frameErrors.push(`${r.status()} ${r.url().replace(/vsc-[^/]+/, 'vsc-<key>').slice(0, 120)}`);
     });
     await page.goto(`http://localhost:${hostPort}/`);
     let uiUp = false;
@@ -344,11 +417,17 @@ async function main() {
       const cmd = `& '${probe}'`;
       let termResult = null;
       try {
-        await frame.locator('.monaco-workbench').click({ position: { x: 700, y: 400 } });
-        await page.keyboard.press('Control+Backquote');
-        // The terminal renders to a canvas, so there is no prompt text to wait for:
-        // wait for its input element, give the shell time to start, and retry.
-        await frame.locator('.xterm-helper-textarea').first().waitFor({ state: 'attached', timeout: 30_000 });
+        // Right after the workbench appears its keybindings may not be live yet,
+        // so a single Ctrl+` can be lost: press it again until a terminal opens.
+        let opened = false;
+        for (let attempt = 0; attempt < 5 && !opened; attempt++) {
+          await frame.locator('.monaco-workbench').click({ position: { x: 700, y: 400 } });
+          await page.keyboard.press('Control+Backquote');
+          // The terminal renders to a canvas, so there is no prompt text to wait for:
+          // wait for its input element, give the shell time to start, and retry.
+          opened = await frame.locator('.xterm-helper-textarea').first().waitFor({ state: 'attached', timeout: 8_000 }).then(() => true, () => false);
+        }
+        if (!opened) throw new Error('the terminal did not open after 5 tries');
         await sleep(6000);
         for (let attempt = 0; attempt < 3 && !fs.existsSync(outFile); attempt++) {
           await frame.locator('.xterm-helper-textarea').first().focus();
@@ -378,6 +457,107 @@ async function main() {
     }
     check('bridge extension connected and said hello', st && st.connected && st.extension, st && JSON.stringify(st.extension));
     check('server process keeps the gateway tracking var (seen from the extension host)', st && st.extension && st.extension.spawnTracked === true, st && st.extension && String(st.extension.spawnTracked));
+
+    // 7b. the built-in Chat is answered by Kiro Crew (the mock gateway)
+    const cs0 = (await api('GET', '/api/chat/status?probe=1')).json;
+    check(
+      'GET /api/chat/status: gateway reachable with an exchanged app token',
+      cs0 && cs0.available && cs0.gateway.reachable === true && cs0.gateway.token && gatewayMock.rec.exchanges >= 1,
+      JSON.stringify(cs0 && { available: cs0.available, reason: cs0.reason, reachable: cs0.gateway.reachable, exchanges: gatewayMock.rec.exchanges }),
+    );
+    check(
+      'bridge registered the default chat participant (proposed API enabled by the server flag)',
+      cs0 && cs0.extension.chat && cs0.extension.chat.defaultParticipant === true && cs0.extension.chat.participant === true,
+      JSON.stringify(cs0 && cs0.extension.chat),
+    );
+    const prompt = `smoke ${crypto.randomBytes(3).toString('hex')}: say hi`;
+    const ask = await api('POST', '/api/chat/ask', { prompt });
+    check('POST /api/chat/ask opens the VS Code Chat view with the prompt', ask.json && ask.json.ok, JSON.stringify(ask.json));
+    let turn = null;
+    const t7 = Date.now();
+    while (Date.now() - t7 < 30_000) {
+      turn = gatewayMock.rec.turns.find((t) => String(t.message).startsWith(prompt));
+      if (turn) break;
+      await sleep(300);
+    }
+    if (!check('the default Chat view sent the turn to Kiro Crew (no @mention, no Copilot)', !!turn, turn ? turn.message.slice(0, 160) : `turns seen: ${gatewayMock.rec.turns.length}`)) {
+      console.log('workbench console (chat):\n  ' + chatConsole.slice(-20).join('\n  '));
+    }
+    const expectedSlot = slotNameFor(workspace);
+    check(
+      "the turn ran in the workspace folder's Kiro Crew chat slot",
+      turn && turn.slot === expectedSlot && String(gatewayMock.rec.slots.get(expectedSlot)?.project).toLowerCase() === workspace.toLowerCase(),
+      turn && `${turn.slot} project=${gatewayMock.rec.slots.get(turn.slot)?.project}`,
+    );
+    let chatShown = false;
+    try {
+      await frame.locator('text=Kiro Crew mock').first().waitFor({ timeout: 20_000 });
+      chatShown = true;
+    } catch {
+      /* reported below */
+    }
+    check('the Kiro Crew reply streams into the VS Code Chat view', chatShown);
+    let cs1 = null;
+    const t7b = Date.now();
+    while (Date.now() - t7b < 10_000) {
+      cs1 = (await api('GET', '/api/chat/status')).json;
+      if (cs1 && cs1.lastTurn) break;
+      await sleep(300);
+    }
+    check('chat status records the finished turn', cs1 && cs1.lastTurn && cs1.lastTurn.outcome === 'done' && cs1.turns >= 1, JSON.stringify(cs1 && cs1.lastTurn));
+    fs.mkdirSync(path.join(ROOT, '.cache', 'smoke'), { recursive: true });
+    await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'chat.png') });
+
+    // 7c. theme: the seeded palette is applied by the bridge, then a new one is posted live
+    const seededVs = toVsCodeTheme(SEEDED_THEME);
+    let th = null;
+    const t8 = Date.now();
+    while (Date.now() - t8 < 20_000) {
+      th = (await api('GET', '/api/state')).json?.theme;
+      if (th && th.applied && th.readBack) break;
+      await sleep(300);
+    }
+    check(
+      'bridge wrote the seeded theme to the user settings (read back through the bridge)',
+      th && th.applied && th.readBack && th.readBack.colorTheme === 'Dark Modern' && th.readBack.editorBackground === seededVs.colorCustomizations['editor.background'],
+      JSON.stringify(th && th.readBack),
+    );
+    const badTheme = await api('POST', '/api/theme', { kind: 'dark', vars: { '--bg': 'red', '--text': '#ffffff' } });
+    check('POST /api/theme refuses a non-hex colour', badTheme.status === 400, `${badTheme.status} ${badTheme.json && badTheme.json.error}`);
+    const unsignedTheme = await rawRequest({ port: PORT, method: 'POST', path: '/api/theme', headers: { 'content-type': 'application/json' }, body: JSON.stringify(POSTED_THEME) });
+    check('POST /api/theme refuses an unsigned request', unsignedTheme.status === 401, String(unsignedTheme.status));
+    const posted = await api('POST', '/api/theme', POSTED_THEME);
+    check(
+      'POST /api/theme stores a new palette',
+      posted.status === 200 && posted.json.changed === true && posted.json.colorTheme === 'Light Modern',
+      JSON.stringify(posted.json && { changed: posted.json.changed, colorTheme: posted.json.colorTheme }),
+    );
+    const wantVs = toVsCodeTheme(POSTED_THEME);
+    let th2 = null;
+    const t9 = Date.now();
+    while (Date.now() - t9 < 20_000) {
+      th2 = (await api('GET', '/api/state')).json?.theme;
+      if (th2 && th2.readBack && th2.readBack.colorTheme === 'Light Modern') break;
+      await sleep(300);
+    }
+    check(
+      'the workbench setting read back through the bridge is the posted theme',
+      th2 && th2.readBack && th2.readBack.colorTheme === wantVs.colorTheme && th2.readBack.editorBackground === wantVs.colorCustomizations['editor.background'] && th2.readBack.count === Object.keys(wantVs.colorCustomizations).length,
+      JSON.stringify(th2 && th2.readBack),
+    );
+    const hexToRgb = (h) => `rgb(${[1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)).join(', ')})`;
+    let painted = '';
+    const t9b = Date.now();
+    while (Date.now() - t9b < 10_000) {
+      painted = await frame.locator('.monaco-workbench .part.statusbar').first().evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => '');
+      if (painted === hexToRgb(wantVs.colorCustomizations['statusBar.background'])) break;
+      await sleep(300);
+    }
+    check('the workbench repaints in the posted palette (status bar)', painted === hexToRgb(wantVs.colorCustomizations['statusBar.background']), `${painted} want ${hexToRgb(wantVs.colorCustomizations['statusBar.background'])}`);
+    const machine2 = JSON.parse(fs.readFileSync(path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json'), 'utf8'));
+    check('the posted theme is also seeded for the next start', machine2['workbench.colorTheme'] === 'Light Modern');
+    const again = await api('POST', '/api/theme', POSTED_THEME);
+    check('posting the same palette again changes nothing', again.json && again.json.changed === false);
 
     // 8. Kiro Crew -> VS Code: open a file at a line
     const open = await api('POST', '/api/open', { path: target, line: 3, column: 6 });
@@ -477,11 +657,107 @@ async function main() {
       const reopen = await api('POST', '/api/open', { path: target, line: 4 });
       check('POST /api/open works again after the restart', reopen.json && reopen.json.ok, JSON.stringify(reopen.json));
     }
+
+    // 14. reload the pane: VS Code restores its open editor from browser-side
+    //     storage, and the theme is not written again
+    {
+      const before = (await api('GET', '/api/state')).json?.activeEditor?.path || '';
+      const t10 = Date.now();
+      await page.reload();
+      await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
+      let st3 = null;
+      while (Date.now() - t10 < 60_000) {
+        st3 = (await api('GET', '/api/state')).json;
+        if (st3 && st3.extension && Date.parse(st3.extension.at) > t10 && st3.activeEditor && st3.activeEditor.path) break;
+        await sleep(500);
+      }
+      check(
+        'after a reload of the pane the open editor is restored without reopening it',
+        before && st3 && st3.activeEditor && st3.activeEditor.path.toLowerCase() === before.toLowerCase(),
+        `${before} -> ${st3 && st3.activeEditor && st3.activeEditor.path}`,
+      );
+      let th3 = null;
+      while (Date.now() - t10 < 75_000) {
+        th3 = (await api('GET', '/api/state')).json?.theme;
+        if (th3 && Date.parse(th3.at) > t10) break;
+        await sleep(500);
+      }
+      check('after a reload the theme is confirmed unchanged, not rewritten', th3 && Date.parse(th3.at) > t10 && th3.applied && th3.changed === false, JSON.stringify(th3 && { changed: th3.changed, at: th3.at }));
+      const reopenAfterReload = await api('POST', '/api/open', { path: path.join(workspace, 'other.js') });
+      check('commands reach the new window after a reload (not the lingering old host)', reopenAfterReload.json && reopenAfterReload.json.ok, JSON.stringify(reopenAfterReload.json));
+      const back2 = await api('POST', '/api/open', { path: target, line: 2 });
+      check('hello.txt reopened for the restart check', back2.json && back2.json.ok);
+      await sleep(3000); // let the workbench flush its storage
+    }
+
+    // 15. restart the launcher (a gateway restart): same frame origin and path,
+    //     and the workbench comes back with its editor
+    if (process.platform === 'win32') {
+      const urlBefore = new URL((await api('GET', '/api/session')).json.url);
+      earlierTree = descendants(processTable(), launcher.pid);
+      await browser.close();
+      browser = null;
+      hostServer.close();
+      spawnSync('taskkill', ['/PID', String(launcher.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      await sleep(1500);
+      PORT = await freePort();
+      launcher = startLauncher(PORT);
+      let s2 = null;
+      const t11 = Date.now();
+      while (Date.now() - t11 < 120_000) {
+        s2 = (await api('GET', '/api/session').catch(() => ({ json: null }))).json;
+        if (s2 && (s2.ready || s2.status === 'error')) break;
+        await sleep(500);
+      }
+      const urlAfter = s2 && s2.url ? new URL(s2.url) : null;
+      check(
+        'after a launcher restart on a new API port, the frame keeps its origin and path',
+        urlAfter && PORT !== firstLauncherPort && urlAfter.origin === urlBefore.origin && urlAfter.pathname === urlBefore.pathname,
+        urlAfter ? `api ${firstLauncherPort} -> ${PORT}; frame ${urlBefore.port} -> ${urlAfter.port}` : 'not ready',
+      );
+      const logNow = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
+      const spawnedNow = [...logNow.matchAll(/server spawned pid (\d+) port (\d+)/g)];
+      if (spawnedNow.length) serverPort = Number(spawnedNow.at(-1)[2]);
+      const hostPort2 = await freePort();
+      hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
+      await new Promise((ok) => hostServer.listen(hostPort2, '127.0.0.1', ok));
+      const pw2 = await loadPlaywright(DEPS_ROOT);
+      // Same browser profile as before: the browser keeps its storage, the
+      // frame origin is the same, so VS Code finds its state again.
+      browser = await pw2.chromium.launchPersistentContext(path.join(runDir, 'browser-profile'), { executablePath: findBrowser(), headless: true, viewport: { width: 1400, height: 900 } });
+      const page2 = browser.pages()[0] || (await browser.newPage());
+      await page2.goto(`http://localhost:${hostPort2}/`);
+      const t12 = Date.now();
+      let st4 = null;
+      while (Date.now() - t12 < 90_000) {
+        st4 = (await api('GET', '/api/state')).json;
+        if (st4 && st4.extension && Date.parse(st4.extension.at) > t12 && st4.activeEditor && st4.activeEditor.path) break;
+        await sleep(500);
+      }
+      check('after the launcher restart the pane loads and the bridge says hello', st4 && st4.extension && Date.parse(st4.extension.at) > t12);
+      check(
+        'after the launcher restart VS Code restores the open editor from browser storage',
+        st4 && st4.activeEditor && st4.activeEditor.path.toLowerCase() === target.toLowerCase(),
+        st4 && st4.activeEditor ? st4.activeEditor.path : 'no active editor',
+      );
+      let th4 = null;
+      const t13 = Date.now();
+      while (Date.now() - t13 < 20_000) {
+        th4 = (await api('GET', '/api/state')).json?.theme;
+        if (th4 && th4.readBack) break;
+        await sleep(500);
+      }
+      check('after the launcher restart the stored theme is still in effect', th4 && th4.readBack && th4.readBack.colorTheme === 'Light Modern', JSON.stringify(th4 && th4.readBack));
+      await page2.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'after-restart.png') });
+      const cs2 = (await api('GET', '/api/chat/status?probe=1')).json;
+      check('after the launcher restart chat is available again with a fresh app token', cs2 && cs2.available && cs2.gateway.reachable === true, JSON.stringify(cs2 && cs2.gateway && { reachable: cs2.gateway.reachable, lastError: cs2.gateway.lastError }));
+    }
   } catch (e) {
     check('smoke run completed without exception', false, e.message);
   } finally {
     if (browser) await browser.close().catch(() => {});
     if (hostServer) hostServer.close();
+    await gatewayMock.close();
 
     // 12. stop like the gateway does on Windows: tree kill by PID
     if (process.platform === 'win32') {
@@ -494,11 +770,12 @@ async function main() {
     await sleep(1500);
     if (process.platform === 'win32') {
       const after = processTable();
-      const left = tree.filter((p) => after.some((a) => a.pid === p.pid && a.created === p.created));
+      const left = [...earlierTree, ...tree].filter((p) => after.some((a) => a.pid === p.pid && a.created === p.created));
       check('no process from this run remains', tree.length > 0 && left.length === 0, left.map((p) => `${p.name}:${p.pid}`).join(', ') || `${tree.length} processes stopped`);
     }
     check('launcher port is free', !(await portOpen(PORT)), String(PORT));
     if (serverPort) check('VS Code server port is free', !(await portOpen(serverPort)), String(serverPort));
+    if (framePort) check('frame port is free', !(await portOpen(framePort)), String(framePort));
     if (!KEEP) fs.rmSync(runDir, { recursive: true, force: true });
   }
 

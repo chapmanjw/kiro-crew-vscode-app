@@ -28,6 +28,10 @@ import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/framepro
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
+import { validateTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
+import { GatewayClient } from './lib/gateway.mjs';
+import { parseChatRequest, runChatTurn } from './lib/chatbridge.mjs';
+import { parseFrameState, frameStateFor, serializeFrameState } from './lib/framestate.mjs';
 
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const env = process.env;
@@ -40,6 +44,7 @@ const MAX_BODY = 64 * 1024;
 
 fs.mkdirSync(path.join(DATA_DIR, 'logs'), { recursive: true });
 fs.mkdirSync(path.join(DATA_DIR, 'run'), { recursive: true });
+fs.mkdirSync(path.join(DATA_DIR, 'state'), { recursive: true });
 const logStream = fs.createWriteStream(path.join(DATA_DIR, 'logs', 'launcher.log'), { flags: 'a' });
 function log(...parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}`;
@@ -50,6 +55,13 @@ function log(...parts) {
 // Config precedence: env > data/config.json > <app root>/dev-config.json.
 // dev-config.json is written by scripts/stage.mjs for a local install and is
 // never committed.
+function readText(p) {
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch {
+    return '';
+  }
+}
 function readJsonFile(p) {
   try {
     return parseConfig(fs.readFileSync(p, 'utf8'));
@@ -63,7 +75,12 @@ const fileConfig = {
 };
 const config = effectiveConfig(fileConfig, env, { homedir: os.homedir(), appRoot: APP_ROOT });
 
-const FRAME_KEY = randomSecret(18);
+// The frame's port and path key persist in data/state/frame.json so the VS
+// Code origin, and with it the browser-side state, survives launcher restarts
+// (see lib/framestate.mjs).
+const FRAME_STATE_FILE = path.join(DATA_DIR, 'state', 'frame.json');
+const frameState = frameStateFor(parseFrameState(readText(FRAME_STATE_FILE)));
+const FRAME_KEY = frameState.key;
 const BASE_PATH = `/vsc-${FRAME_KEY}`;
 const BRIDGE_SECRET = randomSecret(24);
 // One connection token per launcher run, not per server start: the workbench
@@ -72,6 +89,37 @@ const BRIDGE_SECRET = randomSecret(24);
 const CONNECTION_TOKEN = randomSecret(24);
 const bridge = new Bridge();
 const retry = new RetryPolicy();
+
+// Kiro Crew gateway access for the built-in Chat, with this app's own token.
+const gateway = new GatewayClient({
+  origin: env.KIROCREW_GATEWAY_ORIGIN || '',
+  appName: env.KIROCREW_APP_NAME || 'vscode-pane',
+  secret: PROXY_SECRET,
+  log,
+});
+const chatStats = { turns: 0, lastTurn: null, active: 0 };
+
+// The Kiro Crew palette applied to VS Code (POST /api/theme), kept in data/state/theme.json.
+const THEME_FILE = path.join(DATA_DIR, 'state', 'theme.json');
+let theme = null; // {kind, vars, updatedAt}
+let vsTheme = null; // {colorTheme, colorCustomizations}
+{
+  let saved = null;
+  try {
+    saved = JSON.parse(readText(THEME_FILE) || 'null');
+  } catch {
+    saved = null;
+  }
+  const v = saved ? validateTheme({ kind: saved.kind, vars: saved.vars }) : null;
+  if (v && v.theme) {
+    theme = { ...v.theme, updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : null };
+    vsTheme = toVsCodeTheme(v.theme);
+  }
+}
+
+function themeCommand() {
+  return { kind: 'applyTheme', theme: { ...vsTheme, signature: themeSignature(vsTheme) } };
+}
 
 const state = {
   status: 'idle', // idle | provisioning | starting | ready | error | stopped
@@ -169,18 +217,43 @@ function serverUserEnv() {
   return userEnvCache;
 }
 
-/** Make VS Code terminals unset the gateway tracking and bridge variables. */
-function writeTerminalSettings() {
+/**
+ * Chat settings that keep Copilot out of the way of Kiro Crew, all supported
+ * settings of the 1.146 build (window scope, so the server's Machine settings
+ * apply). Built-in extensions are never removed.
+ *  - chat.defaultToCopilotHarness / chat.editor.preferCopilotHarness: 1.146
+ *    starts new chats in the Copilot agent host ("Copilot" session type),
+ *    which never reaches extension chat participants. Off, new chats use the
+ *    local harness, whose default participant is the bridge's Kiro Crew one
+ *    (contrib/chat/common/constants.ts, getComputedDefaultSessionType).
+ *  - chat.editor.localAgent.enabled: keeps that local harness available.
+ *  - chat.mcp.autostart "never": VS Code would otherwise stop each request to
+ *    ask whether to start MCP servers it discovered in other tools' configs;
+ *    Kiro Crew runs its own tools.
+ *  - chat.titleBar.signIn.enabled / chat.welcomePage.signIn.enabled: hide the
+ *    Copilot sign-in buttons.
+ */
+const CHAT_SETTINGS = {
+  'chat.defaultToCopilotHarness': false,
+  'chat.editor.preferCopilotHarness': false,
+  'chat.editor.localAgent.enabled': true,
+  'chat.mcp.autostart': 'never',
+  'chat.titleBar.signIn.enabled': false,
+  'chat.welcomePage.signIn.enabled': false,
+};
+
+/**
+ * The server's Machine settings.json: terminals unset the gateway tracking and
+ * bridge variables, the Kiro Crew theme is seeded so the first paint is
+ * already themed, and Copilot's sign-in prompts are turned down.
+ */
+function writeMachineSettings() {
   const dir = path.join(DATA_DIR, 'server-data', 'data', 'Machine');
   const file = path.join(dir, 'settings.json');
   fs.mkdirSync(dir, { recursive: true });
-  let existing = '';
-  try {
-    existing = fs.readFileSync(file, 'utf8');
-  } catch {
-    /* first run */
-  }
-  const next = terminalEnvSettings(existing);
+  const existing = readText(file);
+  const withTerminal = terminalEnvSettings(existing);
+  const next = withTerminal === null ? null : seedThemeSettings(withTerminal, vsTheme, CHAT_SETTINGS);
   if (next === null) log('Machine settings.json is not plain JSON; left unchanged');
   else if (next !== existing) fs.writeFileSync(file, next);
 }
@@ -194,6 +267,9 @@ function installBridgeExtension() {
   const dest = path.join(extDir, folderName);
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
+  // The app icon doubles as the chat participant's avatar.
+  const icon = path.join(APP_ROOT, 'assets', 'icon.png');
+  if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(dest, 'icon.png'));
   for (const stale of staleBridgeFolders(listDirs(extDir), folderName)) {
     fs.rmSync(path.join(extDir, stale), { recursive: true, force: true });
   }
@@ -277,7 +353,7 @@ async function launchServer() {
     }
     setStatus('starting', 'Starting VS Code server');
     installBridgeExtension();
-    writeTerminalSettings();
+    writeMachineSettings();
     const port = await freePort();
     const tokenFile = path.join(DATA_DIR, 'run', 'connection-token');
     fs.writeFileSync(tokenFile, CONNECTION_TOKEN, { mode: 0o600 });
@@ -288,6 +364,7 @@ async function launchServer() {
       dataDir: DATA_DIR,
       workspace: fs.existsSync(config.workspace) ? config.workspace : null,
       basePath: BASE_PATH,
+      proposedApiFor: [BRIDGE_ID],
     });
     const childEnv = buildServerEnv(env, {
       bridgeUrl: `http://${HOST}:${listenPort}`,
@@ -396,13 +473,13 @@ async function restartServer() {
 // ---------------------------------------------------------------------------
 // HTTP
 
-function readBody(req) {
+function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         reject(Object.assign(new Error('body too large'), { status: 413 }));
         req.destroy();
         return;
@@ -439,7 +516,7 @@ function sessionBody(folderParam) {
     ready,
     message: state.message,
     error: state.error,
-    url: ready ? workbenchUrl({ host: HOST, port: listenPort, basePath: BASE_PATH, folder }) : null,
+    url: ready && framePort ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder }) : null,
     folder,
     defaultFolder: config.workspace,
     generation: state.generation,
@@ -449,21 +526,70 @@ function sessionBody(folderParam) {
   };
 }
 
+function themeBody() {
+  return {
+    theme: theme ? { kind: theme.kind, vars: theme.vars, updatedAt: theme.updatedAt } : null,
+    colorTheme: vsTheme ? vsTheme.colorTheme : null,
+    signature: vsTheme ? themeSignature(vsTheme) : null,
+    applied: bridge.theme,
+  };
+}
+
+async function chatStatusBody(probe) {
+  const reason = gateway.unavailableReason;
+  const out = {
+    available: !reason,
+    reason: reason || null,
+    gateway: {
+      origin: gateway.origin || null,
+      token: gateway.tokenValue ? { exchangedAt: gateway.lastTokenAt, expiresAt: gateway.tokenExpiresAt() } : null,
+      lastError: gateway.lastError,
+    },
+    extension: {
+      connected: bridge.connected,
+      chat: bridge.extension ? bridge.extension.chat : null,
+    },
+    turns: chatStats.turns,
+    activeTurns: chatStats.active,
+    lastTurn: chatStats.lastTurn,
+  };
+  if (probe && !reason) {
+    try {
+      const st = await gateway.status();
+      out.gateway.reachable = true;
+      out.gateway.version = st.version;
+    } catch (e) {
+      out.gateway.reachable = false;
+      out.gateway.lastError = e.message;
+    }
+    out.gateway.token = gateway.tokenValue ? { exchangedAt: gateway.lastTokenAt, expiresAt: gateway.tokenExpiresAt() } : null;
+  }
+  return out;
+}
+
 const frameProxy = createFrameProxy(() =>
   state.status === 'ready' && state.serverPort ? { port: state.serverPort, token: state.token } : null,
 );
 
-async function handle(req, res) {
+/** The frame listener serves only the workbench under its key, and only to a loopback Host. */
+function handleFrame(req, res) {
   const url = new URL(req.url, `http://${HOST}`);
   const route = matchRoute(req.method, url.pathname, BASE_PATH);
+  if (route.name !== 'frame') return sendJson(res, 404, { error: 'not found' });
+  if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
+  return frameProxy.handleRequest(req, res);
+}
+
+async function handle(req, res) {
+  const url = new URL(req.url, `http://${HOST}`);
+  const route = matchRoute(req.method, url.pathname, null);
   if (route.error) return sendJson(res, route.error, { error: route.error === 404 ? 'not found' : 'method not allowed' });
 
   if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
-  if (route.auth === 'frame') return frameProxy.handleRequest(req, res);
 
   let body;
   try {
-    body = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req);
+    body = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req, route.name === 'bridgeChat' ? 256 * 1024 : MAX_BODY);
   } catch (e) {
     return sendJson(res, e.status || 400, { error: e.message });
   }
@@ -521,6 +647,19 @@ async function handle(req, res) {
       const wait = Math.min(Math.max(Number(url.searchParams.get('wait')) || 25, 0), 25) * 1000;
       const ac = new AbortController();
       res.on('close', () => ac.abort());
+      const host = url.searchParams.get('host');
+      if (bridge.isSuperseded(host)) {
+        // An older extension host (the pane was remounted): it gets no
+        // commands; it is held for the poll interval so it does not spin.
+        await new Promise((ok) => {
+          const t = setTimeout(ok, wait);
+          ac.signal.addEventListener('abort', () => {
+            clearTimeout(t);
+            ok();
+          });
+        });
+        return sendJson(res, 200, { commands: [], superseded: true });
+      }
       const batch = await bridge.take(wait, ac.signal);
       if (res.destroyed || res.writableEnded) {
         bridge.requeue(batch);
@@ -530,9 +669,71 @@ async function handle(req, res) {
     }
     case 'bridgeEvents': {
       const ev = parseJson(body);
+      const hostBefore = bridge.currentHost;
+      const extensionBefore = bridge.extension;
       if (!bridge.applyEvent(ev)) return sendJson(res, 400, { error: 'unknown event' });
+      // A new extension host (first start, a reload, a remount of the pane, a
+      // server restart) gets the current theme once; it writes it only if it
+      // differs. A repeated hello from the same host does not resend it.
+      const newHost = ev.type === 'hello' && (!extensionBefore || !ev.host || ev.host !== hostBefore);
+      if (newHost && vsTheme) bridge.enqueueLatest(themeCommand());
       res.writeHead(204);
       return res.end();
+    }
+    case 'themeGet':
+      return sendJson(res, 200, themeBody());
+    case 'theme': {
+      const parsed = parseJson(body);
+      if (parsed === undefined) return sendJson(res, 400, { error: 'body is not JSON' });
+      const v = validateTheme(parsed, body.length);
+      if (v.error) return sendJson(res, v.error.includes('bytes') ? 413 : 400, { error: v.error });
+      const next = toVsCodeTheme(v.theme);
+      const changed = !vsTheme || themeSignature(next) !== themeSignature(vsTheme) || theme.kind !== v.theme.kind;
+      if (changed) {
+        theme = { ...v.theme, updatedAt: new Date().toISOString() };
+        vsTheme = next;
+        fs.writeFileSync(THEME_FILE, JSON.stringify(theme, null, 2) + '\n');
+        writeMachineSettings();
+        bridge.enqueueLatest(themeCommand());
+        log('theme updated', theme.kind, Object.keys(theme.vars).length, 'vars');
+      }
+      return sendJson(res, 200, { ok: true, changed, ...themeBody() });
+    }
+    case 'chatStatus':
+      return sendJson(res, 200, await chatStatusBody(url.searchParams.get('probe') === '1'));
+    case 'chatAsk': {
+      const parsed = parseJson(body);
+      const prompt = parsed && typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
+      if (!prompt || prompt.length > 4000) return sendJson(res, 400, { error: 'prompt is required (at most 4000 characters)' });
+      const { id, done } = bridge.enqueue({ kind: 'askChat', prompt }, 8000);
+      const result = await done;
+      return sendJson(res, 200, { id, ...result, bridgeConnected: bridge.connected });
+    }
+    case 'bridgeChat': {
+      const parsed = parseChatRequest(parseJson(body), {
+        defaultFolder: bridge.extension?.workspaceFolders?.[0] || (fs.existsSync(config.workspace) ? config.workspace : null),
+      });
+      if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+      res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
+      const ac = new AbortController();
+      res.on('close', () => {
+        if (!res.writableFinished) ac.abort();
+      });
+      const write = (part) => {
+        if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(part) + '\n');
+      };
+      chatStats.active++;
+      const startedAt = new Date().toISOString();
+      try {
+        const r = await runChatTurn({ gateway, prompt: parsed.prompt, folder: parsed.folder, signal: ac.signal, write, log });
+        chatStats.turns++;
+        chatStats.lastTurn = { at: startedAt, outcome: r.outcome, slot: r.slot || null, error: r.error || null };
+        log('chat turn', r.outcome, r.slot || '', r.error || '');
+      } finally {
+        chatStats.active--;
+      }
+      if (!res.writableEnded) res.end();
+      return;
     }
     default:
       return sendJson(res, 404, { error: 'not found' });
@@ -545,10 +746,21 @@ const server = http.createServer((req, res) => {
     sendJson(res, 500, { error: 'internal error' });
   });
 });
-server.on('upgrade', (req, socket, head) => {
+// The API port never upgrades; the workbench socket lives on the frame port.
+server.on('upgrade', (_req, socket) => socket.destroy());
+
+const frameServer = http.createServer((req, res) => {
+  try {
+    handleFrame(req, res);
+  } catch (e) {
+    log('frame handler error', e.stack || e.message);
+    sendJson(res, 500, { error: 'internal error' });
+  }
+});
+frameServer.on('upgrade', (req, socket, head) => {
   const p = (req.url || '').split('?')[0];
   if (p !== BASE_PATH && !p.startsWith(BASE_PATH + '/')) return socket.destroy();
-  if (!upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort })) {
+  if (!upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort: framePort })) {
     log('refused WebSocket upgrade', `host=${String(req.headers.host).slice(0, 80)}`, `origin=${String(req.headers.origin).slice(0, 80)}`);
     socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;
@@ -556,11 +768,37 @@ server.on('upgrade', (req, socket, head) => {
   return frameProxy.handleUpgrade(req, socket, head);
 });
 // Long polls and VS Code's long-lived requests must not be cut by Node's defaults.
-server.requestTimeout = 0;
-server.headersTimeout = 60_000;
-server.keepAliveTimeout = 5_000;
+for (const s of [server, frameServer]) {
+  s.requestTimeout = 0;
+  s.headersTimeout = 60_000;
+  s.keepAliveTimeout = 5_000;
+}
 
 let listenPort = PORT;
+let framePort = 0;
+
+/** Bind the frame listener to its saved port, or a free one when that is taken; save what we got. */
+function listenFrame(preferred) {
+  return new Promise((resolve, reject) => {
+    const tryPort = (p, fallback) => {
+      const onError = (e) => {
+        frameServer.off('listening', onListening);
+        if (fallback && (e.code === 'EADDRINUSE' || e.code === 'EACCES')) {
+          log('frame port', p, 'unavailable', e.code, '- picking a new one');
+          tryPort(0, false);
+        } else reject(e);
+      };
+      const onListening = () => {
+        frameServer.off('error', onError);
+        resolve(frameServer.address().port);
+      };
+      frameServer.once('error', onError);
+      frameServer.once('listening', onListening);
+      frameServer.listen(p, HOST);
+    };
+    tryPort(preferred || 0, !!preferred);
+  });
+}
 
 function shutdown(code = 0) {
   if (state.stopping) return;
@@ -570,6 +808,7 @@ function shutdown(code = 0) {
   if (state.child) killTree(state.child.pid);
   bridge.cancelWaiters();
   server.close();
+  frameServer.close();
   setTimeout(() => process.exit(code), 200).unref();
 }
 process.on('SIGTERM', () => shutdown(0));
@@ -582,9 +821,19 @@ process.on('uncaughtException', (e) => {
   log('uncaught', e.stack || e.message);
 });
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   listenPort = server.address().port;
-  log('launcher listening', `${HOST}:${listenPort}`, 'data', DATA_DIR, 'signed', PROXY_SECRET ? 'yes' : 'no');
-  console.log(JSON.stringify({ event: 'listening', port: listenPort, pid: process.pid }));
+  try {
+    framePort = await listenFrame(frameState.port);
+  } catch (e) {
+    log('frame listener failed', e.message);
+    setStatus('error', 'Could not open the VS Code frame port', e.message);
+    return;
+  }
+  if (framePort !== frameState.port || !fs.existsSync(FRAME_STATE_FILE)) {
+    fs.writeFileSync(FRAME_STATE_FILE, serializeFrameState({ key: FRAME_KEY, port: framePort }), { mode: 0o600 });
+  }
+  log('launcher listening', `${HOST}:${listenPort}`, 'frame', `${HOST}:${framePort}`, framePort === frameState.port ? '(saved port)' : '(new port)', 'data', DATA_DIR, 'signed', PROXY_SECRET ? 'yes' : 'no');
+  console.log(JSON.stringify({ event: 'listening', port: listenPort, framePort, pid: process.pid }));
   launchServer();
 });
