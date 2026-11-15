@@ -10,7 +10,7 @@
 // therefore kept in one host element attached to document.body, placed over
 // the page's placeholder while the page is mounted and hidden (never removed)
 // while it is not.
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import { useAppApi, useTheme } from '@kirocrew/app-sdk';
 import {
   API,
@@ -22,6 +22,8 @@ import {
   framePlacement,
   CARD_MARGIN,
 } from './vscode-pane-core-0.3.1.mjs';
+import { STORE_KEYS, parseStoredOpen, toggleCounter, counterStep, frameRadii } from './vscode-pane-crew-core-0.3.1.mjs';
+import { CrewColumn } from './vscode-pane-crew-0.3.1.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
@@ -86,12 +88,14 @@ const CSS = `
   border:1px solid var(--vscp-border);background:transparent;color:var(--vscp-text);white-space:nowrap}
 .vscp-btn:hover{background:var(--vscp-hover);border-color:var(--vscp-border-strong)}
 .vscp-btn:focus-visible{outline:2px solid var(--vscp-ring);outline-offset:1px}
+.vscp-btn-on{background:var(--vscp-hover);border-color:var(--vscp-border-strong)}
 .vscp-btn-primary{background:var(--vscp-accent);color:var(--vscp-accent-fg);border-color:transparent}
 .vscp-btn-primary:hover{background:var(--vscp-accent-hover);border-color:transparent}
 .vscp-dot{width:8px;height:8px;border-radius:4px;display:inline-block;flex:none}
 .vscp-sep{width:1px;height:16px;background:var(--vscp-border);flex:none}
 .vscp-truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.vscp-body{position:relative;flex:1 1 auto;min-height:0;background:var(--vscp-bg)}
+.vscp-split{position:relative;display:flex;flex-direction:row;flex:1 1 auto;min-height:0;min-width:0}
+.vscp-body{position:relative;flex:1 1 auto;min-height:0;min-width:0;background:var(--vscp-bg)}
 .vscp-overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:13px}
 .vscp-frame-host{background:var(--vscp-bg)}
 .vscp-note{padding:6px 12px;font-size:12px;line-height:1.4;border-bottom:1px solid var(--vscp-border);color:var(--vscp-text);
@@ -129,6 +133,8 @@ const holder = {
   session: null, // last session seen, so a remount shows the live frame at once
   owner: null, // the mounted page's token, or null while unmounted
   kind: '', // last resolved dashboard kind, so a remount styles itself at once
+  crewSeen: null, // last crewChatToggle reading {instance, count}, so a remount does not replay presses
+  crewToggles: 0, // how often the counter toggled the column (the smoke reads it)
 };
 
 function ensureFrame() {
@@ -276,6 +282,14 @@ function storeFolder(v) {
   }
 }
 
+function readCrewOpen() {
+  try {
+    return parseStoredOpen(window.localStorage.getItem(STORE_KEYS.open));
+  } catch {
+    return true;
+  }
+}
+
 export default function VsCodePane() {
   ensureStyle();
   // The host may hand a new client object per render; read it through a ref so
@@ -283,10 +297,10 @@ export default function VsCodePane() {
   const apiNow = useAppApi();
   const apiRef = useRef(apiNow);
   apiRef.current = apiNow;
-  const api = {
+  const api = useMemo(() => ({
     get: (...a) => apiRef.current.get(...a),
     post: (...a) => apiRef.current.post(...a),
-  };
+  }), []);
   const sdkTheme = useTheme();
   // A `?folder=` (the composer's VS Code button) wins over the remembered folder.
   const [folder, setFolder] = useState(() => {
@@ -306,6 +320,21 @@ export default function VsCodePane() {
   const [kind, setKind] = useState(holder.kind || 'dark');
   const rootRef = useRef(null);
   const placeholderRef = useRef(null);
+  // The docked Kiro Crew chat column: open unless the user closed it.
+  const [crewOpen, setCrewOpen] = useState(readCrewOpen);
+  const crewOpenRef = useRef(crewOpen);
+  crewOpenRef.current = crewOpen;
+  const setCrew = useCallback((next) => {
+    setCrewOpen((cur) => {
+      const v = typeof next === 'function' ? next(cur) : next;
+      try {
+        window.localStorage.setItem(STORE_KEYS.open, v ? '1' : '0');
+      } catch {
+        /* storage blocked */
+      }
+      return v;
+    });
+  }, []);
 
   const ready = !!(session && session.ready && session.url);
   const key = frameKey(session, nonce);
@@ -441,6 +470,19 @@ export default function VsCodePane() {
     postTheme(false);
   }, [sdkTheme && sdkTheme.mode, sdkTheme && sdkTheme.colorTheme, sdkTheme && sdkTheme.accent, postTheme]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // VS Code's kiroCrew.toggleCrewChat (Ctrl+Alt+K, status bar, editor title)
+  // bumps crewChatToggle on GET /api/session; each press toggles the column.
+  const crewCount = toggleCounter(session);
+  const crewInstance = session && session.instance;
+  useEffect(() => {
+    const step = counterStep(holder.crewSeen, crewInstance, crewCount);
+    holder.crewSeen = step.seen;
+    if (step.toggle) {
+      holder.crewToggles += 1;
+      setCrew((o) => !o);
+    }
+  }, [crewCount, crewInstance, setCrew]);
+
   const generation = session && session.generation;
   const instance = session && session.instance;
   useEffect(() => {
@@ -497,7 +539,7 @@ export default function VsCodePane() {
       }
       const radius = parseFloat(getComputedStyle(root).borderBottomLeftRadius) || 0;
       const inner = Math.max(0, radius - 1);
-      const p = framePlacement(ph.getBoundingClientRect(), bounds, [0, 0, inner, inner]);
+      const p = framePlacement(ph.getBoundingClientRect(), bounds, frameRadii(inner, crewOpenRef.current));
       if (p) placeFrame(p);
       else hideFrame();
     };
@@ -532,7 +574,7 @@ export default function VsCodePane() {
   // card's colours) is a change no observer sees.
   useLayoutEffect(() => {
     scheduleRef.current();
-  }, [showFrame, key, kind]);
+  }, [showFrame, key, kind, crewOpen]);
 
   const reloadFrame = () => {
     holder.nonce += 1;
@@ -597,6 +639,10 @@ export default function VsCodePane() {
       }),
       h('datalist', { id: 'vscp-recent' }, recent.map((d) => h('option', { key: d, value: d }))),
       h('button', { type: 'submit', className: 'vscp-btn' }, 'Open folder')),
+    h('button', {
+      type: 'button', className: crewOpen ? 'vscp-btn vscp-btn-on' : 'vscp-btn', onClick: () => setCrew((o) => !o), 'aria-pressed': crewOpen ? 'true' : 'false',
+      title: crewOpen ? 'Hide the Kiro Crew chat (Ctrl+Alt+K in VS Code)' : 'Show the Kiro Crew chat (Ctrl+Alt+K in VS Code)', 'data-testid': 'vscode-pane-crew-toggle',
+    }, 'Kiro Crew'),
     h('button', { type: 'button', className: 'vscp-btn', onClick: reloadFrame, title: 'Reload the VS Code view' }, 'Reload'),
     h('button', { type: 'button', className: 'vscp-btn', onClick: doRestart, title: 'Restart the VS Code server process' }, 'Restart server'),
     h('span', { className: 'vscp-sep', 'aria-hidden': 'true' }),
@@ -644,5 +690,7 @@ export default function VsCodePane() {
   session && session.chat && session.chat.message
     ? h('div', { className: 'vscp-note', role: 'alert', 'data-testid': 'vscode-pane-chat-problem' }, `VS Code Chat: ${session.chat.message}`)
     : null,
-  h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay));
+  h('div', { className: 'vscp-split' },
+    h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay),
+    crewOpen ? h(CrewColumn, { api, session, folder, kind, onCollapse: () => setCrew(false) }) : null));
 }

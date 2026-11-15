@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
+import { crewChecks } from './lib/crew-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
 import { slotNameFor } from '../backend/lib/gateway.mjs';
@@ -258,6 +259,7 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
       railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), getComputedStyle(rail).marginBottom].join(' '),
       clip: host.style.clipPath, hostInside: hr.left >= r.left && hr.right <= r.right + 0.5 && hr.bottom <= r.bottom + 0.5 && hr.top >= r.top,
       bar: document.querySelector('[role="toolbar"]').getBoundingClientRect().height,
+      crew: !!document.querySelector('[data-testid="vscode-pane-crew"]'),
     };
   });
   // The stand-in reproduces App.tsx: <main> unpadded, the rail card's top level
@@ -269,8 +271,9 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     card && card.railGap === 8 && card.railTop === 0 && card.railBottom === 0 && JSON.stringify(card.inset) === '[0,0,8,8]', card && `gap ${card.railGap}, top ${card.railTop}, bottom ${card.railBottom}, inset ${JSON.stringify(card.inset)}`);
   check('pane card has the Sessions panel radius and border (16px, 1px)',
     card && card.radius === '16px' && card.border === '1px', JSON.stringify(card && { radius: card.radius, border: card.border }));
+  // With the Kiro Crew column docked on the right, only the bottom-left corner is the frame's.
   check('frame sits inside the card and is clipped to its rounded bottom corners',
-    card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
+    card && card.hostInside && (card.crew ? /round 0px 0px 0px 15px/ : /round 0px 0px 15px 15px/).test(card.clip), card && `${card.clip}${card.crew ? ' (crew column open)' : ''}`);
   check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
 
   // The frame is placed on change, not every animation frame, and still
@@ -1017,6 +1020,9 @@ async function main() {
       check('the pane goes back to the workspace folder and opens hello.txt', stBack && stBack.extension && Date.parse(stBack.extension.at) > tBack && reopenWs.json && reopenWs.json.ok, JSON.stringify(reopenWs.json));
       await sleep(3000); // let the workbench flush its storage
     }
+
+    // 12b. the docked Kiro Crew chat column (ui/vscode-pane-crew-*.mjs)
+    await crewChecks({ page, frame, hostServer, workspace, shotDir, check });
 
     // 13. the launcher restarts a VS Code server that dies
     if (process.platform === 'win32') {
