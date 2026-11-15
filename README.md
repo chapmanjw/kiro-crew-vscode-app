@@ -218,6 +218,14 @@ and approval policy.
 - Kiro Crew tab. `kiroCrew.openCrewChat` (Ctrl+Alt+K, the status bar "Crew"
   item and an editor title action) opens VS Code's "Kiro Crew" tab (see
   below). The 0.4.0 id `kiroCrew.toggleCrewChat` still runs it.
+- Where VS Code lists it. The session target picker under the chat input
+  (headed "Continue In" in this build) offers "Copilot" and "Kiro Crew", with
+  Kiro Crew current, and the Agent Sessions sidebar ("Chat Agent Sessions:
+  Show Agent Sessions Sidebar") lists each Kiro Crew chat as a "kirocrew
+  session" under its date. The browser workbench has no separate Agents window;
+  that sidebar is its equivalent. The session type is the app's own harness, so
+  it does not depend on the Local harness VS Code plans to remove. The smoke
+  test checks both and saves `session-target.png` and `agent-sessions.png`.
 - Proposals. It runs on the 1.146 proposed APIs `chatSessionsProvider`,
   `chatParticipantAdditions`, `chatParticipantPrivate` and `chatProvider`,
   enabled for the bridge by `--enable-proposed-api`. The 0.3.1 default
