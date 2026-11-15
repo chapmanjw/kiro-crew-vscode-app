@@ -17,6 +17,12 @@ export class Bridge {
     this.extension = null; // {version, pid, workspaceFolders}
     this.editor = null; // {path, selection, languageId, at}
     this.lastSaved = null; // {path, at}
+    this.theme = null; // {signature, applied, error, at} last theme result from the extension
+    // The extension host that said hello last. After a pane remount or reload
+    // the old host lingers until the server's shortened reconnection grace
+    // runs out (remoteExtensionHostAgentServer.ts:381-391), so commands go to
+    // the newest host only.
+    this.currentHost = null;
     this.events = 0;
   }
 
@@ -105,6 +111,24 @@ export class Bridge {
     });
   }
 
+  /**
+   * Queue a command that supersedes any queued command of the same kind (the
+   * theme: only the newest matters). Fire and forget.
+   */
+  enqueueLatest(command, timeoutMs = 8000) {
+    this.queue = this.queue.filter((c) => {
+      if (c.kind !== command.kind) return true;
+      this.expiry.delete(c.id);
+      return false;
+    });
+    return this.enqueue(command, timeoutMs);
+  }
+
+  /** True when `host` is an older extension host than the one that said hello last. */
+  isSuperseded(host) {
+    return !!(host && this.currentHost && host !== this.currentHost);
+  }
+
   /** Put undelivered commands back at the front of the queue (with a fresh TTL). */
   requeue(batch) {
     if (batch && batch.length) {
@@ -131,6 +155,21 @@ export class Bridge {
           version: str(ev.version),
           workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
           spawnTracked: ev.spawnTracked === true,
+          chat: chatInfo(ev.chat),
+          at,
+        };
+        if (typeof ev.host === 'string' && ev.host) this.currentHost = ev.host.slice(0, 64);
+        return true;
+      case 'theme':
+        this.theme = {
+          signature: str(ev.signature),
+          applied: ev.applied === true,
+          changed: ev.changed === true,
+          error: ev.error ? str(ev.error) : null,
+          readBack:
+            ev.readBack && typeof ev.readBack === 'object'
+              ? { colorTheme: str(ev.readBack.colorTheme), editorBackground: str(ev.readBack.editorBackground), count: Number(ev.readBack.count) || 0 }
+              : null,
           at,
         };
         return true;
@@ -167,6 +206,7 @@ export class Bridge {
       extension: this.extension,
       activeEditor: this.editor,
       lastSaved: this.lastSaved,
+      theme: this.theme,
       pendingCommands: this.queue.length,
     };
   }
@@ -174,6 +214,11 @@ export class Bridge {
 
 function str(v) {
   return typeof v === 'string' ? v.slice(0, 4096) : v == null ? null : String(v).slice(0, 4096);
+}
+
+function chatInfo(c) {
+  if (!c || typeof c !== 'object') return null;
+  return { participant: c.participant === true, defaultParticipant: c.defaultParticipant === true, model: c.model === true, error: c.error ? str(c.error) : null };
 }
 
 function sel(s) {

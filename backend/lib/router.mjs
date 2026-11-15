@@ -11,8 +11,13 @@ export const ROUTES = [
   { method: 'POST', path: '/api/open', name: 'open', auth: 'proxy' },
   { method: 'POST', path: '/api/restart', name: 'restart', auth: 'proxy' },
   { method: 'POST', path: '/api/file-menu', name: 'fileMenu', auth: 'proxy' },
+  { method: 'GET', path: '/api/theme', name: 'themeGet', auth: 'proxy' },
+  { method: 'POST', path: '/api/theme', name: 'theme', auth: 'proxy' },
+  { method: 'GET', path: '/api/chat/status', name: 'chatStatus', auth: 'proxy' },
+  { method: 'POST', path: '/api/chat/ask', name: 'chatAsk', auth: 'proxy' },
   { method: 'GET', path: '/api/bridge/commands', name: 'bridgeCommands', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/events', name: 'bridgeEvents', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/chat', name: 'bridgeChat', auth: 'bridge' },
 ];
 
 /**
