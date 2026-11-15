@@ -24,6 +24,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const KEEP = argv.includes('--keep');
 const serverDirArg = argv.includes('--server-dir') ? argv[argv.indexOf('--server-dir') + 1] : null;
+// --app-root runs the launcher and UI from a staged copy (scripts/stage.mjs) and
+// lets it find the server build through its own dev-config.json.
+const APP = argv.includes('--app-root') ? path.resolve(argv[argv.indexOf('--app-root') + 1]) : null;
+const APP_ROOT = APP || ROOT;
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -165,7 +169,8 @@ function portOpen(port) {
 async function main() {
   if (process.platform !== 'win32') console.log('note: process-tree checks are written for Windows');
   const serverDir = serverDirArg || findCachedServer();
-  if (!serverDir) throw new Error('no VS Code server build; run the R1-B probe or pass --server-dir');
+  if (APP) console.log(`app root ${APP} (server build from its dev-config.json)`);
+  if (!serverDir && !APP) throw new Error('no VS Code server build; run the R1-B probe or pass --server-dir');
   const runDir = path.join(ROOT, '.cache', 'smoke', `run-${Date.now()}`);
   const dataDir = path.join(runDir, 'data');
   const workspace = path.join(runDir, 'workspace');
@@ -179,8 +184,8 @@ async function main() {
   PORT = await freePort();
   console.log(`run dir ${runDir}\nserver build ${serverDir}\nlauncher port ${PORT}`);
 
-  const launcher = spawn(process.execPath, [path.join(ROOT, 'backend', 'launcher.mjs')], {
-    cwd: ROOT,
+  const launcher = spawn(process.execPath, [path.join(APP_ROOT, 'backend', 'launcher.mjs')], {
+    cwd: APP_ROOT,
     env: {
       ...process.env,
       PORT: String(PORT),
@@ -188,7 +193,7 @@ async function main() {
       KIROCREW_APP_NAME: 'vscode-pane',
       VSCODE_PANE_DATA_DIR: dataDir,
       VSCODE_PANE_WORKSPACE: workspace,
-      VSCODE_PANE_SERVER_DIR: serverDir,
+      ...(APP ? {} : { VSCODE_PANE_SERVER_DIR: serverDir }),
       VSCODE_PANE_NO_DOWNLOAD: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -260,7 +265,7 @@ async function main() {
     if (!check('found a local Chrome/Edge', !!exe, exe || '')) throw new Error('no browser');
     const pw = await loadPlaywright(ROOT);
     const hostPort = await freePort();
-    hostServer = createDashboardStandin({ repoRoot: ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
+    hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
     await new Promise((ok) => hostServer.listen(hostPort, '127.0.0.1', ok));
     browser = await pw.chromium.launch({ executablePath: exe, headless: true });
     const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });

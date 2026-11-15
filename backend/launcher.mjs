@@ -45,12 +45,20 @@ function log(...parts) {
   if (env.VSCODE_PANE_VERBOSE === '1') console.log(line);
 }
 
-let fileConfig = {};
-try {
-  fileConfig = parseConfig(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8'));
-} catch {
-  /* no config file */
+// Config precedence: env > data/config.json > <app root>/dev-config.json.
+// dev-config.json is written by scripts/stage.mjs for a local install and is
+// never committed.
+function readJsonFile(p) {
+  try {
+    return parseConfig(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return {};
+  }
 }
+const fileConfig = {
+  ...readJsonFile(path.join(APP_ROOT, 'dev-config.json')),
+  ...readJsonFile(path.join(DATA_DIR, 'config.json')),
+};
 const config = effectiveConfig(fileConfig, env, { homedir: os.homedir(), appRoot: APP_ROOT });
 
 const FRAME_KEY = randomSecret(18);
