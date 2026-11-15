@@ -10,7 +10,8 @@ import { buildMarks, extractPaths, PALETTE } from '../scripts/lib/icon-marks.mjs
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
-const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+// Line endings normalised: with core.autocrlf a checkout writes CRLF.
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const BLUES = ['#0065A9', '#007ACC', '#1F9CF0'];
 
 test('every icon field app.json names points at a file that parses', () => {
