@@ -6,17 +6,22 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.2.0). Tested standalone on Windows 11 with Node
-24.18 and VS Code server 1.146.0; not yet installed into a live Kiro Crew.
+Status: prototype (0.3.0). Tested standalone on Windows 11 with Node
+24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
+installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
 ## How it works
 
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.2.0.mjs, imported into the dashboard's React tree
- |   - toolbar: status, folder, Reload, Restart server, "Open file", active-file readout
- |   - <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=...">
+ |  app page: ui/vscode-pane-0.3.0.mjs, imported into the dashboard's React tree
+ |   - an inset rounded card like the Sessions panel, with a slim toolbar:
+ |     status, folder, Reload, Restart server, "Open file", active-file readout
+ |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
+ |     document.body and placed over the card, so it survives leaving the page
+ |  composer chip: ui/vscode-pane-session-0.3.0.mjs (contributes.sessionControls)
+ |   - opens the page on the chat's project folder
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
  v
@@ -145,6 +150,42 @@ gateways send.
 | `GET /api/bridge/commands?wait=25` | extension long poll; header `X-Kiro-Bridge-Secret` |
 | `POST /api/bridge/events` | extension events; same header |
 
+### The page in the dashboard
+
+- Card. The page draws itself as the same card as the Sessions panel:
+  `bg-elevated` surface, 1px `--border`, `--radius-xl` (16px) corners,
+  `--shadow-sm`, 8px from the edges of the dashboard's content area
+  (`website/src/components/listShell.ts` `LIST_SHELL_CLS`). It also carries the
+  `sidebar sidebar-inner` classes that card has, so a theme that retints the
+  Sessions panel (for example `kiro-light`) retints this one too. The dashboard
+  puts no header or padding around an app page (`AppPage.tsx` renders the
+  bundle straight into `<main>`), so the page sizes itself to the space left in
+  `<main>` on every animation frame.
+- VS Code keeps running when you leave the page. The dashboard unmounts an app
+  page whenever you go to another route, and an iframe taken out of the
+  document is destroyed, which is why 0.2.0 started over each time. The iframe
+  now lives in one element on `document.body`. While the page is mounted it is
+  placed over the card's body every frame (resize, side panels, scroll and zoom
+  all just move it) and clipped to the card's rounded bottom corners; while the
+  page is not mounted it is hidden, not removed, and loses keyboard focus. It is
+  reloaded only for another folder, the Reload button or a restarted server.
+- VS Code chip in the chat composer. `contributes.sessionControls` adds a
+  "VS Code" chip to the composer shelf, before the agent chip ("Ultra Mode")
+  and the project chip. Kiro Crew mounts the control when the chip is clicked
+  and hands it the chat's project folder (`session.cwd`); the control navigates
+  to `/apps/vscode-pane?folder=<that folder>` and the page opens it. A chat with
+  no project shows a short note and an "Open VS Code" button instead. The chip's
+  glyph comes from the host's fixed set (`Package`), because session controls
+  cannot use an app image.
+- Theme. On mount, on every dashboard theme change and after each server
+  restart the page reads the dashboard's effective colours (`--bg`,
+  `--bg-elevated`, `--panel`, `--border`, `--text`, `--muted`, `--accent` and
+  the other tokens in `ui/vscode-pane-core-0.3.0.mjs` `THEME_VARS`), resolves
+  each through the browser (including `color-mix()`), composites translucent
+  ones over `--bg`, and POSTs `{kind: "dark"|"light", vars: {"--bg": "#rrggbb",
+  ...}}` to `/apps/vscode-pane/api/theme`. `kind` comes from the background's
+  luminance, not the palette name. The backend applies it in VS Code.
+
 ### Open in VS Code from Kiro Crew file menus
 
 `app.json` declares one `contributes.fileMenuItems` row, "Open in VS Code", on
@@ -226,6 +267,39 @@ are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
 network access. The screenshot lands in `.cache/smoke/workbench.png`.
 
+In a git worktree, which has no `.cache`, put a gitignored `dev-config.json`
+in the worktree root naming the main checkout's server build and playwright
+install, so nothing is downloaded twice:
+
+```
+{ "serverDir": "<main>/.cache/serve-web/cli-data/serve-web/<commit>",
+  "devCacheRoot": "<main>/.cache/serve-web/cli-data/serve-web",
+  "smokeDepsRoot": "<main>" }
+```
+
+The smoke test and `stage.mjs` read it.
+
+The stand-in dashboard also has a nav rail, a scrolling `<main id="main-content">`,
+a Dracula-style dark palette and a light one with the dashboard's token names,
+a chat view whose composer shelf mounts the app's session control, and a router
+that unmounts the page when you leave it. With it the smoke test checks the
+card's radius, border and inset and the frame's clip; that the palette is POSTed
+on mount and again after switching to light and back, with every value as
+`#rrggbb`; that leaving the page unmounts it while the iframe stays in the
+document, hidden, and that coming back shows the same iframe element with no
+new workbench load, no new extension-host hello and the same editor tab; and
+that the composer chip lands on `/apps/vscode-pane?folder=<chat project>` and
+VS Code opens that folder. `.cache/smoke/pane-dark.png` is the pane in the dark
+palette.
+
+## Icon
+
+`ui/icon.svg` (sidebar) and `assets/icon.png` (store, rendered from it) are the
+real Visual Studio Code icon, copied from an installed VS Code
+(`resources/app/out/media/code-icon.svg`), not the Code-OSS art. The icon is a
+Microsoft trademark. Using it here is fine only for John's personal use on his
+own machine; swap it for original art before any public release of this app.
+
 ## Known limits
 
 - Same machine only. The iframe points at `127.0.0.1`, which resolves on the
@@ -245,6 +319,12 @@ network access. The screenshot lands in `.cache/smoke/workbench.png`.
   are expected to block in a cross-origin frame. Not yet tested in the desktop
   app.
 - Keyboard shortcuts the dashboard or Electron handles first never reach VS Code.
+- The kept-alive frame sits on `document.body` at `z-index: 2`, above the
+  dashboard's `<main>` and below its popovers and dialogs (`z-50` and up). A
+  dashboard element that overlaps the content area with a lower stacking order
+  would be drawn under it. Checked in the stand-in only.
+- Only one VS Code page per window: two dashboard windows each keep their own
+  frame, and therefore their own workbench.
 - Workspace trust stays on. A new folder opens in Restricted Mode until you
   trust it; the bridge declares support for untrusted workspaces so it keeps
   working.
