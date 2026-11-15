@@ -859,32 +859,37 @@ use on his own machine; swap it for original art before any public release of
 this app.
 
 `node scripts/render-icon.mjs` builds every other icon file from it. The
-full-colour mark becomes `assets/icon.png`. The flat marks use the same
-outline with two flat fills and no blue: the body takes `--ico-a` and the
-right-hand panel takes `--ico-b`, the two tokens Kiro Crew's built-in icons
-paint with. Their fallback colours come from John's Dracula Pro theme.
+flat marks keep the real outline with two flat fills: the body takes
+`--ico-a` and the right-hand panel takes `--ico-b`, written as
+`fill="var(--ico-a, ...)"` like Kiro Crew's built-in icons. The fallback
+colours are neutral greys meant to read as nav text on any theme: a muted
+grey on the idle row, and near-white (dark mode) or near-black (light mode)
+on the selected row. No blue, and nothing tied to one theme.
 
 | File | Manifest field | Shown |
 | --- | --- | --- |
-| `assets/icon.png` | `iconPath` | store, and the rail's selected row in light mode |
-| `assets/icon-dark.svg` | `iconPathDark` | store and the rail's selected row in dark mode (accent body, text panel) |
-| `ui/icon-idle.svg` | `ui.pages[0].iconInactiveUrl` | the rail row when it is not selected (muted body, accent panel), light or dark |
-| `ui/icon-mono.svg` | `ui.pages[0].iconUrl` | nowhere today; the rail reads a page `iconUrl` only when the app has no `iconPath` |
+| `assets/icon-flat.svg` | `iconPath` | the rail's selected row, the store tile and the detail page |
+| `ui/icon-idle.svg` | `ui.pages[0].iconInactiveUrl` | the rail row when it is not selected |
+| `ui/icon-mono.svg` | `ui.pages[0].iconUrl` | same file as `icon-flat.svg`; the rail reads it only when an app has no `iconPath` |
+| `assets/icon.png` | none | full colour; the avatar of the VS Code chat participant (`installBridgeExtension` in `backend/launcher.mjs`) |
 
 Kiro Crew draws an installed app's rail icon as a plain `<img>`, in 0.13.0-rc.1
 and in the 0.14 source alike (`shell/appShell.tsx:731-745`): only first-party
 `/app-assets/<a>/<b>.svg` files are inlined so theme variables reach them
-(`components/AppIcon.tsx:51`), and an installed app cannot place files there. So
-the colours are fixed per file. `ui/icon-idle.svg` and `ui/icon-mono.svg` carry
-a light and a dark palette and pick one with `@media (prefers-color-scheme:
+(`components/AppIcon.tsx:51`), and an installed app cannot place files there.
+So each file picks its colours itself, with `@media (prefers-color-scheme:
 dark)`. Chromium answers that query inside an `<img>` from the page's
-`color-scheme`, which Kiro Crew sets per mode, so they follow dark and light.
-They do not pick up another theme's hues, and in light mode the selected row
-still shows the blue `icon.png`, because the store and the rail share
-`iconPath`. The composer chip keeps the `Package` glyph: it accepts only a
-name from `AppIcon`'s eleven lucide icons, none of which depicts code, and the
-tunnel's chip-hiding CSS matches it by that glyph. The Kiro Crew change that
-would make all of these follow the theme is written up in
+`color-scheme`, which Kiro Crew sets per mode, so the icon switches with dark
+and light mode. It cannot take a theme's exact text or accent colour; a
+lucide glyph can, because it paints in `currentColor`. The only glyph the rail
+gives an installed app is `Package`, and only when the app declares no icon
+at all (`appShell.tsx:732-739`; `glyphAllowed` is false for installed apps,
+`appNav.ts:227`), so the flat VS Code mark is the closer match.
+
+The composer chip keeps the `Package` glyph: it accepts only a name from
+`AppIcon`'s eleven lucide icons, none of which depicts code, and the tunnel's
+chip-hiding CSS matches it by that glyph. The Kiro Crew change that would let
+both surfaces use the theme's own colours is written up in
 `research/kirocrew-icon-proposal.md`.
 
 ## Known limits

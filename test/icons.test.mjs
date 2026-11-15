@@ -1,22 +1,25 @@
-// The icon files app.json names exist, parse, and are the flat theme-coloured
-// marks built from ui/icon.svg.
+// The icon files app.json names exist, parse, and are the flat neutral marks
+// built from ui/icon.svg, so Kiro Crew's rail never shows the blue mark.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifestIconFiles, svgProblems, isPng } from '../scripts/lib/icon-checks.mjs';
-import { buildMarks, extractPaths, PALETTE } from '../scripts/lib/icon-marks.mjs';
+import { buildMarks, extractPaths, NEUTRAL } from '../scripts/lib/icon-marks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
 // Line endings normalised: with core.autocrlf a checkout writes CRLF.
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const BLUES = ['#0065A9', '#007ACC', '#1F9CF0'];
+// Dracula Pro's own colours: the marks must not be tied to one theme.
+const DRACULA = ['#B9A9FF', '#9C93C9', '#644AC9', '#565289', '#F8F8F2', '#2A2A2A', '#9580FF'];
+const SHIPPED = ['assets/icon-flat.svg', 'ui/icon-mono.svg', 'ui/icon-idle.svg'];
 
 test('every icon field app.json names points at a file that parses', () => {
   const files = manifestIconFiles(ROOT);
-  assert.deepEqual(files.map((f) => f.field), ['iconPath', 'iconPathDark', 'ui.pages[0].iconUrl', 'ui.pages[0].iconInactiveUrl']);
+  assert.deepEqual(files.map((f) => f.field), ['iconPath', 'ui.pages[0].iconUrl', 'ui.pages[0].iconInactiveUrl']);
   for (const { field, file } of files) {
     assert.ok(fs.existsSync(file), `${field}: ${file} missing`);
     const buf = fs.readFileSync(file);
@@ -28,35 +31,52 @@ test('every icon field app.json names points at a file that parses', () => {
   }
 });
 
-test('the rail icons are flat two-tone marks with no blue, painted from --ico-a/--ico-b', () => {
-  for (const rel of ['assets/icon-dark.svg', 'ui/icon-mono.svg', 'ui/icon-idle.svg']) {
-    const svg = read(rel);
-    for (const c of BLUES) assert.ok(!svg.toUpperCase().includes(c), `${rel} has ${c}`);
-    assert.doesNotMatch(svg, /Gradient|filter|mix-blend|<mask/, `${rel} must be flat`);
-    assert.match(svg, /\.a\{fill:var\(--ico-a,#[0-9A-F]{6}\)\}/, rel);
-    assert.match(svg, /\.b\{fill:var\(--ico-b,#[0-9A-F]{6}\)\}/, rel);
+test('the rail can never pick the blue mark: every manifest icon is a flat SVG', () => {
+  assert.equal(manifest.iconPath, 'assets/icon-flat.svg');
+  assert.ok(!('iconPathDark' in manifest) && !('iconUrl' in manifest) && !('iconUrlDark' in manifest));
+  for (const { field, file } of manifestIconFiles(ROOT)) {
+    assert.ok(file.endsWith('.svg'), `${field} must be an SVG`);
+    assert.ok(SHIPPED.includes(path.relative(ROOT, file).replace(/\\/g, '/')), `${field} must be a flat mark`);
   }
-  // Light/dark halves follow the dashboard's color-scheme; the dark-only file has none.
-  assert.match(read('ui/icon-idle.svg'), /@media \(prefers-color-scheme:dark\)/);
-  assert.match(read('ui/icon-mono.svg'), /@media \(prefers-color-scheme:dark\)/);
-  assert.doesNotMatch(read('assets/icon-dark.svg'), /@media/);
 });
 
-test('the flat marks are what scripts/render-icon.mjs builds from ui/icon.svg (same shape, current palette)', () => {
+test('the flat marks: no blue, no Dracula colours, neutral greys, --ico tokens, light/dark by color scheme', () => {
+  for (const rel of SHIPPED) {
+    const svg = read(rel).toUpperCase();
+    for (const c of [...BLUES, ...DRACULA]) assert.ok(!svg.includes(c), `${rel} has ${c}`);
+    assert.doesNotMatch(svg, /GRADIENT|FILTER|MIX-BLEND|<MASK/, `${rel} must be flat`);
+    // Every literal colour is a near-neutral grey (channel spread <= 0x18).
+    for (const [, hex] of svg.matchAll(/#([0-9A-F]{6})\b/g)) {
+      const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      assert.ok(Math.max(r, g, b) - Math.min(r, g, b) <= 0x18, `${rel}: #${hex} is not neutral`);
+    }
+    const raw = read(rel);
+    assert.match(raw, /fill="var\(--ico-a,#[0-9A-F]{6}\)"/, rel);
+    assert.match(raw, /fill="var\(--ico-b,#[0-9A-F]{6}\)"/, rel);
+    assert.match(raw, /@media \(prefers-color-scheme:dark\)/, rel);
+  }
+});
+
+test('the flat marks are what scripts/render-icon.mjs builds from ui/icon.svg', () => {
   const src = read('ui/icon.svg');
   const { silhouette, panel } = extractPaths(src);
-  const marks = buildMarks(src, PALETTE);
+  const marks = buildMarks(src);
   assert.equal(read('ui/icon-idle.svg'), marks.idle);
   assert.equal(read('ui/icon-mono.svg'), marks.lit);
-  assert.equal(read('assets/icon-dark.svg'), marks.darkLit);
+  assert.equal(read('assets/icon-flat.svg'), marks.lit);
   for (const svg of Object.values(marks)) {
     assert.ok(svg.includes(silhouette) && svg.includes(panel), 'uses the real VS Code paths');
   }
-  // Idle = muted structure + accent detail; selected = accent structure + text detail.
-  assert.ok(marks.idle.includes(`.a{fill:var(--ico-a,${PALETTE.light.muted})}`));
-  assert.ok(marks.idle.includes(`.b{fill:var(--ico-b,${PALETTE.dark.accent})}`));
-  assert.ok(marks.darkLit.includes(`.a{fill:var(--ico-a,${PALETTE.dark.accent})}`));
-  assert.ok(marks.darkLit.includes(`.b{fill:var(--ico-b,${PALETTE.dark.text})}`));
+  // Idle is the quieter pair, selected the text-strength pair.
+  assert.ok(marks.idle.includes(`.a{fill:var(--ico-a,${NEUTRAL.idle.light.a})}`));
+  assert.ok(marks.idle.includes(`.a{fill:var(--ico-a,${NEUTRAL.idle.dark.a})}`));
+  assert.ok(marks.lit.includes(`.b{fill:var(--ico-b,${NEUTRAL.lit.dark.b})}`));
+  assert.ok(marks.lit.includes(`.b{fill:var(--ico-b,${NEUTRAL.lit.light.b})}`));
+});
+
+test('the full-colour PNG stays only as the VS Code chat avatar', () => {
+  assert.ok(isPng(fs.readFileSync(path.join(ROOT, 'assets', 'icon.png'))));
+  assert.match(read('backend/launcher.mjs'), /path\.join\(APP_ROOT, 'assets', 'icon\.png'\)/);
 });
 
 test('svgProblems rejects broken or scripted SVG', () => {

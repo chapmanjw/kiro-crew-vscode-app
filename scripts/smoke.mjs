@@ -615,7 +615,7 @@ async function main() {
         }, text);
         if (local.length || parsed !== 'http://www.w3.org/2000/svg svg') bad.push(`${field}: ${[...local, parsed].join('; ')}`);
       }
-      check('app.json icon files exist and parse as SVG/PNG', icons.length >= 4 && !bad.length, bad.join(' | ') || `${icons.length} files`);
+      check('app.json icon files exist and parse as SVG/PNG', icons.length >= 3 && !bad.length, bad.join(' | ') || `${icons.length} files`);
     }
     const frameErrors = [];
     const pageErrors = [];

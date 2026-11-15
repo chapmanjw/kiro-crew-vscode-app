@@ -21,8 +21,7 @@
     ],
     "requiresDesktopApp": true
   },
-  "iconPath": "assets/icon.png",
-  "iconPathDark": "assets/icon-dark.svg",
+  "iconPath": "assets/icon-flat.svg",
   "permissions": {
     "api": [
       "/apps/vscode-pane/api",
