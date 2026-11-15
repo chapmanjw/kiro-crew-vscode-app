@@ -32,6 +32,16 @@ if (fs.existsSync(cacheRoot)) {
     if (fs.existsSync(path.join(dir, 'out', 'server-main.js'))) serverDir = dir;
   }
 }
+// A git worktree has no .cache of its own; its gitignored dev-config.json
+// names the main checkout's build instead.
+if (!serverDir) {
+  try {
+    const dev = JSON.parse(fs.readFileSync(path.join(ROOT, 'dev-config.json'), 'utf8'));
+    if (dev && typeof dev.serverDir === 'string' && fs.existsSync(path.join(dev.serverDir, 'out', 'server-main.js'))) serverDir = dev.serverDir;
+  } catch {
+    /* no dev-config.json */
+  }
+}
 if (serverDir) {
   fs.writeFileSync(path.join(dest, 'dev-config.json'), JSON.stringify({ serverDir }, null, 2) + '\n');
 }

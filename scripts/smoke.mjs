@@ -61,9 +61,24 @@ function check(name, ok, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A git worktree has no .cache of its own: its gitignored dev-config.json names
+// the main checkout's server build (`serverDir`) and playwright install
+// (`smokeDepsRoot`), so a worktree never downloads a second copy.
+function readDevConfig() {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(ROOT, 'dev-config.json'), 'utf8'));
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+const DEV = readDevConfig();
+
 function findCachedServer() {
   const root = path.join(ROOT, '.cache', 'serve-web', 'cli-data', 'serve-web');
-  if (!fs.existsSync(root)) return null;
+  if (!fs.existsSync(root)) {
+    return DEV.serverDir && fs.existsSync(path.join(DEV.serverDir, 'out', 'server-main.js')) ? DEV.serverDir : null;
+  }
   for (const name of fs.readdirSync(root)) {
     const dir = path.join(root, name);
     if (fs.existsSync(path.join(dir, 'out', 'server-main.js'))) return dir;
@@ -190,6 +205,137 @@ function portOpen(port) {
   });
 }
 
+// Round-2 UI checks, run in the stand-in dashboard once VS Code is up:
+// the inset rounded card, theme sync, the frame surviving an unmount, and the
+// composer's VS Code chip opening the chat's project folder.
+async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads }) {
+  const HEX = /^#[0-9a-f]{6}$/;
+  const frameHost = 'div[data-vscode-pane-frame-host]';
+
+  // Item 1: the card matches the Sessions panel card and the frame is clipped to it.
+  const card = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="vscode-pane-card"]');
+    const host = document.querySelector('div[data-vscode-pane-frame-host]');
+    const main = document.getElementById('main-content');
+    if (!el || !host) return null;
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const hr = host.getBoundingClientRect();
+    const mr = main.getBoundingClientRect();
+    return {
+      radius: cs.borderTopLeftRadius, border: cs.borderTopWidth, bg: cs.backgroundColor,
+      inset: [r.left - mr.left, r.top - mr.top, mr.right - r.right, mr.bottom - r.bottom].map((n) => Math.round(n)),
+      clip: host.style.clipPath, hostInside: hr.left >= r.left && hr.right <= r.right + 0.5 && hr.bottom <= r.bottom + 0.5 && hr.top >= r.top,
+      bar: document.querySelector('[role="toolbar"]').getBoundingClientRect().height,
+    };
+  });
+  check('pane is an inset card with the Sessions panel radius and border (16px, 1px, 8px inset)',
+    card && card.radius === '16px' && card.border === '1px' && card.inset.every((n) => n === 8), JSON.stringify(card));
+  check('frame sits inside the card and is clipped to its rounded bottom corners',
+    card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
+  check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
+
+  // Item 2 (UI half): the palette is POSTed on mount and on every theme change.
+  const waitTheme = async (pred, since = 0, ms = 10_000) => {
+    const t = Date.now();
+    while (Date.now() - t < ms) {
+      const hit = hostServer.themePosts.slice(since).reverse().find((p) => p.body && pred(p.body));
+      if (hit) return hit.body;
+      await sleep(200);
+    }
+    return null;
+  };
+  const dark = await waitTheme((b) => b.kind === 'dark' && b.vars && b.vars['--bg'] === '#21222c');
+  check('theme POST on mount: kind dark with the dashboard palette', !!dark, dark ? `${Object.keys(dark.vars).length} vars` : JSON.stringify(hostServer.themePosts.slice(-1)));
+  check('every theme value is normalised to #rrggbb (translucent and color-mix values composited)',
+    dark && Object.values(dark.vars).every((v) => HEX.test(v)) && HEX.test(dark.vars['--search-highlight'] || '') && dark.vars['--accent'] === '#bd93f9',
+    dark && JSON.stringify({ accent: dark.vars['--accent'], diffAdd: dark.vars['--diff-add'], search: dark.vars['--search-highlight'] }));
+  const before = hostServer.themePosts.length;
+  await page.evaluate(() => window.__standin.setTheme('light'));
+  const light = await waitTheme((b) => b.kind === 'light' && b.vars['--bg'] === '#fafafa', before);
+  check('theme change re-POSTs: kind light with the light palette', !!light && hostServer.themePosts.length > before, light && light.vars['--accent']);
+  const cardBg = await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="vscode-pane-card"]')).backgroundColor);
+  check('card and toolbar follow the dashboard variables', cardBg === 'rgb(255, 255, 255)', cardBg);
+  const beforeDark = hostServer.themePosts.length;
+  await page.evaluate(() => window.__standin.setTheme('dracula-dark'));
+  check('switching back to the dark theme re-POSTs it', !!(await waitTheme((b) => b.kind === 'dark' && b.vars['--bg'] === '#21222c', beforeDark)));
+
+  // Item 5: leaving the page and coming back keeps the same workbench.
+  const stateBefore = (await api('GET', '/api/state')).json;
+  const helloBefore = stateBefore && stateBefore.extension && stateBefore.extension.at;
+  const activeBefore = stateBefore && stateBefore.activeEditor && stateBefore.activeEditor.path;
+  await page.evaluate(() => document.querySelector('iframe[title="VS Code"]').setAttribute('data-smoke-mark', 'kept'));
+  const loadsBefore = getLoads();
+  const holderLoadsBefore = await page.evaluate(() => window.__vscodePane.loads);
+  const counts0 = await page.evaluate(() => ({ m: window.__standin.mounts, u: window.__standin.unmounts }));
+  await page.click('#nav-chat');
+  await page.locator('[data-testid="composer-context-shelf"]').waitFor({ timeout: 5000 });
+  const away = await page.evaluate(() => {
+    const host = document.querySelector('div[data-vscode-pane-frame-host]');
+    const f = document.querySelector('iframe[title="VS Code"]');
+    return { unmounts: window.__standin.unmounts, pageGone: !document.querySelector('[data-testid="vscode-pane-card"]'),
+      connected: !!(f && f.isConnected), visibility: host && getComputedStyle(host).visibility, visible: host && host.dataset.visible };
+  });
+  check('navigating away unmounts the page (as the dashboard router does)', away.pageGone && away.unmounts > counts0.u, JSON.stringify(away));
+  check('while away the VS Code frame is hidden but still in the document', away.connected && away.visibility === 'hidden' && away.visible === 'false', JSON.stringify(away));
+  await sleep(3000);
+  await page.click('#nav-vscode');
+  await page.locator('[data-testid="vscode-pane-card"]').waitFor({ timeout: 5000 });
+  await sleep(1500);
+  const back = await page.evaluate(() => {
+    const host = document.querySelector('div[data-vscode-pane-frame-host]');
+    const f = document.querySelector('iframe[title="VS Code"]');
+    return { mounts: window.__standin.mounts, mark: f && f.getAttribute('data-smoke-mark'), loads: window.__vscodePane.loads,
+      frames: document.querySelectorAll('iframe[title="VS Code"]').length, visible: host && host.dataset.visible };
+  });
+  check('coming back remounts the page and shows the same iframe element', back.mounts > counts0.m && back.mark === 'kept' && back.frames === 1 && back.visible === 'true', JSON.stringify(back));
+  check('no new workbench load after the remount', getLoads() === loadsBefore && back.loads === holderLoadsBefore, `document loads ${loadsBefore} -> ${getLoads()}, frame loads ${holderLoadsBefore} -> ${back.loads}`);
+  const stateAfter = (await api('GET', '/api/state')).json;
+  check('the extension host did not restart (no new bridge hello)', stateAfter && stateAfter.extension && stateAfter.extension.at === helloBefore, `${helloBefore} -> ${stateAfter && stateAfter.extension && stateAfter.extension.at}`);
+  const tab = ((await frame.locator('.tabs-container .tab.active').first().textContent({ timeout: 5000 }).catch(() => '')) || '').trim();
+  check('the same editor is still open in the workbench', activeBefore && path.basename(activeBefore).toLowerCase() === path.basename(target).toLowerCase() && /hello\.txt/i.test(tab),
+    `active ${activeBefore && path.basename(activeBefore)}, tab "${tab}"`);
+
+  // Item 4: the composer chip opens VS Code on the chat's project folder.
+  await page.click('#nav-chat');
+  await page.locator('[data-session-control-chip]').click({ timeout: 5000 });
+  let landed = '';
+  const t = Date.now();
+  while (Date.now() - t < 10_000) {
+    landed = await page.evaluate(() => location.pathname + location.search);
+    if (landed.startsWith('/apps/vscode-pane?folder=')) break;
+    await sleep(200);
+  }
+  check('composer VS Code chip navigates to the app page with ?folder=<chat project>', landed === `/apps/vscode-pane?folder=${encodeURIComponent(chatProject)}`, landed);
+  let src = '';
+  let folderValue = '';
+  const t2 = Date.now();
+  while (Date.now() - t2 < 20_000) {
+    src = (await page.locator('iframe[title="VS Code"]').getAttribute('src').catch(() => '')) || '';
+    folderValue = await page.locator('#vscp-folder').inputValue().catch(() => '');
+    if (src.includes(`folder=`) && decodeURIComponent(src.split('folder=')[1] || '').replace(/\//g, '\\').toLowerCase().endsWith(path.basename(chatProject).toLowerCase())) break;
+    await sleep(300);
+  }
+  check('the page takes the folder param and the frame loads that folder', folderValue === chatProject && /chat-project$/i.test(decodeURIComponent(src.split('folder=')[1] || '')), `input ${folderValue}; src folder ${decodeURIComponent(src.split('folder=')[1] || '').slice(-40)}`);
+  let explorer = '';
+  const t3 = Date.now();
+  while (Date.now() - t3 < 60_000) {
+    explorer = ((await frame.locator('.explorer-folders-view, .monaco-workbench .pane-header').first().textContent({ timeout: 2000 }).catch(() => '')) || '');
+    const title = await frame.locator('.monaco-workbench').count().catch(() => 0);
+    const tree = ((await frame.locator('.explorer-folders-view').first().textContent({ timeout: 1000 }).catch(() => '')) || '');
+    if (title && /from-chat\.md/i.test(tree)) {
+      explorer = tree;
+      break;
+    }
+    await sleep(1000);
+  }
+  check('VS Code shows the chat project in its explorer', /from-chat\.md/i.test(explorer), explorer.slice(0, 80));
+  await sleep(1000);
+  const shot = path.join(shotDir, 'pane-dark.png');
+  await page.screenshot({ path: shot });
+  check('dark-theme screenshot of the pane saved', fs.existsSync(shot), shot);
+}
+
 async function main() {
   if (process.platform !== 'win32') console.log('note: process-tree checks are written for Windows');
   const serverDir = serverDirArg || findCachedServer();
@@ -203,6 +349,10 @@ async function main() {
   const target = path.join(workspace, 'hello.txt');
   fs.writeFileSync(target, ['line one', 'line two', 'line three is the target', 'line four', ''].join('\n'));
   fs.writeFileSync(path.join(workspace, 'other.js'), 'console.log("other");\n');
+  // The chat's project folder in the stand-in, opened by the composer's VS Code chip.
+  const chatProject = path.join(runDir, 'chat-project');
+  fs.mkdirSync(chatProject, { recursive: true });
+  fs.writeFileSync(path.join(chatProject, 'from-chat.md'), '# opened from the chat composer\n');
 
   SECRET = crypto.randomBytes(24).toString('hex');
   PORT = await freePort();
@@ -297,14 +447,19 @@ async function main() {
     //    http://localhost:<port>; the page frames the workbench on 127.0.0.1 (cross-site).
     const exe = findBrowser();
     if (!check('found a local Chrome/Edge', !!exe, exe || '')) throw new Error('no browser');
-    const pw = await loadPlaywright(ROOT);
+    const pw = await loadPlaywright(DEV.smokeDepsRoot || ROOT);
     const hostPort = await freePort();
-    hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
+    hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace], chatCwd: chatProject });
     await new Promise((ok) => hostServer.listen(hostPort, '127.0.0.1', ok));
     browser = await pw.chromium.launch({ executablePath: exe, headless: true });
     const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
     const frameErrors = [];
     const pageErrors = [];
+    // Every workbench page load (the frame's own document), to prove a remount does not reload it.
+    let workbenchLoads = 0;
+    page.on('request', (r) => {
+      if (r.resourceType() === 'document' && r.url().startsWith(`http://127.0.0.1:${PORT}/vsc-`)) workbenchLoads++;
+    });
     page.on('pageerror', (e) => pageErrors.push(e.message));
     page.on('response', (r) => {
       if (r.url().startsWith(`http://127.0.0.1:${PORT}/`) && r.status() >= 400) frameErrors.push(`${r.status()} ${r.url().replace(/vsc-[^/]+/, 'vsc-<key>').slice(0, 120)}`);
@@ -437,6 +592,8 @@ async function main() {
     const shot = path.join(shotDir, 'workbench.png');
     await page.screenshot({ path: shot });
     check('screenshot saved', fs.existsSync(shot), shot);
+
+    await uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads: () => workbenchLoads });
 
     // 13. the launcher restarts a VS Code server that dies
     if (process.platform === 'win32') {
