@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: first prototype (0.1.0). Tested standalone on Windows 11 with Node
+Status: prototype (0.2.0). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0; not yet installed into a live Kiro Crew.
 
 ## How it works
@@ -14,7 +14,7 @@ Status: first prototype (0.1.0). Tested standalone on Windows 11 with Node
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.1.0.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.2.0.mjs, imported into the dashboard's React tree
  |   - toolbar: status, folder, Reload, Restart server, "Open file", active-file readout
  |   - <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=...">
  |
@@ -39,24 +39,71 @@ The pieces, in order of a cold start:
 1. The gateway starts `backend/launcher.mjs` with `PORT` and `KIROCREW_PROXY_SECRET`.
 2. The launcher finds a server build: `serverDir` from config, then
    `data/server/<commit>`, then the R1-B probe cache under `.cache/` (dev
-   only). If none matches the commit printed by `code --version`, it downloads
-   `https://update.code.visualstudio.com/commit:<commit>/server-win32-x64-web/stable`
-   (a ~245 MB zip) into `data/server/` and unpacks it with the `tar.exe` that
-   ships with Windows.
+   only). If none matches the commit printed by `code --version`, it asks
+   `https://update.code.visualstudio.com/api/versions/commit:<commit>/server-win32-x64-web/stable`
+   for the archive URL and its SHA-256, downloads the ~245 MB zip over https
+   only (a redirect to plain http is refused), checks the hash, and unpacks it
+   into `data/server/` with the `tar.exe` that ships with Windows.
 3. It copies `extension/kiro-crew-bridge` into `data/extensions` (and registers
-   it in `extensions.json`, which VS Code reads once it exists), writes a fresh
-   random connection token to `data/run/connection-token`, and spawns the
+   it in `extensions.json`, which VS Code reads once it exists), writes the
+   connection token to `data/run/connection-token` (one random token per
+   launcher run, reused across server restarts), and spawns the
    server directly with `node.exe out/server-main.js`. It does not use
    `code serve-web`, because that wrapper adds `X-Frame-Options: SAMEORIGIN`.
-4. The server's environment carries `KIROCREW_VSCODE_BRIDGE_URL` and
-   `KIROCREW_VSCODE_BRIDGE_SECRET`, and drops `KIROCREW_PROXY_SECRET`, `PORT`
-   and any host `VSCODE_*` variables so VS Code terminals and extensions never
-   see the app's proxy secret.
-5. The page asks `GET /api/session` for the frame URL and shows a loading or
+4. The server gets the user's own environment, not the gateway's. The gateway
+   starts app backends with a short allowlist of variables, so on Windows the
+   launcher rebuilds the logon environment the way Windows does: the
+   `HKLM\...\Session Manager\Environment` values, then `HKCU\Environment`
+   (user `Path` appended, other user values win), plus the per-session values
+   that live in no registry key (`USERNAME`, `USERPROFILE`, `APPDATA`,
+   `ProgramFiles(x86)` and the rest), with `%VAR%` expanded. Terminals in VS
+   Code therefore see `PSModulePath`, `GOPATH` and other user variables. From
+   the launcher's own environment only `KIROCREW_SPAWNED` and
+   `KIROCREW_SPAWN_INSTANCE` are carried over; the bridge address and secret
+   are added; `KIROCREW_PROXY_SECRET`, `PORT` and host `VSCODE_*` variables are
+   never passed. Off Windows the launcher environment is used as before.
+5. Terminals drop the gateway's tracking variables and the bridge variables.
+   The launcher writes `terminal.integrated.env.windows|linux|osx` entries set
+   to `null` into the server's Machine `settings.json`
+   (`data/server-data/data/Machine/settings.json`), which deletes them from
+   every integrated terminal. The server process keeps the tracking variables
+   on purpose. On Linux the gateway's orphan reap vouches for a dead backend's
+   process group by those variables, so they let it clean up an orphaned VS
+   Code server; terminal shells run in their own pty session and are outside
+   that group anyway, so dropping the variables there means nothing a user
+   starts in a terminal is ever mistaken for the backend. On Windows the
+   gateway stops a backend with a process-tree kill (`taskkill /T`) that
+   follows parent process ids, not variables, so stopping the app still takes
+   down the server, its extension host and any open terminals (the smoke test
+   checks this).
+6. The page asks `GET /api/session` for the frame URL and shows a loading or
    error state until the server answers.
-6. Opening the workbench starts the remote extension host, which loads the
-   bridge. The bridge long-polls `/api/bridge/commands` and posts `hello`,
-   `editor` (path and selection), `saved` and `result` events.
+7. Opening the workbench starts the remote extension host, which loads the
+   bridge. The bridge says hello at once, long-polls `/api/bridge/commands` and
+   posts `editor` (path and selection), `saved` and `result` events.
+
+### Restarts and failures
+
+- The frame URL (`/vsc-<key>`) and the connection token stay the same for the
+  whole launcher run. A new server process cannot resume the old workbench
+  session, because it does not know the workbench's reconnection token
+  (`remoteExtensionHostAgentServer.ts:419-470` rejects it). So `/api/session`
+  reports a `generation` that goes up each time a server becomes ready, the
+  page polls it every 2 s while VS Code is shown, and it reloads the frame
+  when the number changes. In the smoke test the bridge is back about 6 s
+  after the server is killed, with no user action.
+- A server that crashes after it was running is restarted with backoff (1 s
+  up to 30 s), at most 5 times in 5 minutes.
+- A server that starts but never answers is retried at most 3 times in 10
+  minutes.
+- A missing build or a failed or bad download is never retried on its own, so
+  the 245 MB download is not repeated in a loop.
+- When retries stop, `/api/session` reports `status: "error"`,
+  `autoRetry: false` and a message starting with "Stopped:". "Restart server"
+  in the toolbar (or "Try again") resets the budget and tries once more,
+  including a new download.
+- Open commands that VS Code has not picked up expire after 60 s, so opening
+  VS Code later does not replay old requests.
 
 ### Why the launcher proxies the workbench
 
@@ -68,7 +115,11 @@ workbench also needs the token in JavaScript for its WebSocket handshake
 directly with `?tkn=` therefore fails. The launcher's proxy:
 
 - serves the workbench only under an unguessable `/vsc-<key>` prefix (new per
-  launcher start); every other path is a 404,
+  launcher run); every other path is a 404,
+- refuses any request whose `Host` is not a loopback name (DNS rebinding), and
+  any WebSocket upgrade whose `Origin` is set and is not the frame's own
+  `http://127.0.0.1:<port>`, so no other web page can open the workbench
+  socket, the dashboard page included,
 - adds `Cookie: vscode-tkn=<token>` to every forwarded request and WebSocket
   upgrade, and strips every cookie the browser sent,
 - writes the token into the workbench configuration (`connectionToken`), and
@@ -86,7 +137,7 @@ gateways send.
 | Route | Purpose |
 |---|---|
 | `GET /health` | `{ok, status}`; unsigned |
-| `GET /api/session?folder=<path>` | status, error, frame URL for that folder, bridge state |
+| `GET /api/session?folder=<path>` | status, error, `autoRetry`, `generation`, frame URL for that folder, bridge state |
 | `GET /api/state` | bridge connected, active editor path and selection, last saved file |
 | `POST /api/open` `{path, line?, column?, kind?}` | `kind` is `openFile` (default), `openFolder` or `revealInExplorer`; waits up to 8 s for the extension's result |
 | `POST /api/restart` | restarts the VS Code server process |
@@ -149,19 +200,27 @@ standalone development. Logs are in `data/logs/launcher.log` and
 ```
 node --test "test/*.test.mjs"     # unit tests (node:test)
 node scripts/smoke.mjs            # end-to-end against the cached server build
+node scripts/smoke.mjs --minimal-env   # same, launcher started with only the gateway's env allowlist
 node scripts/stage.mjs            # clean install copy
 node scripts/smoke.mjs --app-root .cache/stage/vscode-pane   # same, from the staged copy
 node scripts/render-icon.mjs      # re-render assets/icon.png from ui/icon.svg
 ```
 
 The smoke test starts the launcher like the gateway would (random `PORT` and
-proxy secret), checks auth refusals, waits for the server, checks the
-workbench headers and a WebSocket 101 through the proxy, then loads the real UI
-page in headless Chrome from a `http://localhost` stand-in dashboard that signs
-proxy calls. It confirms the workbench renders in the cross-site frame, the
-bridge connects, `/api/open` and the toolbar both open a file at a line, the
-state readout follows, the file-menu route works, and a killed server is
-restarted. It stops the launcher with `taskkill /T /F` (what the gateway does
+proxy secret, plus the gateway's `KIROCREW_SPAWNED`/`KIROCREW_SPAWN_INSTANCE`),
+checks auth refusals, waits for the server, checks the workbench headers, a
+WebSocket 101 through the proxy, and the refusals for a foreign or dashboard
+`Origin` and a non-loopback `Host`. It then loads the real UI page in headless
+Chrome from a `http://localhost` stand-in dashboard that signs proxy calls. It
+confirms the workbench renders in the cross-site frame, opens a real VS Code
+terminal and checks (by name only, never printing values) that it sees
+`PSModulePath`, `USERNAME`, `ProgramFiles(x86)` and a user variable such as
+`GOPATH` and does not see the tracking, bridge or proxy variables, checks that
+the server process itself still has the tracking variable, and that the bridge
+connects. `/api/open` and the toolbar both open a file at a line, the state
+readout follows, and the file-menu route works. A killed server is restarted
+with the same frame URL and a new generation, the page reloads the frame on
+its own, the bridge reconnects and `/api/open` works again. It stops the launcher with `taskkill /T /F` (what the gateway does
 on Windows) and checks that every process from the run is gone and both ports
 are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
