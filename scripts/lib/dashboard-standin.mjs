@@ -18,10 +18,24 @@
 //  - records every POST /apps/vscode-pane/api/theme body (`themePosts`), and
 //    answers it with a stub when the launcher has no such route yet
 //  - answers /api/recent-projects
+//  - the docked Kiro Crew column's host side: a `ChatPanel` export in the SDK
+//    shim that records its props (window.__standinSdk.chatPanel) and opens a
+//    body-level picker menu like ChatPage's composer pickers, which
+//    window.__standinSdk.setChatPanel(false) removes to show the page's
+//    fallback; GET/POST /api/chat/slots and /api/chat/slots/<key>/project
+//    (`crewSlots`, `slotPosts`); /icon-192.png from the installed Kiro Crew
+//  - adds the two GET /api/session fields the bridge's toggle command feeds
+//    (`crewChatToggle`, `crewSlot`) when the launcher does not send them yet:
+//    `server.crewToggle` adds stand-in presses to the counter, and `server.stubCrewSlot = false`
+//    leaves `crewSlot` out so the page opens the slot itself
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { signProxyRequest } from '../../backend/lib/auth.mjs';
+import { slotNameFor } from '../../backend/lib/gateway.mjs';
+
+const KIROCREW_ICON = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'KiroCrew', 'resources', 'backend-dist', 'kirocrew-backend',
+  'Lib', 'site-packages', 'kiro_crew', 'static', 'dist', 'icon-192.png');
 
 const SDK_SHIM = `
 import React from 'react';
@@ -60,6 +74,51 @@ export function useTheme() {
   }, []);
   return t;
 }
+
+// ChatPanel stand-in: same props as website/src/app-sdk/ChatPanel.tsx
+// (slotKey, conversationOnly, expandSteps). It records what it was given and
+// draws a transcript, a composer and a model picker whose menu is appended to
+// <body> with position:fixed, the way the host's popovers escape their pane.
+const sdkState = window.__standinSdk = window.__standinSdk || { chatPanel: { mounts: 0, unmounts: 0, props: [], live: 0 } };
+function ChatPanelStub(props) {
+  const btn = React.useRef(null);
+  const [menu, setMenu] = React.useState(false);
+  React.useEffect(() => {
+    sdkState.chatPanel.mounts++;
+    sdkState.chatPanel.live++;
+    return () => { sdkState.chatPanel.unmounts++; sdkState.chatPanel.live--; };
+  }, []);
+  React.useEffect(() => {
+    sdkState.chatPanel.props.push({ ...props });
+  }, [props.slotKey, props.conversationOnly, props.expandSteps]);
+  React.useEffect(() => {
+    if (!menu || !btn.current) return undefined;
+    const b = btn.current.getBoundingClientRect();
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'stub-picker-menu');
+    el.setAttribute('role', 'menu');
+    Object.assign(el.style, { position: 'fixed', zIndex: '50', width: '260px', height: '180px', left: Math.max(4, b.right - 260) + 'px', top: Math.max(4, b.top - 184) + 'px',
+      background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,.4)', color: 'var(--text)', padding: '6px', boxSizing: 'border-box' });
+    el.textContent = 'claude-opus (stub model menu)';
+    document.body.appendChild(el);
+    return () => el.remove();
+  }, [menu]);
+  const h = React.createElement;
+  return h('div', { 'data-testid': 'crew-chatpanel-stub', 'data-slot': props.slotKey, 'data-conversation-only': String(!!props.conversationOnly),
+    style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } },
+    h('div', { style: { flex: '1 1 auto', padding: '12px', overflow: 'auto', fontSize: '13px' } },
+      h('div', { style: { color: 'var(--muted)', marginBottom: '8px' } }, 'ChatPage stub'),
+      h('div', { style: { background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '12px', padding: '8px 10px', marginBottom: '8px' } }, 'Session ' + props.slotKey),
+      h('div', { style: { padding: '4px 2px' } }, 'Hello from the Kiro Crew stand-in. Tool cards, approvals and the composer render here in the real host.')),
+    h('div', { style: { flex: 'none', margin: '8px', border: '1px solid var(--border)', borderRadius: '12px', background: 'var(--bg-elevated)', padding: '8px' } },
+      h('textarea', { 'aria-label': 'Message', placeholder: 'Message Kiro Crew', rows: 2, style: { width: '100%', boxSizing: 'border-box', resize: 'none', background: 'transparent', color: 'var(--text)', border: 0, outline: 'none', font: 'inherit' } }),
+      h('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
+        h('button', { ref: btn, type: 'button', 'data-testid': 'stub-picker', onClick: () => setMenu((m) => !m),
+          style: { height: '24px', borderRadius: '6px', border: '1px solid var(--border)', background: 'transparent', color: 'var(--muted)', font: '12px system-ui' } }, 'Model'))));
+}
+// A live binding, so setChatPanel(false) removes the export the way an older host lacks it.
+export let ChatPanel = ChatPanelStub;
+sdkState.setChatPanel = (on) => { ChatPanel = on ? ChatPanelStub : undefined; };
 `;
 
 // Token names from website/src/styles/design-tokens.css; values: a Dracula-style
@@ -107,6 +166,8 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
   const uiDir = path.join(repoRoot, 'ui');
   const control = ((manifest.contributes || {}).sessionControls || [])[0] || null;
   const themePosts = [];
+  const slotPosts = [];
+  const crewSlots = [];
   const page = `<!doctype html><html data-theme="dracula-dark"><head><meta charset="utf-8"><title>Kiro Crew stand-in</title>
 <style>${PALETTES}</style>
 <script type="importmap">${JSON.stringify({
@@ -204,6 +265,47 @@ createRoot(document.getElementById('main-content')).render(h(Root));
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
       return fs.createReadStream(file).pipe(res);
     }
+    if (url.pathname === '/icon-192.png') {
+      if (!fs.existsSync(KIROCREW_ICON)) {
+        res.writeHead(404);
+        return res.end();
+      }
+      res.writeHead(200, { 'content-type': 'image/png' });
+      return fs.createReadStream(KIROCREW_ICON).pipe(res);
+    }
+    if (url.pathname === '/api/chat/slots' || url.pathname.startsWith('/api/chat/slots/')) {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        let body = null;
+        try {
+          body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
+        } catch {
+          /* recorded as null */
+        }
+        const json = (status, v) => {
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(v));
+        };
+        if (req.method === 'GET' && url.pathname === '/api/chat/slots') return json(200, crewSlots);
+        if (req.method === 'POST' && url.pathname === '/api/chat/slots') {
+          slotPosts.push({ path: url.pathname, body });
+          const name = body && body.name;
+          let row = crewSlots.find((s) => s.key === name);
+          if (!row && name) crewSlots.push((row = { key: name, title: body.title || name, messages: 0, running: false }));
+          return json(row ? 200 : 400, row ? { key: row.key, project: row.project } : { error: 'name required' });
+        }
+        const m = /^\/api\/chat\/slots\/([^/]+)\/project$/.exec(url.pathname);
+        if (req.method === 'POST' && m) {
+          slotPosts.push({ path: url.pathname, body });
+          const row = crewSlots.find((s) => s.key === decodeURIComponent(m[1]));
+          if (row && body) row.project = body.project;
+          return json(row ? 200 : 404, row || { error: 'no such slot' });
+        }
+        return json(404, { error: 'not in the stand-in' });
+      });
+      return;
+    }
     if (url.pathname === '/api/recent-projects') {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ dirs: recentDirs }));
@@ -230,6 +332,34 @@ createRoot(document.getElementById('main-content')).render(h(Root));
             return true;
           });
         }
+        if (url.pathname === '/apps/vscode-pane/api/session' && req.method === 'GET') {
+          // The bridge's toggle counter and the folder's crew slot (the
+          // launcher's fields), filled in only when the launcher leaves them out.
+          return forward(req, res, url, body, (upRes) => {
+            if (upRes.statusCode !== 200) return false;
+            const parts = [];
+            upRes.on('data', (c) => parts.push(c));
+            upRes.on('end', () => {
+              let s = null;
+              try {
+                s = JSON.parse(Buffer.concat(parts).toString('utf8'));
+              } catch {
+                /* passed through below */
+              }
+              if (s && typeof s === 'object') {
+                // Stand-in presses add to the launcher's own count, so the smoke can press
+                // before and after the launcher reports the field.
+                s.crewChatToggle = (Number.isInteger(s.crewChatToggle) ? s.crewChatToggle : 0) + server.crewToggle;
+                if (server.stubCrewSlot && s.crewSlot === undefined && s.folder) {
+                  s.crewSlot = { key: slotNameFor(s.folder), folder: s.folder, title: `VS Code: ${path.basename(String(s.folder).replace(/[\\/]+$/, ''))}` };
+                }
+              }
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(s ? JSON.stringify(s) : Buffer.concat(parts));
+            });
+            return true;
+          });
+        }
         forward(req, res, url, body);
       });
       return;
@@ -238,6 +368,10 @@ createRoot(document.getElementById('main-content')).render(h(Root));
     res.end();
   });
   server.themePosts = themePosts;
+  server.slotPosts = slotPosts;
+  server.crewSlots = crewSlots;
+  server.crewToggle = 0;
+  server.stubCrewSlot = true;
   // A restarted backend listens on a new port, as the gateway's proxy would
   // follow it; the page keeps calling the same /apps/vscode-pane/api/ URLs.
   server.setLauncherPort = (p) => {
