@@ -1,17 +1,19 @@
 {
   "name": "kiro-crew-bridge",
   "displayName": "Kiro Crew Bridge",
-  "description": "Connects this VS Code to the Kiro Crew vscode-pane app: opens files Kiro Crew asks for and reports the active editor back.",
-  "version": "0.2.0",
+  "description": "Connects this VS Code to the Kiro Crew vscode-pane app: answers the Chat view with Kiro Crew's own agent harness, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
+  "version": "0.3.0",
   "publisher": "kiro-crew",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.95.0"
   },
   "extensionKind": [
     "workspace"
   ],
   "categories": [
+    "AI",
+    "Chat",
     "Other"
   ],
   "capabilities": {
@@ -20,11 +22,42 @@
     },
     "virtualWorkspaces": false
   },
+  "enabledApiProposals": [
+    "defaultChatParticipant"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "kiro-crew.default",
+        "name": "kirocrew-default",
+        "fullName": "Kiro Crew",
+        "description": "Ask Kiro Crew; the turn runs as a Kiro Crew chat session for this folder",
+        "isDefault": true,
+        "isSticky": true,
+        "modes": [
+          "ask",
+          "edit",
+          "agent"
+        ]
+      },
+      {
+        "id": "kiro-crew.agent",
+        "name": "kirocrew",
+        "fullName": "Kiro Crew",
+        "description": "Ask Kiro Crew; the turn runs as a Kiro Crew chat session for this folder",
+        "isSticky": true
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "kiro-crew",
+        "displayName": "Kiro Crew"
+      }
+    ],
     "commands": [
       {
         "command": "kiroCrewBridge.showStatus",

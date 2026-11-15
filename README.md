@@ -114,8 +114,9 @@ workbench also needs the token in JavaScript for its WebSocket handshake
 (`vscode/src/vs/workbench/browser/web.main.ts:327`). Framing the server
 directly with `?tkn=` therefore fails. The launcher's proxy:
 
-- serves the workbench only under an unguessable `/vsc-<key>` prefix (new per
-  launcher run); every other path is a 404,
+- serves the workbench only under an unguessable `/vsc-<key>` prefix on its
+  own frame port; every other path is a 404, and the API port serves no
+  workbench at all,
 - refuses any request whose `Host` is not a loopback name (DNS rebinding), and
   any WebSocket upgrade whose `Origin` is set and is not the frame's own
   `http://127.0.0.1:<port>`, so no other web page can open the workbench
@@ -142,8 +143,104 @@ gateways send.
 | `POST /api/open` `{path, line?, column?, kind?}` | `kind` is `openFile` (default), `openFolder` or `revealInExplorer`; waits up to 8 s for the extension's result |
 | `POST /api/restart` | restarts the VS Code server process |
 | `POST /api/file-menu` | target of the `Open in VS Code` row (`contributes.fileMenuItems`) |
-| `GET /api/bridge/commands?wait=25` | extension long poll; header `X-Kiro-Bridge-Secret` |
+| `GET /api/theme` | the stored Kiro Crew palette, the VS Code base theme and what the extension last applied |
+| `POST /api/theme` `{kind, vars?}` | apply the Kiro Crew theme in VS Code, tier "palette" or "base" (see Theme) |
+| `GET /api/chat/status[?probe=1]` | whether chat can run: gateway origin, app token, last error, the extension's chat registration, the last turn; `probe=1` also calls the gateway |
+| `POST /api/chat/ask` `{prompt}` | open VS Code's Chat view and submit a prompt to Kiro Crew there |
+| `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; header `X-Kiro-Bridge-Secret` |
 | `POST /api/bridge/events` | extension events; same header |
+| `POST /api/bridge/chat` `{prompt, folder?}` | one chat turn; streams newline-delimited JSON parts back; same header |
+
+### VS Code Chat answered by Kiro Crew
+
+VS Code's own Chat view talks to Kiro Crew instead of Copilot. Each request
+runs as a turn in a real Kiro Crew chat session for the open folder, so the
+agent, its tools, approvals and the history live in Kiro Crew.
+
+1. The bridge extension contributes a default chat participant
+   (`isDefault`, proposed API `defaultChatParticipant`) and a plain
+   `@kirocrew` one. The proposal is allowed on this stable server by
+   `--enable-proposed-api kiro-crew.kiro-crew-bridge`, which the server passes
+   to the web workbench (`webClientServer.ts:446`). Extension participants
+   win the default slot over the core Copilot setup agent
+   (`chatAgents.ts`, `_preferExtensionAgent`).
+2. It also registers a "Kiro Crew" language model (finalized
+   `vscode.lm.registerLanguageModelChatProvider`). VS Code resolves a model
+   for every chat request before calling any participant and only accepts a
+   Copilot model as the implicit default (`extHostLanguageModels.ts`,
+   `getLanguageModelForRequest`), so without it every request fails with
+   "Language model unavailable" while Copilot is signed out. Kiro Crew shows
+   up in the model picker; a direct call to the model is also answered by a
+   Kiro Crew turn.
+3. The launcher writes supported chat settings into the server's Machine
+   settings. `chat.defaultToCopilotHarness` and
+   `chat.editor.preferCopilotHarness` are turned off because 1.146 otherwise
+   starts new chats in the Copilot agent host, which never reaches extension
+   participants. `chat.mcp.autostart` is `never`, so VS Code does not stop each
+   request to start MCP servers it found in other tools' configs. The Copilot
+   sign-in buttons in the title bar and welcome page are hidden. No built-in
+   extension is removed.
+4. A request goes extension, `POST /api/bridge/chat`, launcher. The launcher
+   trades `KIROCREW_PROXY_SECRET` for an app token at
+   `POST /api/apps/vscode-pane/token` (header `X-App-Secret`), renews it 10
+   minutes before the hour is up and once more after a 401 or 403, finds or
+   creates the slot `vscode-<folder>-<hash>` with `POST /api/chat/slots`, points
+   it at the folder with `POST /api/chat/slots/{slot}/project`, and sends the
+   turn with `POST /api/chat`. That answers with an SSE stream of slot rows,
+   so no WebSocket is needed. Reply text streams as markdown, tool calls show
+   as italic lines, a pending approval shows a note to approve it in Kiro Crew.
+   Stopping the request in VS Code stops the turn with
+   `POST /api/chat/slots/{slot}/stop`.
+5. The app token is confined to `permissions.api`; chat needs `/api/chat`
+   (which covers `/api/chat/slots/...`) and `/api/status` for the probe.
+
+### Theme
+
+The theme has two tiers. Tier "palette" is the Kiro Crew colours as
+`workbench.colorCustomizations` on top of a stock base theme. Tier "base" is
+the stock theme alone: Dark Modern or Light Modern (the 1.146 ids of Default
+Dark Modern and Default Light Modern), picked by whether the Kiro Crew theme is
+dark or light.
+
+`POST /api/theme` takes `{kind: "dark"|"light", vars?: {"--bg": "#rrggbb", ...}}`.
+Only the envelope can be refused with a 400: a body that is not an object, an
+unknown top-level field, a missing or unknown `kind`, or more than 4 KB. A body
+with only `{kind}` is valid and gives tier "base". So do vars that are missing,
+malformed (not an object, an unknown variable name, a value that is not a hex
+colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
+4.5:1; the reply's `theme.reason` says why. Known names are `--bg --surface
+--panel --border --text --muted --accent` plus other dashboard names such as
+`--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
+`--danger`.
+
+In tier "palette" the launcher maps the colours to about 180
+`workbench.colorCustomizations` entries covering the editor, side bar, activity
+bar, title bar, status bar, panel, tabs, lists, inputs, buttons, focus borders,
+chat and the terminal, deriving missing shades from the background, text and
+accent. In tier "base" it sends no customizations, and both the server's
+Machine settings and the user settings lose any earlier palette, so no stale
+colours linger.
+
+The launcher keeps the result in `data/state/theme.json` and seeds the base
+theme (and the palette, in tier "palette") into the server's Machine settings,
+so the first paint is already themed. The extension writes the user settings
+with `ConfigurationTarget.Global` only when a value differs. Every new
+extension host (a start, reload or remount) gets the theme once and reports
+back what VS Code holds. `GET /api/session` carries `theme: {kind, tier}` and
+`GET /api/theme` adds the reason.
+
+### Browser-side state across remounts and restarts
+
+VS Code in the browser keeps its layout, open editors and user settings in the
+browser, per origin, and its workspace storage key includes the remote
+authority `127.0.0.1:<port>`. The gateway gives the launcher a new `PORT` on
+every start, so the workbench is served from a second listener whose port and
+path key are kept in `data/state/frame.json`. The next start binds the same
+port again (a new one only if something else holds it) and the frame URL is
+unchanged. A reload or remount of the pane, a VS Code server restart and a
+launcher restart all bring back the open editors (checked by the smoke test).
+After a remount the old extension host lingers until the server retires it, so
+the bridge sends commands only to the extension host that said hello last.
 
 ### Open in VS Code from Kiro Crew file menus
 
@@ -220,11 +317,24 @@ the server process itself still has the tracking variable, and that the bridge
 connects. `/api/open` and the toolbar both open a file at a line, the state
 readout follows, and the file-menu route works. A killed server is restarted
 with the same frame URL and a new generation, the page reloads the frame on
-its own, the bridge reconnects and `/api/open` works again. It stops the launcher with `taskkill /T /F` (what the gateway does
+its own, the bridge reconnects and `/api/open` works again. It also plays the Kiro Crew gateway with a mock
+(`test/support/gateway-mock.mjs`): the launcher exchanges its secret for an app
+token there, a prompt sent through `/api/chat/ask` must reach the mock from the
+default Chat view with no `@` mention, and the mock's reply must show in the
+Chat view. It seeds a saved theme before the start and checks the Machine
+settings, posts a second palette and reads the workbench setting back through
+the bridge and from the painted status bar, reloads the page and checks the
+open editor comes back, then restarts the launcher on a new API port and checks
+the frame keeps its origin and path and the editor is restored from the same
+browser profile. It stops the launcher with `taskkill /T /F` (what the gateway does
 on Windows) and checks that every process from the run is gone and both ports
 are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
-network access. The screenshot lands in `.cache/smoke/workbench.png`.
+network access. Screenshots land in `.cache/smoke/` (`workbench.png`,
+`chat.png`, `after-restart.png`). In a git worktree without its own `.cache`,
+a gitignored `dev-config.json` with `serverDir` (the cached server build) and
+`smokeDepsRoot` (a checkout whose `.cache/smoke-deps` has playwright-core) lets
+the smoke run without downloading anything.
 
 ## Known limits
 
@@ -252,8 +362,16 @@ network access. The screenshot lands in `.cache/smoke/workbench.png`.
 - Extension secrets (for example GitHub sign-in) use the browser's default
   secret storage, since the CLI's key-minting endpoint is not present. Not yet
   checked for persistence.
-- Two open VS Code windows (two frames) share one command queue; whichever
-  polls first runs a command.
+- Two open VS Code windows (two frames) share one command queue; the one that
+  connected last receives the commands.
+- Chat in a folder that is in Restricted Mode does not run: VS Code disables
+  all language models until the folder is trusted.
+- Chat relies on a proposed API (`defaultChatParticipant`) and on 1.146 chat
+  settings (`chat.defaultToCopilotHarness`); a later VS Code build may rename
+  them. Without the proposal the `@kirocrew` participant still answers.
+- If you sign in to Copilot in this VS Code, its default participant competes
+  with Kiro Crew's; which one wins the default slot depends on registration
+  order.
 - macOS and Linux are declared in `app.json` and the code has the POSIX paths,
   but only Windows was tested.
 
@@ -262,12 +380,9 @@ network access. The screenshot lands in `.cache/smoke/workbench.png`.
 1. Install into the live Kiro Crew 0.13.0-rc.1 desktop app from the staged
    copy and check the page height, focus, keyboard and clipboard inside the
    real dashboard.
-2. Give the bridge an app token (`POST /api/apps/vscode-pane/token` with the
-   proxy secret) so VS Code can call Kiro Crew directly, for example "send this
-   selection to a chat" or opening a chat in the workspace folder.
-3. Follow the active Kiro Crew chat's project folder, and add a chat side-panel
+2. Follow the active Kiro Crew chat's project folder, and add a chat side-panel
    tab (`contributes.panelTabs`) that shows VS Code's active file.
-4. Navigate to the app page automatically after "Open in VS Code" if Kiro Crew
+3. Navigate to the app page automatically after "Open in VS Code" if Kiro Crew
    adds a navigate action to `fileMenuItems` results.
-5. Try the `window.browserAPI` native view if iframe focus or clipboard
+4. Try the `window.browserAPI` native view if iframe focus or clipboard
    behaviour is not good enough in the desktop app.

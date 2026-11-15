@@ -7,7 +7,7 @@ import path from 'node:path';
  * The server is started directly, not through `code serve-web`, because the
  * CLI wrapper adds X-Frame-Options/frame-ancestors (R1-B section 2).
  */
-export function buildServerArgs({ host = '127.0.0.1', port, tokenFile, dataDir, workspace, basePath }) {
+export function buildServerArgs({ host = '127.0.0.1', port, tokenFile, dataDir, workspace, basePath, proposedApiFor = [] }) {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('invalid port');
   if (!tokenFile) throw new Error('tokenFile required');
   const args = [
@@ -21,6 +21,13 @@ export function buildServerArgs({ host = '127.0.0.1', port, tokenFile, dataDir, 
     '--disable-telemetry',
   ];
   if (basePath) args.push('--server-base-path', basePath);
+  // Lets the named extensions use proposed API on this stable build. The server
+  // hands the list to the web workbench (webClientServer.ts:446,
+  // enabledExtensionProposedApi), whose ExtensionsProposedApi honours it
+  // (workbench/services/extensions/common/extensionsProposedApi.ts).
+  for (const id of proposedApiFor) {
+    if (/^[a-z0-9-]+\.[a-z0-9-]+$/i.test(id)) args.push('--enable-proposed-api', id);
+  }
   if (workspace) args.push('--default-folder', workspace);
   return args;
 }
