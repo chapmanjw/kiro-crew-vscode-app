@@ -179,16 +179,19 @@ test('hideCopilotAgents: on hides the local harness, Cloud and Copilot CLI; off 
   assert.deepEqual(parseChatPrefs('{"hideCopilotAgents":"no"}'), { hideCopilotAgents: true });
 });
 
-test('router and bridge: session routes need the bridge secret; toggle and prefs events are counted', () => {
+test('router and bridge: session routes need the bridge secret; view and prefs events are kept', () => {
   for (const [m, p] of [['GET', '/api/bridge/sessions'], ['POST', '/api/bridge/sessions'], ['GET', '/api/bridge/sessions/history'], ['POST', '/api/bridge/approve'], ['POST', '/api/bridge/question']]) {
     assert.equal(matchRoute(m, p, null).auth, 'bridge', p);
   }
   for (const [m, p] of [['GET', '/api/chat/prefs'], ['POST', '/api/chat/prefs'], ['POST', '/api/chat/open-session']]) assert.equal(matchRoute(m, p, null).auth, 'proxy', p);
+  for (const [m, p] of [['POST', '/api/crew/view'], ['POST', '/api/secret-probe']]) assert.equal(matchRoute(m, p, null).auth, 'proxy', p);
   const b = new Bridge();
-  assert.equal(b.crewChatToggle, 0);
-  assert.ok(b.applyEvent({ type: 'toggleCrewChat' }));
-  assert.ok(b.applyEvent({ type: 'toggleCrewChat' }));
-  assert.equal(b.crewChatToggle, 2);
+  assert.equal(b.crewView, null);
+  assert.ok(b.applyEvent({ type: 'crewView', resolved: true, visible: true }));
+  assert.deepEqual({ ...b.crewView, at: undefined }, { resolved: true, visible: true, at: undefined });
+  assert.ok(b.applyEvent({ type: 'crewView', resolved: true, visible: 'yes' }));
+  assert.equal(b.crewView.visible, false, 'only a real boolean counts');
+  assert.equal(b.applyEvent({ type: 'toggleCrewChat' }), false, 'the 0.4.0 column toggle event is gone');
   assert.ok(b.applyEvent({ type: 'chatPrefs', hideCopilotAgents: false }));
   assert.equal(b.chatPrefs.hideCopilotAgents, false);
   assert.equal(b.applyEvent({ type: 'chatPrefs', hideCopilotAgents: 'no' }), false);
@@ -409,17 +412,17 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(machine['chat.editor.localAgent.enabled'], false);
     assert.equal(machine['github.copilot.chat.cloudAgent.enabled'], false);
 
-    // crew chat toggle counter and slot for the page
+    // the crew view state and slot for the page
     let s = (await proxy('GET', `/api/session?folder=${encodeURIComponent(workspace)}`)).json;
-    assert.equal(s.crewChatToggle, 0);
+    assert.equal(s.crewView, null);
+    assert.equal(s.crewChatToggle, undefined, 'no docked-column toggle counter any more');
     assert.deepEqual(s.crewSlot, { key: slotNameFor(workspace), folder: workspace, title: `VS Code: ${path.basename(workspace)}` });
-    assert.ok(Number.isInteger(s.crewChatToggle));
     // ...and the slot it names exists in Kiro Crew, pointed at the folder, before any chat turn
     for (let i = 0; i < 100 && !mock.rec.slots.has(slotNameFor(workspace)); i++) await sleep(50);
     assert.equal(mock.rec.slots.get(slotNameFor(workspace))?.project, workspace, 'GET /api/session creates the crew slot it names');
-    await bridgeCall('POST', '/api/bridge/events', { type: 'toggleCrewChat' });
+    await bridgeCall('POST', '/api/bridge/events', { type: 'crewView', resolved: true, visible: true });
     s = (await proxy('GET', '/api/session')).json;
-    assert.equal(s.crewChatToggle, 1);
+    assert.equal(s.crewView.visible, true);
 
     // two VS Code chat sessions -> two slots, both pointed at the folder
     const a = (await bridgeCall('POST', '/api/bridge/sessions', { folder: workspace, title: 'first' })).json.session;

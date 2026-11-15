@@ -156,25 +156,13 @@ export async function nativeChatChecks({ page, frame, api, check, gatewayMock, w
   );
   await until(async () => (await api('GET', '/api/chat/status')).json?.activeTurns === 0, 15_000);
 
-  // The crew chat toggle: keybinding and status bar item both bump the counter.
-  const c0 = (await api('GET', '/api/session')).json?.crewChatToggle ?? -1;
-  await frame.locator('.monaco-workbench .part.editor').first().click({ position: { x: 200, y: 200 } }).catch(() => {});
-  await page.keyboard.press('Control+Alt+KeyK');
-  const c1 = await until(async () => {
-    const v = (await api('GET', '/api/session')).json?.crewChatToggle;
-    return v > c0 ? v : 0;
-  }, 8000);
-  await frame.locator('[aria-label="Show or hide the Kiro Crew chat"]').first().click().catch(() => {});
-  const c2 = await until(async () => {
-    const v = (await api('GET', '/api/session')).json?.crewChatToggle;
-    return v > (c1 || c0) ? v : 0;
-  }, 8000);
+  // GET /api/session names the folder's crew slot for the page's overlay
+  // (Ctrl+Alt+K and the status bar item are checked with the Kiro Crew tab).
   const sess = (await api('GET', '/api/session')).json;
   check(
-    'kiroCrew.toggleCrewChat (Ctrl+Alt+K, status bar) increments crewChatToggle in GET /api/session, which also names the crew slot',
-    Number.isInteger(c0) && c0 >= 0 && c1 === c0 + 1 && c2 === c0 + 2 &&
-      !!sess.crewSlot && sess.crewSlot.key === slotNameFor(sess.folder) && sess.crewSlot.folder === sess.folder && /^VS Code: /.test(sess.crewSlot.title),
-    `${c0} -> ${c1} -> ${c2}; crewSlot ${JSON.stringify(sess.crewSlot)}`,
+    "GET /api/session names the folder's crew slot {key, folder, title}",
+    !!sess.crewSlot && sess.crewSlot.key === slotNameFor(sess.folder) && sess.crewSlot.folder === sess.folder && /^VS Code: /.test(sess.crewSlot.title),
+    `crewSlot ${JSON.stringify(sess.crewSlot)}`,
   );
 
   return { s1, s2 };
@@ -227,4 +215,53 @@ export async function historyChecks({ frame, api, check, slot, since }) {
     open.json && open.json.ok && ev && ev.turns >= 2 && !!shown,
     JSON.stringify({ open: open.json && open.json.ok, turns: ev && ev.turns, shown: !!shown }),
   );
+}
+
+/**
+ * VS Code's own surfaces list the Kiro Crew session type: the harness picker
+ * under the chat input ("Session Target") and the web build's Agent Sessions
+ * sidebar (the browser workbench has no separate Agents window). Screenshots
+ * go to `shotDir` (session-target.png, agent-sessions.png).
+ */
+export async function sessionTargetChecks({ page, frame, check, shotDir }) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const items = () => frame.locator('.context-view .monaco-list-row, .action-widget .monaco-list-row').evaluateAll((els) => els.map((r) => (r.getAttribute('aria-label') || r.textContent || '').trim()));
+  let listed = [];
+  let label = '';
+  for (let attempt = 0; attempt < 3 && !listed.some((t) => /^Kiro Crew/.test(t)); attempt++) {
+    await frame.locator('.monaco-workbench .part.editor').first().click({ position: { x: 200, y: 160 } }).catch(() => {});
+    await page.keyboard.press('Control+Alt+KeyI');
+    await sleep(1500);
+    const picker = frame.locator('.interactive-input-part .dropdown-label a.action-label').filter({ hasText: /Kiro Crew|Copilot|Local/ }).first();
+    label = ((await picker.textContent({ timeout: 5000 }).catch(() => '')) || '').trim();
+    await picker.click({ timeout: 5000 }).catch(() => {});
+    await sleep(1000);
+    listed = await items().catch(() => []);
+  }
+  await page.screenshot({ path: `${shotDir}/session-target.png` }).catch(() => {});
+  check('VS Code\'s session target picker under the chat input lists "Kiro Crew" (and it is the current one)',
+    listed.some((t) => /^Kiro Crew/.test(t)) && label === 'Kiro Crew', `current "${label}"; listed ${JSON.stringify(listed.map((t) => t.slice(0, 40)))}`);
+  await page.keyboard.press('Escape');
+  await sleep(400);
+  await page.keyboard.press('Control+Shift+KeyP');
+  await frame.locator('.quick-input-widget input').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+  await page.keyboard.type('Chat Agent Sessions: Show Agent Sessions Sidebar', { delay: 5 });
+  await sleep(600);
+  await page.keyboard.press('Enter');
+  let rows = [];
+  const t = Date.now();
+  while (Date.now() - t < 10_000) {
+    rows = await frame.locator('[aria-label="Agent Sessions"] .monaco-list-row, .agent-sessions-viewer .monaco-list-row').evaluateAll((els) => els.map((r) => (r.getAttribute('aria-label') || r.textContent || '').trim())).catch(() => []);
+    if (rows.length) break;
+    await sleep(500);
+  }
+  await sleep(500);
+  await page.screenshot({ path: `${shotDir}/agent-sessions.png` }).catch(() => {});
+  check('VS Code\'s Agent Sessions sidebar lists the Kiro Crew chat sessions', rows.length > 0, JSON.stringify(rows.slice(0, 6).map((r) => r.slice(0, 80))));
+  await page.keyboard.press('Control+Shift+KeyP');
+  await frame.locator('.quick-input-widget input').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+  await page.keyboard.type('Chat Agent Sessions: Hide Agent Sessions Sidebar', { delay: 5 });
+  await sleep(600);
+  await page.keyboard.press('Enter');
+  await sleep(500);
 }

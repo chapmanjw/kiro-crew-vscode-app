@@ -2,7 +2,7 @@
   "name": "kiro-crew-bridge",
   "displayName": "Kiro Crew Bridge",
   "description": "Connects this VS Code to the Kiro Crew vscode-pane app: makes Kiro Crew a native chat session type (streaming replies, tool cards, approvals and history from Kiro Crew chat sessions), keeps a default participant as the fallback, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "kiro-crew",
   "license": "MIT",
   "engines": {
@@ -72,9 +72,13 @@
         "title": "Kiro Crew: Show Bridge Status"
       },
       {
-        "command": "kiroCrew.toggleCrewChat",
-        "title": "Kiro Crew: Toggle Crew Chat",
+        "command": "kiroCrew.openCrewChat",
+        "title": "Kiro Crew: Open Crew Chat",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "kiroCrew.toggleCrewChat",
+        "title": "Kiro Crew: Open Crew Chat (0.4.0 id)"
       }
     ],
     "chatSessions": [
@@ -99,7 +103,7 @@
     ],
     "keybindings": [
       {
-        "command": "kiroCrew.toggleCrewChat",
+        "command": "kiroCrew.openCrewChat",
         "key": "ctrl+alt+k",
         "mac": "cmd+alt+k"
       }
@@ -107,8 +111,14 @@
     "menus": {
       "editor/title": [
         {
-          "command": "kiroCrew.toggleCrewChat",
+          "command": "kiroCrew.openCrewChat",
           "group": "navigation@100"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "kiroCrew.toggleCrewChat",
+          "when": "false"
         }
       ]
     },
@@ -122,6 +132,26 @@
           "markdownDescription": "Make Kiro Crew the default for new chats by hiding Copilot's own agents (the local Ask/Agent harness, Cloud and Copilot CLI) from the session-type picker. Turn off to bring them back; Kiro Crew sessions stay available either way."
         }
       }
+    },
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "kiroCrew",
+          "title": "Kiro Crew",
+          "icon": "media/kiro-crew.svg"
+        }
+      ]
+    },
+    "views": {
+      "kiroCrew": [
+        {
+          "type": "webview",
+          "id": "kiroCrew.chatView",
+          "name": "Kiro Crew",
+          "icon": "media/kiro-crew.svg",
+          "contextualTitle": "Kiro Crew"
+        }
+      ]
     }
   }
 }

@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.4.0). Tested standalone on Windows 11 with Node
+Status: prototype (0.5.0). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,15 +15,17 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.4.0.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.5.0.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
- |     status, folder, Reload, Restart server, "Open file", active-file readout
+ |     status, folder, Kiro Crew, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
- |   - a docked Kiro Crew chat column on the card's right (ui/vscode-pane-crew-0.4.0.mjs):
- |     the SDK's ChatPanel, the Chat page's own ChatPage, on the folder's session
- |  composer chip: ui/vscode-pane-session-0.4.0.mjs (contributes.sessionControls)
- |   - opens the page on the chat's project folder
+ |   - the Kiro Crew chat (ui/vscode-pane-crew-0.5.0.mjs): the SDK's ChatPanel,
+ |     the Chat page's own ChatPage, drawn exactly over VS Code's "Kiro Crew"
+ |     tab in its secondary side bar; the injected workbench script reports
+ |     where that tab is (postMessage, frame origin + per-run nonce)
+ |  composer chip: ui/vscode-pane-session-0.5.0.mjs (contributes.sessionControls)
+ |   - opens the page on the chat's project folder; hidden inside the embedded chat
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
  v
@@ -31,7 +33,9 @@ backend/launcher.mjs  on 127.0.0.1:<PORT>   (Node built-ins only, supervised by 
  |   /health                 unsigned, for the gateway health check
  |   /api/session|state|open|restart|file-menu   HMAC-verified proxy calls
  |   /api/bridge/commands|events                 bridge secret, used by the extension
- |   /vsc-<key>/*  HTTP + WebSocket reverse proxy; adds the connection token
+ |   /vsc-<key>/*  HTTP + WebSocket reverse proxy; adds the connection token,
+ |                 the secret-storage cookies and the view-overlay script
+ |   /_vscode-cli/mint-key   the workbench's secret-storage key (frame port)
  |
  |  spawns and restarts                                  long poll + events
  v                                                            ^
@@ -39,6 +43,7 @@ node.exe out/server-main.js  on 127.0.0.1:<random>            |
   (official VS Code server, --connection-token-file,          |
    --server-base-path /vsc-<key>)                             |
    '- remote extension host -- extension/kiro-crew-bridge ---'
+        (also contributes the "Kiro Crew" webview view to the secondary side bar)
 ```
 
 The pieces, in order of a cold start:
@@ -154,6 +159,8 @@ gateways send.
 | `POST /api/theme` `{kind, vars?}` | apply the Kiro Crew theme in VS Code, tier "palette" or "base" (see Theme) |
 | `GET /api/chat/status[?probe=1]` | whether chat can run: gateway origin, app token, last error, the extension's chat registration, the last turn; `probe=1` also calls the gateway |
 | `POST /api/chat/ask` `{prompt}` | open VS Code's Chat view and submit a prompt to Kiro Crew there |
+| `POST /api/crew/view` `{action: "reveal"}` or `{action: "move", to}` | open VS Code's "Kiro Crew" tab, or move the view to `auxiliarybar`, `sidebar` or `panel` (`vscode.moveViews`) |
+| `POST /api/secret-probe` `{op: "set", value}` or `{op: "get"}` | store or read one fixed probe value in the bridge's own `context.secrets`; the smoke test uses it to prove secrets persist. Nothing else in secret storage is reachable |
 | `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; header `X-Kiro-Bridge-Secret` |
 | `POST /api/bridge/events` | extension events; same header |
 | `POST /api/bridge/chat` `{prompt, folder?, slot?}` | one chat turn; streams newline-delimited JSON parts back; with `slot`, a turn of a Kiro Crew session type session; same header |
@@ -166,11 +173,16 @@ gateways send.
 | `POST /api/bridge/approve` | relay an approval answered in VS Code to `POST /api/chat/slots/{slot}/approve`; bridge header |
 | `POST /api/bridge/question` | relay a question's answer to the slot's question route; bridge header |
 
-`GET /api/session` also carries `crewChatToggle` (an integer the bridge's
-toggle command bumps) and `crewSlot: {key, folder, title}`, the folder's own
-Kiro Crew session, for the docked column. The launcher creates that slot,
-pointed at the folder, whenever it names it (at most every 30 s per folder),
-so it exists before any chat turn.
+`GET /api/session` also carries `crewSlot: {key, folder, title}`, the
+folder's own Kiro Crew session, for the chat drawn over the Kiro Crew tab, and
+`crewView: {resolved, visible, at}`, the tab's state as the bridge last
+reported it. The launcher creates that slot, pointed at the folder, whenever it
+names it (at most every 30 s per folder), so it exists before any chat turn.
+
+The frame port serves two more things besides `/vsc-<key>/*`:
+`POST /_vscode-cli/mint-key` (see "Secret storage" below) and, under the
+prefix, `/vsc-<key>/_kiro-crew/view-overlay.js`, the script the proxy adds to
+the workbench page (see "The Kiro Crew tab").
 
 ### Kiro Crew as a native VS Code chat session type (0.4.0)
 
@@ -203,9 +215,9 @@ and approval policy.
   and a first plain message go to Kiro Crew. Turn it off to bring them back;
   the launcher applies the change to the Machine settings live, and
   `POST /api/chat/prefs` changes it from the app side.
-- Toggle. `kiroCrew.toggleCrewChat` (Ctrl+Alt+K, a status bar item and an
-  editor title action) bumps `crewChatToggle` on `GET /api/session`, which
-  shows or hides the docked Kiro Crew column (see below).
+- Kiro Crew tab. `kiroCrew.openCrewChat` (Ctrl+Alt+K, the status bar "Crew"
+  item and an editor title action) opens VS Code's "Kiro Crew" tab (see
+  below). The 0.4.0 id `kiroCrew.toggleCrewChat` still runs it.
 - Proposals. It runs on the 1.146 proposed APIs `chatSessionsProvider`,
   `chatParticipantAdditions`, `chatParticipantPrivate` and `chatProvider`,
   enabled for the bridge by `--enable-proposed-api`. The 0.3.1 default
@@ -302,7 +314,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.4.0.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.5.0.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -392,6 +404,25 @@ the bridge sends commands only to the extension host that said hello last.
   VS Code mark there needs Kiro Crew to accept an `iconUrl` on session controls
   (kept by the manifest model, resolved under the app's `ui/`) and pass it to
   `AppIcon` in `ContextShelf.tsx`.
+- The chip is hidden inside the chat drawn over the Kiro Crew tab, where it
+  would only open the VS Code you are already in, and stays on every normal
+  Kiro Crew session. No supported way exists: in 0.13.0-rc.1 and the 0.14.0
+  source a session control has no visibility or `when` field
+  (`hooks/useSessionControls.ts` keeps `id`, `entryPoint`, `label`, `icon`,
+  `statusPath`), a `statusPath` answer can only set `state` (`ok`, `warn`,
+  `none`), `tooltip` and `detail` (`normalizeStatus`), the chip gets neither the
+  slot nor the embedding context, and `ChatPanelProps` is `{slotKey,
+  conversationOnly, expandSteps}`. The fallback is CSS scoped to the overlay's
+  own root (`.vscp-crew-overlay`, `chipHideCss` in
+  `ui/vscode-pane-crew-core-0.5.0.mjs`): it hides
+  `button[data-session-control-chip]` whose icon `<svg>` has the class
+  `lucide-package` (the chip's `Package` icon, rendered by lucide-react with
+  that class in both versions), and the chip row's wrapper when that was its
+  only chip. It never matches by text and touches nothing outside the subtree
+  the page renders. Limit: another app's chip that also uses the `Package` icon
+  (or an unknown icon, which falls back to `Package`) is hidden in the embedded
+  chat too. A Kiro Crew change that adds a per-surface visibility rule to
+  session controls would replace this.
 - Theme. On mount, on every dashboard theme change and after each server
   restart the page POSTs to `/apps/vscode-pane/api/theme`. The body always has
   `kind` (`"dark"` or `"light"`), taken in this order: the palette name on
@@ -401,64 +432,178 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.4.0.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.5.0.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
   by `kind`.
 
-### Kiro Crew chat column
+### The Kiro Crew tab in VS Code's right pane (0.5.0)
 
-The card holds VS Code on the left and a Kiro Crew chat column on the right,
-docked flush against the card's right edge the way VS Code's secondary side
-bar sits in the workbench. The column renders the App SDK's `ChatPanel` with
-`conversationOnly`, which mounts the Kiro Crew Chat page's own `ChatPage`
-(`website/src/app-sdk/ChatPanel.tsx`), so the transcript, tool cards,
-approvals, queue, follow-ups, composer and the model and agent pickers are the
-ones you see in the main session pane. `conversationOnly` drops only
-ChatPage's sessions rail and its URL sync. VS Code's own Chat view stays
-enabled next to it; the page sets nothing that hides it.
+Kiro Crew's chat is a tab in VS Code's own secondary side bar, next to Chat
+(and Claude Code, when it is installed), the way Claude Code adds its tab. The
+docked column of 0.4.0, its sash and its width settings are gone.
 
-- Session. By default the column shows the folder's main Kiro Crew session,
-  the "VS Code: &lt;folder&gt;" one in your sidebar. The launcher names it on
-  `GET /api/session` as `crewSlot: {key, folder, title}` (`crewSlotKey` and
-  R3's `chatSlot.key` are read too) and creates it in Kiro Crew, pointed at
-  the folder, so the page never creates a slot itself. With no folder the
-  column asks you to open one.
-- Header. 35px, the height of a VS Code side-bar title: the Kiro Crew icon
-  (`/icon-192.png` from the dashboard, a "KC" glyph if it cannot load), the
-  session title as a session switcher, "Open in Kiro Crew" (the session on the
-  Chat page) and a collapse button.
-- Session switcher. Lists the Kiro Crew sessions whose project is this folder,
-  from `GET /api/chat/slots`, the folder's main session first and the rest by
-  last activity, so the per-chat sessions VS Code's native Chat opens show up
-  too. The pick is remembered per folder.
-- Width. A 4px sash on the column's left edge resizes it by drag or with the
-  arrow keys (Home or a double-click resets it). The default is 420px, the
-  minimum 360px, and VS Code always keeps at least 320px. The width and the
-  open state are kept in `localStorage`.
-- Open and close. The toolbar's "Kiro Crew" button toggles the column, and so
-  does VS Code: the bridge's `kiroCrew.toggleCrewChat` command (Ctrl+Alt+K,
-  the status bar item and the editor title action) bumps `crewChatToggle` on
-  `GET /api/session`, and each step up toggles the column within one session
-  poll (2 s). The first reading after the page mounts is a baseline, so coming
-  back to the page never replays old presses.
-- VS Code frame. The kept-alive frame is placed over the narrower frame slot,
-  so it follows the sash and the toggle through the same `ResizeObserver`. With
-  the column open only the card's bottom-left corner is the frame's to round.
-  The column sits above the frame host (`z-index: 3`), so a frame that lags a
-  resize by one animation frame never covers it.
-- Leaving the page. ChatPanel is host React code tied to the dashboard's store,
-  so it cannot be kept on `document.body` like the iframe. Leaving the page
-  unmounts it, and coming back mounts it again on the same session with the
-  column's open state and width as they were. The conversation lives in the
-  gateway and the dashboard's store, so nothing in it is lost.
-- Older hosts. The column imports the SDK as a namespace and reads
-  `ChatPanel` at render time. A host without it shows a note and an "Open in
-  Kiro Crew" button instead. The column never falls back to `ChatEmbed`, whose
-  composer is not the session pane's.
-- Theme. The column uses the same `--vscp-*` variables as the card, which are
-  the dashboard's own tokens.
+- The tab. The bridge contributes `viewsContainers.secondarySidebar` `kiroCrew`
+  ("Kiro Crew") with one webview view, `kiroCrew.chatView`, the same shape as
+  Claude Code's `claude-sidebar-secondary` (R3 section 1;
+  `viewsExtensionPoint.ts:74`, `:323`). The view draws only a placeholder and
+  no script.
+- What draws the chat. VS Code has no API that tells an extension where its
+  view is on screen, and a webview cannot see its own position. The launcher's
+  frame proxy therefore adds `<script src="/vsc-<key>/_kiro-crew/view-overlay.js">`
+  to the workbench page (same origin, so the workbench CSP's `script-src 'self'`
+  allows it, `webClientServer.ts:150`). The script (`backend/lib/view-overlay.js`)
+  finds the view's webview iframe by its `extensionId` and `purpose=webviewView`
+  query (`webviewElement.ts:456-479`) and the pane element it is anchored to
+  (the overlay's `position-anchor`, `base/browser/overlayLayoutElement.ts`), and
+  tells the page the rectangle, whether the view shows, which part it is in and
+  whether it has focus. The page places the SDK's `ChatPanel conversationOnly`
+  (the Chat page's own `ChatPage`, `website/src/app-sdk/ChatPanel.tsx`) exactly
+  over that rectangle, mapped through the iframe's box and scaled by the
+  iframe's size over the frame's viewport.
+- Event driven. The script measures on a `ResizeObserver` (the pane, the
+  webview iframe, the document), a `MutationObserver` on the workbench
+  (attributes `class`, `style`, `aria-hidden`; text rendering inside editors
+  and terminals is skipped), window resize, focus and drag events, at most once
+  per animation frame, and posts only when the result changed. There is no
+  timer loop; the smoke test counts the measurements while idle.
+- Messages. The frame says `{type: 'kc-view-ready'}` (no data) when it loads.
+  The page answers with `{type: 'kc-view-hello', nonce}` to the frame's own
+  origin; the nonce is random per load of the page module. Every report then
+  goes only to that origin and carries the nonce. The page accepts a report only
+  when `event.origin` is the frame's origin, `event.source` is the frame's
+  `contentWindow` and the nonce matches (`acceptViewMessage` in
+  `ui/vscode-pane-crew-core-0.5.0.mjs`); anything else is counted and dropped.
+- Hiding. The overlay is hidden while the view is hidden (another tab in that
+  part, the side bar closed, the view collapsed or not created yet), while a
+  drag is in progress in VS Code, and while any of these VS Code overlays
+  intersects the view: quick input and the command palette
+  (`.quick-input-widget`), context views and menus (`.context-view`,
+  `.monaco-menu-container`), dialogs (`.monaco-dialog-modal-block`,
+  `.monaco-dialog-box`), notification toasts and the notification center, and
+  hovers (`.workbench-hover`, `.monaco-hover`).
+- Opening it. Clicking the tab, Ctrl+Alt+K, the status bar "Crew" item, the
+  editor title action and the page toolbar's "Kiro Crew" button
+  (`POST /api/crew/view {action: "reveal"}`) all run
+  `workbench.view.extension.kiroCrew`, then `kiroCrew.chatView.focus` when the
+  view was moved out of its container.
+- Header. A 30px strip at the top of the rectangle keeps the pieces of the old
+  column header that still make sense: the Kiro Crew icon, the session title as
+  a session switcher (the folder's sessions from `GET /api/chat/slots`, the
+  main one first) and "Open in Kiro Crew". VS Code's own view title above it
+  already says "Kiro Crew", so there is no collapse button; closing the side bar
+  or picking another tab hides the chat.
+- Focus. When VS Code gives the view focus (its tab is clicked, Ctrl+Alt+K) the
+  page moves the keyboard into the chat composer. Clicking the chat takes focus
+  out of VS Code, and clicking VS Code takes it back, as with any two panes.
+  When the overlay hides while it has focus (a VS Code popup opened over it),
+  the page hands the keyboard back to the VS Code frame, so the popup gets it.
+- Shortcuts. While the chat has focus, F1-F12 and Ctrl, Alt or Meta chords that
+  the chat did not handle go to VS Code (the frame replays them as key events,
+  with `keyCode` set the way VS Code reads it), so F1, Ctrl+Shift+P, Ctrl+P and
+  Ctrl+Alt+K work from the chat. Copy, cut, paste, select all, undo, redo, word
+  moves and deletes, Ctrl+Enter and AltGr characters stay in the chat
+  (`shouldForwardKey`). Those forwarded chords do not reach the dashboard's own
+  shortcuts, the same as when VS Code itself has focus.
+- Moving the view. Dragged to the primary side bar or the panel (or moved with
+  `POST /api/crew/view {action: "move", to}`), the chat follows it there: the
+  script reports the new pane. Moved into a new VS Code window, the view is not
+  in the workbench page any more, so the chat hides (the page cannot draw into
+  another window).
+- Zoom. Dashboard zoom (Electron or browser zoom) scales both documents alike,
+  so CSS pixels line up. A scale between the iframe and its viewport (CSS zoom
+  or a transform on the way) is corrected with the iframe's size over the
+  frame's reported viewport.
+- Tab-away, reloads. Leaving the page unmounts ChatPanel with it (it is host
+  React code on the dashboard's store); coming back mounts it again on the same
+  session, says hello to the frame again and gets a fresh report. A reloaded
+  workbench (Reload, a server restart, a launcher restart, a VS Code window
+  reload) loads the script again, which asks for the hello.
+- ChatPanel mounts the first time the view shows, not when the page opens,
+  because it makes its session the dashboard's active one
+  (`hooks/useOwnSlotChat.ts`).
+- Older hosts. A host without `ChatPanel` shows a note and an "Open in Kiro
+  Crew" button inside the view instead.
+
+Does hiding on intersecting overlays fully solve R3's concern that VS Code
+popups would be drawn under the chat? For the popups VS Code draws in the
+workbench page and that the script lists, yes: they are visible because the
+chat steps aside, and the smoke test checks the command palette, a
+notification toast and F1 from inside the chat. What remains:
+
+- The chat disappears entirely while a popup crosses any part of the view, for
+  example a context menu that only clips its left edge. VS Code itself would
+  draw the menu over the chat and leave the rest visible. A stacking order that
+  mixes two documents is not possible, so this cannot be fixed from the page.
+- Popups the list does not name (a future class name, an extension's own
+  absolutely positioned element in the workbench) are not detected. The list
+  follows VS Code's private DOM and can break on an update.
+- Popups VS Code draws inside the view's own webview (none for a placeholder)
+  and the suggest or parameter widgets of an editor never reach the view.
+- Drag feedback: during a drag the chat hides, so drop targets over the view
+  are visible; the first pointer move after the drop shows it again.
+
+### Secret storage (GitHub sign-in survives reloads)
+
+Before 0.5.0, signing in to GitHub in VS Code worked but was lost when the
+Kiro Crew window was refreshed, while installed extensions stayed.
+
+- Cause. The web workbench keeps extension secrets (the GitHub sign-in is one,
+  stored by the built-in GitHub authentication extension through
+  `context.secrets`) in an encrypted `localStorage` entry only when the page has
+  a readable `vscode-secret-key-path` cookie naming a key-minting endpoint
+  (`vscode/src/vs/code/browser/workbench/workbench.ts:618-633`). Without that
+  cookie, and with a remote authority (always the case here), it passes no
+  `secretStorageProvider`, so `BrowserSecretStorageService` falls back to its
+  in-memory base class (`workbench/services/secrets/browser/secretStorageService.ts:24-33`,
+  `platform/secrets/common/secrets.ts:227-237`): every secret is gone after a
+  reload. Extensions live on the server, so they survived. `code serve-web`
+  provides that cookie and endpoint (`cli/src/commands/serve_web.rs:64-71`,
+  `:254-289`); the launcher runs the server directly and had neither.
+- Fix. The frame proxy implements the same scheme (`backend/lib/secretkey.mjs`).
+  Every workbench page sets `vscode-secret-key-path=/_vscode-cli/mint-key` and
+  an HttpOnly `vscode-cli-secret-half` (32 random bytes, kept when the browser
+  already has one). `POST /_vscode-cli/mint-key` on the frame port answers
+  `sha256(server half || client half)`, 32 bytes, as serve-web does. The
+  workbench then encrypts each secret with AES-GCM under that key XOR a
+  per-value random key (`ServerKeyedAESCrypto`) into `localStorage`
+  `secrets.provider`.
+- The server half is 32 random bytes in `data/state/secret-key-half`, created
+  on first start, written with mode 0600 and, on Windows, an ACL with
+  inheritance removed and only the current user granted (`icacls`). It is never
+  logged, never put on a command line or in an environment variable, so no
+  terminal or child process sees it.
+- Cookies in the cross-site frame. serve-web uses `SameSite=Strict`, which a
+  browser neither stores nor sends in a frame whose top page is another site
+  (the dashboard on `localhost`, the frame on `127.0.0.1`). The proxy sends
+  `SameSite=None; Secure; Partitioned; Path=/`. Chromium accepts `Secure` on
+  `http://127.0.0.1` (a potentially trustworthy origin), and `Partitioned`
+  (CHIPS) keys the cookies to the dashboard's site, so they work even with
+  third-party cookies blocked and no other site's page can send them. The
+  client half lives 400 days (Chromium's cap; serve-web uses 30) and is re-set
+  with every workbench page.
+- The mint path is outside the `/vsc-<key>` prefix because the path cookie is
+  kept on disk by the browser, and the prefix must never be written to disk.
+  The endpoint takes only POST, a loopback Host, no `Origin` or the frame's own,
+  and a well-formed client half; anything else gets 403 or 405. Without the
+  HttpOnly half nothing useful can be minted.
+- Storage partitioning. Chromium partitions a cross-site frame's
+  `localStorage`, IndexedDB and cookies by the top-level site. The top-level
+  site here is always the dashboard's (`http://localhost`, the port is not part
+  of a site), so the partition is stable across reloads, launcher restarts and
+  dashboard port changes, which is why the open editors were already restored
+  before 0.5.0. The smoke test reads the cookies' partition key. Opening the
+  frame URL in its own tab would use another partition, with its own secrets.
+- What an agent on this machine can read. Kiro Crew agents run as the same
+  user, so the owner-only ACL does not keep them from `data/state/secret-key-half`.
+  The key also needs the client half, which exists only in the browser's
+  cookie store (HttpOnly, never sent to anything but the frame port) and the
+  ciphertext in the browser's `localStorage`; both live in the Kiro Crew
+  desktop app's profile on disk. A same-user process that reads all three can
+  decrypt the secrets, as it could with serve-web or VS Code desktop's own
+  same-user secret store. The probe route (`POST /api/secret-probe`) reaches
+  only one fixed key of the bridge's own secrets.
 
 ### Open in VS Code from Kiro Crew file menus
 
@@ -561,23 +706,35 @@ on Windows) and checks that every process from the run is gone and both ports
 are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
 network access. Screenshots land in `.cache/smoke/` (`workbench.png`,
-`chat.png`, `after-restart.png`, `crew-dark.png`).
+`chat.png`, `after-restart.png`, `crew-tab-dark.png`).
 
-The Kiro Crew column checks live in `scripts/lib/crew-checks.mjs`. The
-stand-in's SDK shim provides a `ChatPanel` stub that records its props and
-opens a body-level picker menu, serves `/api/chat/slots`, and adds
-`crewChatToggle` and `crewSlot` to `GET /api/session` when the launcher leaves
-them out. The checks cover the column mounting on the folder's main slot with
-`conversationOnly`, its docked geometry and 35px header, the VS Code frame
-shrinking to the narrower slot and clipping only its bottom-left corner,
-nothing of the frame covering the column, a picker menu drawn whole above the
-frame, the session switcher's list and a switch, a sash drag and a keyboard
-resize with the width stored, the toolbar toggle, two `crewChatToggle` bumps
-(and two between polls cancelling out), tabbing away and back with width,
-session and frame alignment kept, a collapsed column staying collapsed, the
-"Open in Kiro Crew" fallback without ChatPanel, the page opening the slot
-itself when the launcher does not name it, and VS Code's own Chat view still
-opening in its secondary side bar.
+The Kiro Crew tab checks live in `scripts/lib/tab-checks.mjs`. The stand-in's
+SDK shim provides a `ChatPanel` stub that records its props and draws a
+composer with the app chips the way the host does, and serves
+`/api/chat/slots`. The checks cover the tab next to Chat with no docked column
+left; the overlay hidden while Chat shows; the status bar item opening the tab
+with the overlay on the view within 1px and the stub on the folder's main slot
+with `conversationOnly`; Ctrl+Alt+K opening it with the keyboard in the
+composer; the overlay matching the view within 1px after a dashboard layout
+change, a 300px drag of the side bar's sash and a window resize; idle
+measurements in the workbench (no animation-frame loop); the command palette
+and a notification toast over the view hiding it, and F1 from inside the chat
+opening the palette in VS Code; the side bar closed and reopened; messages from
+the page itself, with a wrong nonce or from another window on the frame origin
+ignored; the "VS Code" chip hidden in the embedded chat while another app's
+chip and the chip on a normal session show; the view moved to the primary side
+bar and back; the session switcher; tabbing away and back; the fallback without
+ChatPanel; and `crewSlot` and `crewView` on `GET /api/session`.
+
+The secret storage checks live in `scripts/lib/secret-checks.mjs`: the cookie
+attributes on the workbench page, the browser keeping both cookies partitioned
+to the dashboard's site with only the path cookie readable in the frame, the
+mint endpoint (stable per client half, refusing a missing half, a foreign
+Origin and GET), the server half's file, ACL and absence from logs and
+settings, and a value stored through the bridge's `context.secrets` that is
+encrypted in the frame's `localStorage` and reads back after a page reload, a
+launcher restart with the page open, and a launcher plus browser restart on the
+same profile.
 
 In a git worktree, which has no `.cache`, put a gitignored `dev-config.json`
 in the worktree root naming the main checkout's server build (`serverDir`) and
@@ -658,9 +815,16 @@ own machine; swap it for original art before any public release of this app.
   trust it; the bridge declares support for untrusted workspaces so it keeps
   working.
 - Telemetry is turned off with `--disable-telemetry`.
-- Extension secrets (for example GitHub sign-in) use the browser's default
-  secret storage, since the CLI's key-minting endpoint is not present. Not yet
-  checked for persistence.
+- Extension secrets (GitHub sign-in) persist in the browser profile under a
+  key split between `data/state/secret-key-half` and an HttpOnly cookie (see
+  "Secret storage"). Clearing the Kiro Crew desktop app's site data, or a
+  replaced or deleted key file, loses them; VS Code then drops the unreadable
+  entry and you sign in again.
+- The Kiro Crew tab depends on VS Code's private DOM (`iframe.webview` query
+  parameters, `.webview-overlay-content`, CSS anchor positioning, the popup
+  class names listed in "The Kiro Crew tab"). A VS Code update can break the
+  overlay's placement or its popup detection; the placeholder text then shows
+  in the tab.
 - Two open VS Code windows (two frames) share one command queue; the one that
   connected last receives the commands.
 - The bridge secret leaves the extension host's environment when the bridge
@@ -678,12 +842,12 @@ own machine; swap it for original art before any public release of this app.
   order.
 - macOS and Linux are declared in `app.json` and the code has the POSIX paths,
   but only Windows was tested.
-- The Kiro Crew column cannot be pre-filled with VS Code's selection or active
+- The Kiro Crew chat cannot be pre-filled with VS Code's selection or active
   file: `ChatPanelProps` is `{slotKey, conversationOnly, expandSteps}` with no
   draft prop. That needs a Kiro Crew SDK addition.
 - `ChatPanel` makes its session the dashboard's active one
   (`hooks/useOwnSlotChat.ts`), so going to the Chat page afterwards lands on
-  the column's session. Only one `conversationOnly` panel may be mounted per
+  the tab's session. Only one `conversationOnly` panel may be mounted per
   window (`docs/app-kit/api-reference.md`, Native Chat Panel).
 - Edit tool rows from Kiro Crew carry no absolute path, so the native
   session's tool cards cannot open or diff the edited file in VS Code yet.
@@ -695,10 +859,12 @@ own machine; swap it for original art before any public release of this app.
 - The session type, its pickers and the approval card depend on the 1.146
   proposed APIs listed above. Proposals change between VS Code releases, so a
   newer server build may need code changes.
-- The column was checked against a ChatPanel stub in the stand-in, not yet
+- The tab's chat was checked against a ChatPanel stub in the stand-in, not yet
   against the real ChatPage. Whether ChatPage's side-panel tabs (Changes,
-  Files, Git) fit and open inline in a 420px column, and whether every one of
-  its popovers escapes the column, is still to be seen in the desktop app.
+  Files, Git) fit in a side-bar-wide view, and whether its popovers escape the
+  overlay, is still to be seen in the desktop app. VS Code's secondary side bar
+  starts narrower (about 300px) than the old 420px column; drag its sash to
+  widen it, and VS Code remembers the width.
 
 ## Next steps
 

@@ -24,10 +24,9 @@ export class Bridge {
     // the newest host only.
     this.currentHost = null;
     this.events = 0;
-    // Bumped by the extension's kiroCrew.toggleCrewChat (keybinding, status bar,
-    // editor title); the page reads it from GET /api/session and toggles the
-    // docked Kiro Crew chat column when it changes.
-    this.crewChatToggle = 0;
+    // VS Code's "Kiro Crew" webview view as the extension last reported it
+    // ({resolved, visible, at}); GET /api/session carries it.
+    this.crewView = null;
     this.chatPrefs = null; // {hideCopilotAgents} as the VS Code setting last said
     this.sessionEvents = []; // the last native chat session events (diagnostics)
   }
@@ -188,8 +187,8 @@ export class Bridge {
       case 'saved':
         this.lastSaved = { path: str(ev.path), at };
         return true;
-      case 'toggleCrewChat':
-        this.crewChatToggle++;
+      case 'crewView':
+        this.crewView = { resolved: ev.resolved === true, visible: ev.visible === true, at };
         return true;
       case 'chatPrefs':
         if (typeof ev.hideCopilotAgents !== 'boolean') return false;
@@ -209,7 +208,7 @@ export class Bridge {
       }
       case 'result': {
         const fn = this.results.get(String(ev.id));
-        if (fn) fn({ ok: !!ev.ok, error: ev.error ? str(ev.error) : undefined });
+        if (fn) fn({ ok: !!ev.ok, error: ev.error ? str(ev.error) : undefined, ...(typeof ev.value === 'string' ? { value: ev.value.slice(0, 256) } : {}) });
         return true;
       }
       default:

@@ -1,18 +1,22 @@
-// The docked Kiro Crew chat column of the vscode-pane page (plain ESM, no
-// build step). It renders the SDK's ChatPanel, which mounts the Kiro Crew Chat
-// page's own ChatPage (app-sdk/ChatPanel.tsx), in `conversationOnly` mode:
-// the session pane's transcript, tool cards, approvals, composer and pickers,
-// without ChatPage's sessions rail. The column sits flush on the right of the
-// card, styled like VS Code's secondary side bar: a 35px header with the Kiro
-// Crew icon, the session title as a session switcher, "Open in Kiro Crew" and
-// collapse, and a sash on its left edge that resizes it.
+// The Kiro Crew chat the vscode-pane page draws over VS Code's "Kiro Crew"
+// view (plain ESM, no build step). The bridge extension contributes that view
+// to VS Code's secondary side bar, next to Chat and Claude Code, as an empty
+// webview; a script the launcher injects into the workbench reports the view's
+// rectangle (backend/lib/view-overlay.js), and the page places this overlay
+// exactly over it (ui/vscode-pane-0.5.0.mjs placeCrew). The overlay renders the
+// SDK's ChatPanel, which mounts the Kiro Crew Chat page's own ChatPage
+// (app-sdk/ChatPanel.tsx), in `conversationOnly` mode: the session pane's
+// transcript, tool cards, approvals, composer and pickers, without ChatPage's
+// sessions rail. A slim header above it holds the session switcher and "Open
+// in Kiro Crew".
 //
-// ChatPanel is host React code tied to the dashboard's store, so it cannot be
-// kept alive outside the page the way the VS Code iframe is: leaving the page
-// unmounts it and coming back mounts it again on the same session (the
-// conversation itself lives in the dashboard's store and the gateway). What
-// survives in this module is the column's state: open, width and the chosen
-// session per folder.
+// ChatPanel is host React code tied to the dashboard's store, so it lives in
+// the page's React tree (position: fixed) and unmounts with the page; coming
+// back mounts it again on the same session.
+//
+// Inside this overlay only, the app's own "VS Code" composer chip is hidden
+// (chipHideCss): you are already in VS Code there. Normal Kiro Crew sessions
+// keep it.
 //
 // Known limit: ChatPanel has no prop to pre-fill its composer (ChatPanelProps
 // is {slotKey, conversationOnly, expandSteps}), so VS Code's selection cannot
@@ -20,37 +24,34 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as sdk from '@kirocrew/app-sdk';
 import {
-  CREW_WIDTH,
   CREW_HEADER_HEIGHT,
   STORE_KEYS,
-  clampCrewWidth,
-  parseStoredWidth,
+  chipHideCss,
   normFolder,
   mainSlotTitle,
   crewSlotFromSession,
   crewSessionsForFolder,
   chatPageHref,
-} from './vscode-pane-crew-core-0.4.0.mjs';
+} from './vscode-pane-crew-core-0.5.0.mjs';
 
 const h = React.createElement;
 
-const STYLE_ID = 'vscode-pane-crew-style-0-4-0';
+const STYLE_ID = 'vscode-pane-crew-style-0-5-0';
+// The overlay's root class; the chip-hiding rule is scoped to it.
+export const ROOT_CLASS = 'vscp-crew-overlay';
 const CSS = `
-.vscp-sash{flex:none;width:${CREW_WIDTH.sash}px;cursor:col-resize;background:transparent;position:relative;z-index:3;touch-action:none;outline:none}
-.vscp-sash::after{content:"";position:absolute;inset:0 1px;background:transparent;transition:background-color .1s ease-out}
-.vscp-sash:hover::after,.vscp-sash[data-dragging="true"]::after,.vscp-sash:focus-visible::after{background:var(--vscp-accent)}
-.vscp-crew{position:relative;z-index:3;flex:none;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;
-  background:var(--vscp-bg);color:var(--vscp-text);border-left:1px solid var(--vscp-border)}
+.${ROOT_CLASS}{position:fixed;left:0;top:0;width:0;height:0;z-index:3;visibility:hidden;pointer-events:none;box-sizing:border-box;
+  display:flex;flex-direction:column;min-height:0;overflow:hidden;background:var(--vscp-bg);color:var(--vscp-text);font-family:var(--font-body,system-ui,sans-serif)}
 .vscp-crew-head{position:relative;flex:none;display:flex;align-items:center;gap:4px;height:${CREW_HEADER_HEIGHT}px;min-height:${CREW_HEADER_HEIGHT}px;
-  box-sizing:border-box;padding:0 4px 0 10px;border-bottom:1px solid var(--vscp-border);background:var(--vscp-elev);font-size:12px}
+  box-sizing:border-box;padding:0 4px 0 8px;border-bottom:1px solid var(--vscp-border);background:var(--vscp-bg);font-size:12px}
 .vscp-crew-icon{width:16px;height:16px;flex:none;border-radius:4px;display:grid;place-items:center;overflow:hidden}
 .vscp-crew-icon img{width:16px;height:16px;display:block}
 .vscp-crew-glyph{font:700 9px/16px var(--font-body,system-ui,sans-serif);color:var(--vscp-accent-fg);background:var(--vscp-accent);width:16px;height:16px;text-align:center;border-radius:4px}
-.vscp-crew-title{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:4px;height:24px;padding:0 6px;border:0;border-radius:var(--radius-sm,6px);
+.vscp-crew-title{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:4px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-sm,6px);
   background:transparent;color:var(--vscp-text);font:inherit;font-size:12px;font-weight:600;cursor:pointer;text-align:left}
 .vscp-crew-title:hover,.vscp-crew-title[aria-expanded="true"]{background:var(--vscp-hover)}
 .vscp-crew-title:focus-visible,.vscp-crew-act:focus-visible,.vscp-crew-item:focus-visible{outline:2px solid var(--vscp-ring);outline-offset:-1px}
-.vscp-crew-act{flex:none;width:24px;height:24px;display:grid;place-items:center;border:0;border-radius:var(--radius-sm,6px);background:transparent;color:var(--vscp-muted);cursor:pointer;padding:0}
+.vscp-crew-act{flex:none;width:22px;height:22px;display:grid;place-items:center;border:0;border-radius:var(--radius-sm,6px);background:transparent;color:var(--vscp-muted);cursor:pointer;padding:0}
 .vscp-crew-act:hover{background:var(--vscp-hover);color:var(--vscp-text)}
 .vscp-crew-menu{position:absolute;top:${CREW_HEADER_HEIGHT - 2}px;left:6px;right:6px;max-height:min(360px,60vh);overflow:auto;z-index:20;padding:4px;
   background:var(--vscp-elev);color:var(--vscp-text);border:1px solid var(--vscp-border-strong);border-radius:var(--radius-md,8px);
@@ -63,6 +64,7 @@ const CSS = `
 .vscp-crew-body{position:relative;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .vscp-crew-body>*{flex:1 1 auto;min-height:0}
 .vscp-crew-empty{display:grid;place-items:center;text-align:center;padding:24px;font-size:13px;line-height:1.45;color:var(--vscp-muted)}
+${chipHideCss('.' + ROOT_CLASS)}
 `;
 
 function ensureStyle() {
@@ -74,11 +76,10 @@ function ensureStyle() {
 }
 
 // Codicon-shaped glyphs, drawn in currentColor so they follow the theme.
-const svg = (d, label) =>
-  h('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': label ? undefined : 'true', role: label ? 'img' : undefined },
+const svg = (d) =>
+  h('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' },
     h('path', { d }));
 const ICON_EXTERNAL = 'M9 2h5v5h-1V3.7L7.4 9.3l-.7-.7L12.3 3H9V2zM3 4h4v1H3v8h8V9h1v4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z';
-const ICON_CLOSE_PANEL = 'M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0 1v10h8V3H2zm9 0v10h3V3h-3zM5.1 5.4l.7-.7L8.1 8l-2.3 3.3-.7-.7L6.9 8 5.1 5.4z';
 const ICON_CHEVRON = 'M3.6 6.1l.7-.7L8 9.1l3.7-3.7.7.7L8 10.5 3.6 6.1z';
 
 /** The Kiro Crew mark: the dashboard serves its icon at /icon-192.png; a glyph stands in when it cannot load. */
@@ -149,23 +150,24 @@ function mainSlot(session, folder) {
   return { key: '', title: '', folder: target };
 }
 
-export function CrewColumn({ api, session, folder, onCollapse, kind }) {
+/**
+ * @param {{api, session, folder, kind, overlayRef, mountPanel: boolean}} props
+ *   overlayRef: the page positions this root over the VS Code view;
+ *   mountPanel: false until the view has shown once, so opening the page does
+ *   not make the folder's session the dashboard's active one before you look.
+ */
+export function CrewOverlay({ api, session, folder, kind, overlayRef, mountPanel }) {
   ensureStyle();
   const navigate = typeof sdk.useNavigate === 'function' ? sdk.useNavigate() : null; // eslint-disable-line react-hooks/rules-of-hooks
   const main = mainSlot(session, folder);
   const folderKey = main.folder;
   const [chosen, setChosen] = useState(() => readChosen()[normFolder(folderKey)] || '');
-  const [width, setWidth] = useState(() => parseStoredWidth(readStore(STORE_KEYS.width)));
   const [menuOpen, setMenuOpen] = useState(false);
   const [rows, setRows] = useState(null);
   const [rowsError, setRowsError] = useState('');
   const [active, setActive] = useState(0);
-  const colRef = useRef(null);
-  const sashRef = useRef(null);
   const titleRef = useRef(null);
   const menuRef = useRef(null);
-  const widthRef = useRef(width);
-  widthRef.current = width;
 
   useEffect(() => {
     crewState.mounts += 1;
@@ -197,75 +199,6 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
     if (rows === null) loadRows();
   }, [rows, loadRows]);
 
-  // Fit the stored width to the card once it is laid out, and on card resizes.
-  useEffect(() => {
-    const fit = () => {
-      const row = colRef.current && colRef.current.parentElement;
-      if (!row) return;
-      const w = clampCrewWidth(widthRef.current, row.getBoundingClientRect().width);
-      if (w !== widthRef.current) setWidth(w);
-    };
-    fit();
-    const row = colRef.current && colRef.current.parentElement;
-    const ro = typeof ResizeObserver === 'function' && row ? new ResizeObserver(fit) : null;
-    if (ro) ro.observe(row);
-    return () => ro && ro.disconnect();
-  }, []);
-
-  const commitWidth = useCallback((w) => {
-    const row = colRef.current && colRef.current.parentElement;
-    const next = clampCrewWidth(w, row ? row.getBoundingClientRect().width : Infinity);
-    setWidth(next);
-    writeStore(STORE_KEYS.width, String(next));
-    return next;
-  }, []);
-
-  // Sash drag. Pointer capture does not keep the pointer once it crosses the
-  // cross-site VS Code iframe (Chromium routes those moves to the frame's own
-  // process), so while dragging a transparent shield covers the whole window
-  // and takes every move, as VS Code does for sashes over its webviews.
-  const onSashDown = (ev) => {
-    if (ev.button !== 0) return;
-    ev.preventDefault();
-    const sash = sashRef.current;
-    const col = colRef.current;
-    if (!sash || !col) return;
-    const right = col.getBoundingClientRect().right;
-    const row = col.parentElement;
-    const rowWidth = row ? row.getBoundingClientRect().width : Infinity;
-    const shield = document.createElement('div');
-    shield.setAttribute('data-vscode-pane-drag-shield', '');
-    Object.assign(shield.style, { position: 'fixed', inset: '0', zIndex: '2147483647', cursor: 'col-resize', background: 'transparent' });
-    document.body.appendChild(shield);
-    sash.setAttribute('data-dragging', 'true');
-    let last = widthRef.current;
-    const move = (e) => {
-      last = clampCrewWidth(right - e.clientX, rowWidth);
-      setWidth(last);
-    };
-    const up = () => {
-      shield.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up, true);
-      window.removeEventListener('pointercancel', up, true);
-      window.removeEventListener('blur', up);
-      shield.remove();
-      sash.removeAttribute('data-dragging');
-      commitWidth(last);
-    };
-    shield.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up, true);
-    window.addEventListener('pointercancel', up, true);
-    window.addEventListener('blur', up);
-  };
-  const onSashKey = (ev) => {
-    const step = ev.shiftKey ? CREW_WIDTH.step * 4 : CREW_WIDTH.step;
-    if (ev.key === 'ArrowLeft') commitWidth(widthRef.current + step);
-    else if (ev.key === 'ArrowRight') commitWidth(widthRef.current - step);
-    else if (ev.key === 'Home') commitWidth(CREW_WIDTH.default);
-    else return;
-    ev.preventDefault();
-  };
-
   const pick = (key) => {
     const next = key === main.key ? '' : key;
     setChosen(next);
@@ -284,7 +217,7 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
     });
   };
 
-  // Close the menu on an outside click or Escape.
+  // Close the menu on an outside click.
   useEffect(() => {
     if (!menuOpen) return undefined;
     const onDown = (e) => {
@@ -304,6 +237,7 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
   const onMenuKey = (ev) => {
     if (ev.key === 'Escape') {
       ev.preventDefault();
+      ev.stopPropagation();
       setMenuOpen(false);
       if (titleRef.current) titleRef.current.focus();
     } else if (ev.key === 'ArrowDown') {
@@ -331,6 +265,8 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
   } else if (!slotKey) {
     body = h('div', { className: 'vscp-crew-empty', 'data-testid': 'vscode-pane-crew-waiting' },
       main.folder ? "Opening the folder's Kiro Crew session..." : 'Open a folder in VS Code to chat with Kiro Crew about it.');
+  } else if (!mountPanel) {
+    body = null;
   } else {
     body = h(Panel, { key: slotKey, slotKey, conversationOnly: true });
   }
@@ -350,26 +286,19 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
       sessions.length === 0 ? h('div', { className: 'vscp-crew-menu-note' }, 'No Kiro Crew sessions for this folder yet.') : null)
     : null;
 
-  return h(React.Fragment, null,
-    h('div', {
-      ref: sashRef, className: 'vscp-sash', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Resize the Kiro Crew chat',
-      'aria-valuenow': width, 'aria-valuemin': CREW_WIDTH.min, tabIndex: 0, onPointerDown: onSashDown, onKeyDown: onSashKey,
-      onDoubleClick: () => commitWidth(CREW_WIDTH.default), 'data-testid': 'vscode-pane-crew-sash',
-    }),
-    h('aside', {
-      ref: colRef, className: 'vscp-crew', style: { width }, 'aria-label': 'Kiro Crew chat', 'data-testid': 'vscode-pane-crew',
-      'data-slot': slotKey || '', 'data-vscp-kind': kind,
+  return h('section', {
+    ref: overlayRef, className: `vscp-themed ${ROOT_CLASS}`, 'aria-label': 'Kiro Crew chat', 'data-testid': 'vscode-pane-crew',
+    'data-slot': slotKey || '', 'data-vscp-kind': kind,
+  },
+  h('div', { className: 'vscp-crew-head', 'data-testid': 'vscode-pane-crew-header' },
+    h(CrewIcon),
+    h('button', {
+      ref: titleRef, type: 'button', className: 'vscp-crew-title', onClick: toggleMenu, 'aria-haspopup': 'listbox', 'aria-expanded': menuOpen ? 'true' : 'false',
+      title: `${title} (switch session)`, 'data-testid': 'vscode-pane-crew-switcher',
     },
-    h('div', { className: 'vscp-crew-head', 'data-testid': 'vscode-pane-crew-header' },
-      h(CrewIcon),
-      h('button', {
-        ref: titleRef, type: 'button', className: 'vscp-crew-title', onClick: toggleMenu, 'aria-haspopup': 'listbox', 'aria-expanded': menuOpen ? 'true' : 'false',
-        title: `${title} (switch session)`, 'data-testid': 'vscode-pane-crew-switcher',
-      },
-      h('span', { className: 'vscp-truncate' }, title),
-      h('span', { style: { flex: 'none', display: 'grid', color: 'var(--vscp-muted)' } }, svg(ICON_CHEVRON))),
-      h('button', { type: 'button', className: 'vscp-crew-act', onClick: openInCrew, disabled: !slotKey, title: 'Open in Kiro Crew', 'aria-label': 'Open in Kiro Crew', 'data-testid': 'vscode-pane-crew-open' }, svg(ICON_EXTERNAL)),
-      h('button', { type: 'button', className: 'vscp-crew-act', onClick: onCollapse, title: 'Hide the Kiro Crew chat (Ctrl+Alt+K in VS Code)', 'aria-label': 'Hide the Kiro Crew chat', 'data-testid': 'vscode-pane-crew-collapse' }, svg(ICON_CLOSE_PANEL)),
-      menu),
-    h('div', { className: 'vscp-crew-body', 'data-testid': 'vscode-pane-crew-body' }, body)));
+    h('span', { className: 'vscp-truncate' }, title),
+    h('span', { style: { flex: 'none', display: 'grid', color: 'var(--vscp-muted)' } }, svg(ICON_CHEVRON))),
+    h('button', { type: 'button', className: 'vscp-crew-act', onClick: openInCrew, disabled: !slotKey, title: 'Open in Kiro Crew', 'aria-label': 'Open in Kiro Crew', 'data-testid': 'vscode-pane-crew-open' }, svg(ICON_EXTERNAL)),
+    menu),
+  h('div', { className: 'vscp-crew-body', 'data-testid': 'vscode-pane-crew-body' }, body));
 }

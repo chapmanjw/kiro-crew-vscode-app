@@ -18,6 +18,8 @@ export const ROUTES = [
   { method: 'GET', path: '/api/chat/prefs', name: 'chatPrefsGet', auth: 'proxy' },
   { method: 'POST', path: '/api/chat/prefs', name: 'chatPrefs', auth: 'proxy' },
   { method: 'POST', path: '/api/chat/open-session', name: 'chatOpenSession', auth: 'proxy' },
+  { method: 'POST', path: '/api/crew/view', name: 'crewView', auth: 'proxy' },
+  { method: 'POST', path: '/api/secret-probe', name: 'secretProbe', auth: 'proxy' },
   { method: 'GET', path: '/api/bridge/commands', name: 'bridgeCommands', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/events', name: 'bridgeEvents', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/chat', name: 'bridgeChat', auth: 'bridge' },

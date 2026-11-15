@@ -24,11 +24,12 @@
 //    window.__standinSdk.setChatPanel(false) removes to show the page's
 //    fallback; GET/POST /api/chat/slots and /api/chat/slots/<key>/project
 //    (`crewSlots`, `slotPosts`); /icon-192.png from the installed Kiro Crew
-//  - adds simulated presses of VS Code's crew chat toggle to GET /api/session:
-//    `server.crewToggle` is added to the launcher's own `crewChatToggle`, so the
-//    page sees one counter (the stand-in never forwards its presses to the
-//    launcher, so nothing is counted twice); `crewSlot` passes through as the
-//    launcher sends it
+//  - the composer's session-control chips drawn the way the host draws them
+//    (components/chat-input/ContextShelf.tsx: a wrapper div of
+//    <button data-session-control-chip> with an AppIcon lucide <svg
+//    class="lucide lucide-<icon>">), both in the /chat view and inside the
+//    ChatPanel stub, plus a second app's chip with another icon, so the page's
+//    chip-hiding rule can be checked in both places
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -80,6 +81,15 @@ export function useTheme() {
 // draws a transcript, a composer and a model picker whose menu is appended to
 // <body> with position:fixed, the way the host's popovers escape their pane.
 const sdkState = window.__standinSdk = window.__standinSdk || { chatPanel: { mounts: 0, unmounts: 0, props: [], live: 0 } };
+// The composer's app chips as ContextShelf.tsx renders them (see the header).
+export function StandinChips({ chips }) {
+  const h = React.createElement;
+  return h('div', { className: 'chip-row', 'data-testid': 'chip-row' },
+    chips.map((c) => h('button', { key: c.id, type: 'button', className: 'chip', 'data-session-control-chip': '', title: c.label, 'aria-label': c.label, 'data-chip-id': c.id, onClick: c.onClick },
+      h('svg', { className: 'lucide lucide-' + c.icon, width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'aria-hidden': 'true' }, h('rect', { x: 4, y: 4, width: 16, height: 16, rx: 2 })),
+      h('span', null, c.label))));
+}
+window.__standinChips = window.__standinChips || [];
 function ChatPanelStub(props) {
   const btn = React.useRef(null);
   const [menu, setMenu] = React.useState(false);
@@ -113,6 +123,7 @@ function ChatPanelStub(props) {
     h('div', { style: { flex: 'none', margin: '8px', border: '1px solid var(--border)', borderRadius: '12px', background: 'var(--bg-elevated)', padding: '8px' } },
       h('textarea', { 'aria-label': 'Message', placeholder: 'Message Kiro Crew', rows: 2, style: { width: '100%', boxSizing: 'border-box', resize: 'none', background: 'transparent', color: 'var(--text)', border: 0, outline: 'none', font: 'inherit' } }),
       h('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
+        h(StandinChips, { chips: window.__standinChips }),
         h('button', { ref: btn, type: 'button', 'data-testid': 'stub-picker', onClick: () => setMenu((m) => !m),
           style: { height: '24px', borderRadius: '6px', border: '1px solid var(--border)', background: 'transparent', color: 'var(--muted)', font: '12px system-ui' } }, 'Model'))));
 }
@@ -157,6 +168,7 @@ html,body{margin:0;height:100%;background:var(--bg,#808080);color:var(--text,#00
 #main-content{display:flex;flex-direction:column;min-height:0;min-width:0;padding:0;overflow-x:hidden;overflow-y:auto}
 .chat{margin:8px;flex:1;display:flex;flex-direction:column;justify-content:flex-end;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;padding:12px}
 .shelf{display:flex;align-items:center;gap:8px;position:relative}
+.chip-row{display:flex;align-items:center;gap:8px;padding-right:8px;border-right:1px solid var(--border)}
 .chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;font:12px system-ui}
 .popover{position:absolute;bottom:34px;left:0;width:340px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 `;
@@ -184,8 +196,15 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from '/ui/${manifest.ui.entry}';
+import { StandinChips } from '@kirocrew/app-sdk';
 const h = React.createElement;
-const CONTROL = ${JSON.stringify(control ? { entry: control.entryPoint, label: control.label || control.id } : null)};
+const CONTROL = ${JSON.stringify(control ? { entry: control.entryPoint, label: control.label || control.id, icon: control.icon || 'Package' } : null)};
+const kebab = (n) => String(n).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+// This app's chip and another app's, in manifest order, as the host lists them.
+window.__standinChips = [
+  ...(CONTROL ? [{ id: 'vscode-pane:' + 'control', label: CONTROL.label, icon: kebab(CONTROL.icon) }] : []),
+  { id: 'other-app:control', label: 'Other app', icon: 'zap' },
+];
 const CHAT_CWD = ${JSON.stringify(chatCwd)};
 let Control = null;
 if (CONTROL) Control = (await import('/ui/' + CONTROL.entry)).default;
@@ -209,7 +228,7 @@ function Chat() {
   const [open, setOpen] = React.useState(false);
   return h('div', { className: 'chat' },
     h('div', { className: 'shelf', 'data-testid': 'composer-context-shelf' },
-      CONTROL ? h('button', { className: 'chip', 'data-session-control-chip': '', onClick: () => setOpen((o) => !o) }, CONTROL.label) : null,
+      h(StandinChips, { chips: window.__standinChips.map((c, i) => (i === 0 && CONTROL ? { ...c, onClick: () => setOpen((o) => !o) } : c)) }),
       h('span', { className: 'chip' }, 'Ultra Mode'),
       h('span', { className: 'chip' }, 'project'),
       open && Control ? h('div', { className: 'popover', role: 'dialog' },
@@ -332,29 +351,6 @@ createRoot(document.getElementById('main-content')).render(h(Root));
             return true;
           });
         }
-        if (url.pathname === '/apps/vscode-pane/api/session' && req.method === 'GET') {
-          // The bridge's toggle counter plus the stand-in's simulated presses.
-          return forward(req, res, url, body, (upRes) => {
-            if (upRes.statusCode !== 200) return false;
-            const parts = [];
-            upRes.on('data', (c) => parts.push(c));
-            upRes.on('end', () => {
-              let s = null;
-              try {
-                s = JSON.parse(Buffer.concat(parts).toString('utf8'));
-              } catch {
-                /* passed through below */
-              }
-              if (s && typeof s === 'object') {
-                // Stand-in presses add to the launcher's own count.
-                s.crewChatToggle = (Number.isInteger(s.crewChatToggle) ? s.crewChatToggle : 0) + server.crewToggle;
-              }
-              res.writeHead(200, { 'content-type': 'application/json' });
-              res.end(s ? JSON.stringify(s) : Buffer.concat(parts));
-            });
-            return true;
-          });
-        }
         forward(req, res, url, body);
       });
       return;
@@ -365,7 +361,6 @@ createRoot(document.getElementById('main-content')).render(h(Root));
   server.themePosts = themePosts;
   server.slotPosts = slotPosts;
   server.crewSlots = crewSlots;
-  server.crewToggle = 0;
   // A restarted backend listens on a new port, as the gateway's proxy would
   // follow it; the page keeps calling the same /apps/vscode-pane/api/ URLs.
   server.setLauncherPort = (p) => {

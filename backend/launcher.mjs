@@ -25,6 +25,8 @@ import { matchRoute, parseOpenRequest, fileMenuToCommand } from './lib/router.mj
 import { Bridge } from './lib/bridge.mjs';
 import { BRIDGE_ID, bridgeFolderName, upsertBridgeEntry, staleBridgeFolders } from './lib/extensions.mjs';
 import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/frameproxy.mjs';
+import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
+import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
@@ -95,6 +97,16 @@ const BRIDGE_SECRET = randomSecret(24);
 const CONNECTION_TOKEN = randomSecret(24);
 const bridge = new Bridge();
 const retry = new RetryPolicy();
+
+// The server half of the workbench's secret-storage key (lib/secretkey.mjs),
+// kept in data/state/secret-key-half so stored secrets (GitHub sign-in)
+// survive page reloads and launcher restarts. Never logged, never put in an
+// environment variable or a command line.
+const SECRET_HALF_FILE = path.join(DATA_DIR, 'state', 'secret-key-half');
+const secretHalf = loadServerHalf(SECRET_HALF_FILE);
+// The view-overlay script the frame proxy adds to the workbench page; read
+// once, served from under the frame prefix.
+const OVERLAY_SCRIPT = fs.readFileSync(path.join(APP_ROOT, 'backend', 'lib', 'view-overlay.js'), 'utf8');
 
 // Kiro Crew gateway access for the built-in Chat, with this app's own token.
 const gateway = new GatewayClient({
@@ -537,12 +549,11 @@ function sessionBody(folderParam) {
     bridge: { connected: bridge.connected, extension: bridge.extension },
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
     chat: chatProblem(),
-    // For the docked Kiro Crew chat column (ui/, round 3): the page toggles the
-    // column whenever crewChatToggle (an integer) changes, and crewSlot is the
-    // folder's own slot {key, folder, title}, always present when there is a
-    // folder (ensureCrewSlot above creates it). The column lists the per-session
-    // slots itself from GET /api/chat/slots (the app's own slots, with project).
-    crewChatToggle: bridge.crewChatToggle,
+    // The folder's own Kiro Crew slot {key, folder, title} for the chat the
+    // page overlays on VS Code's "Kiro Crew" view, always present when there
+    // is a folder (ensureCrewSlot above creates it). The overlay lists the
+    // per-session slots itself from GET /api/chat/slots.
+    crewView: bridge.crewView,
     crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,
   };
 }
@@ -660,13 +671,33 @@ async function nativeChat(raw, res) {
   if (!res.writableEnded) res.end();
 }
 
-const frameProxy = createFrameProxy(() =>
-  state.status === 'ready' && state.serverPort ? { port: state.serverPort, token: state.token } : null,
+const frameProxy = createFrameProxy(
+  () => (state.status === 'ready' && state.serverPort ? { port: state.serverPort, token: state.token } : null),
+  { overlayScriptPath: `${BASE_PATH}/_kiro-crew/view-overlay.js`, overlayScript: () => OVERLAY_SCRIPT, secretKey: true },
 );
+
+/**
+ * POST /_vscode-cli/mint-key on the frame port: the workbench's secret-storage
+ * key, sha256(server half || the browser's HttpOnly client half). Only for the
+ * frame's own origin and a request that carries the client half.
+ */
+function handleMint(req, res) {
+  const clientHalf = clientHalfFrom(req.headers.cookie);
+  const ok = mintAllowed({ method: req.method, host: req.headers.host, origin: req.headers.origin, listenPort: framePort, clientHalf, isLoopbackHost });
+  req.resume();
+  if (!ok.ok) {
+    log('refused secret key mint', ok.error, `origin=${String(req.headers.origin || '').slice(0, 80)}`);
+    return sendJson(res, ok.status, { error: ok.error });
+  }
+  const key = mintKey(secretHalf.key, clientHalf);
+  res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(key.length), 'cache-control': 'no-store' });
+  return res.end(key);
+}
 
 /** The frame listener serves only the workbench under its key, and only to a loopback Host. */
 function handleFrame(req, res) {
   const url = new URL(req.url, `http://${HOST}`);
+  if (url.pathname === MINT_PATH) return handleMint(req, res);
   const route = matchRoute(req.method, url.pathname, BASE_PATH);
   if (route.name !== 'frame') return sendJson(res, 404, { error: 'not found' });
   if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
@@ -804,6 +835,23 @@ async function handle(req, res) {
       const { id, done } = bridge.enqueue({ kind: 'askChat', prompt, ...(parsed.newChat === true ? { newChat: true } : {}) }, 8000);
       const result = await done;
       return sendJson(res, 200, { id, ...result, bridgeConnected: bridge.connected });
+    }
+    case 'crewView': {
+      // Reveal VS Code's "Kiro Crew" view, or move it to another part.
+      const parsed = parseCrewViewRequest(parseJson(body));
+      if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+      const { id, done } = bridge.enqueue(parsed.command, 8000);
+      return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
+    }
+    case 'secretProbe': {
+      // Stores or reads one fixed probe value in the bridge's own
+      // context.secrets, so a check can prove secrets persist. Nothing else
+      // in secret storage is reachable here.
+      const parsed = parseSecretProbe(parseJson(body));
+      if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+      const { id, done } = bridge.enqueue(parsed.command, 8000);
+      const r = await done;
+      return sendJson(res, 200, { id, ok: !!r.ok, value: typeof r.value === 'string' ? r.value : null, error: r.error || null, bridgeConnected: bridge.connected });
     }
     case 'chatPrefsGet':
       return sendJson(res, 200, { prefs: chatPrefs, vscode: bridge.chatPrefs, settings: chatSettings(chatPrefs) });
@@ -1019,6 +1067,7 @@ server.listen(PORT, HOST, async () => {
   if (framePort !== frameState.port || !fs.existsSync(FRAME_STATE_FILE) || frameStateHasKey(frameStateText)) {
     fs.writeFileSync(FRAME_STATE_FILE, serializeFrameState({ port: framePort }), { mode: 0o600 });
   }
+  log('secret storage key half', secretHalf.created ? `created${secretHalf.restricted ? ' (owner-only)' : ' (could not restrict access)'}` : 'loaded');
   log('launcher listening', `${HOST}:${listenPort}`, 'frame', `${HOST}:${framePort}`, framePort === frameState.port ? '(saved port)' : '(new port)', 'data', DATA_DIR, 'signed', PROXY_SECRET ? 'yes' : 'no');
   console.log(JSON.stringify({ event: 'listening', port: listenPort, framePort, pid: process.pid }));
   launchServer();

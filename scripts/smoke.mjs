@@ -21,11 +21,12 @@ import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
-import { crewChecks } from './lib/crew-checks.mjs';
+import { tabChecks } from './lib/tab-checks.mjs';
+import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
 import { slotNameFor } from '../backend/lib/gateway.mjs';
-import { nativeChatChecks, copilotAgentChecks, historyChecks, isSessionSlot } from './lib/nativechat-smoke.mjs';
+import { nativeChatChecks, copilotAgentChecks, historyChecks, isSessionSlot, sessionTargetChecks } from './lib/nativechat-smoke.mjs';
 
 // Two Kiro Crew palettes: one saved before the first start (seeded into the
 // server's settings), one posted live through POST /api/theme.
@@ -259,7 +260,6 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
       railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), getComputedStyle(rail).marginBottom].join(' '),
       clip: host.style.clipPath, hostInside: hr.left >= r.left && hr.right <= r.right + 0.5 && hr.bottom <= r.bottom + 0.5 && hr.top >= r.top,
       bar: document.querySelector('[role="toolbar"]').getBoundingClientRect().height,
-      crew: !!document.querySelector('[data-testid="vscode-pane-crew"]'),
     };
   });
   // The stand-in reproduces App.tsx: <main> unpadded, the rail card's top level
@@ -271,9 +271,8 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     card && card.railGap === 8 && card.railTop === 0 && card.railBottom === 0 && JSON.stringify(card.inset) === '[0,0,8,8]', card && `gap ${card.railGap}, top ${card.railTop}, bottom ${card.railBottom}, inset ${JSON.stringify(card.inset)}`);
   check('pane card has the Sessions panel radius and border (16px, 1px)',
     card && card.radius === '16px' && card.border === '1px', JSON.stringify(card && { radius: card.radius, border: card.border }));
-  // With the Kiro Crew column docked on the right, only the bottom-left corner is the frame's.
   check('frame sits inside the card and is clipped to its rounded bottom corners',
-    card && card.hostInside && (card.crew ? /round 0px 0px 0px 15px/ : /round 0px 0px 15px 15px/).test(card.clip), card && `${card.clip}${card.crew ? ' (crew column open)' : ''}`);
+    card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
   check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
 
   // The frame is placed on change, not every animation frame, and still
@@ -387,7 +386,7 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
 
   // Item 4: the composer chip opens VS Code on the chat's project folder.
   await page.click('#nav-chat');
-  await page.locator('[data-session-control-chip]').click({ timeout: 5000 });
+  await page.locator('[data-testid="composer-context-shelf"] [data-chip-id^="vscode-pane:"]').click({ timeout: 5000 });
   let landed = '';
   const t = Date.now();
   while (Date.now() - t < 10_000) {
@@ -689,6 +688,7 @@ async function main() {
         await sleep(500);
       }
       await historyChecks({ frame, api, check, slot: native.s1, since: tR });
+      await sessionTargetChecks({ page, frame, check, shotDir: path.join(ROOT, '.cache', 'smoke') });
       await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'native-chat.png') }).catch(() => {});
     } else {
       check('native chat session checks ran', false, 'the workbench or the first chat turn was missing');
@@ -750,6 +750,12 @@ async function main() {
     check('bridge extension connected and said hello', st && st.connected && st.extension, st && JSON.stringify(st.extension));
     check('server process keeps the gateway tracking var (seen from the extension host)', st && st.extension && st.extension.spawnTracked === true, st && st.extension && String(st.extension.spawnTracked));
     check('the bridge secret is gone from the extension host environment once the bridge has read it', st && st.extension && st.extension.secretInEnv === false, st && st.extension && String(st.extension.secretInEnv));
+
+    // 7a. secret storage: the serve-web key scheme through the frame proxy, and
+    //     a secret stored through the bridge's context.secrets (read back after
+    //     the reload in 14 and the launcher restarts in 14b and 15)
+    const secretValue = `smoke-secret-${crypto.randomBytes(6).toString('hex')}`;
+    await secretChecks({ page, api, check, rawRequest, framePort, wbPath: wbUrl.pathname + wbUrl.search, dataDir, value: secretValue });
 
     // 7b. the built-in Chat is answered by Kiro Crew (the mock gateway)
     const cs0 = (await api('GET', '/api/chat/status?probe=1')).json;
@@ -1021,8 +1027,9 @@ async function main() {
       await sleep(3000); // let the workbench flush its storage
     }
 
-    // 12b. the docked Kiro Crew chat column (ui/vscode-pane-crew-*.mjs)
-    await crewChecks({ page, frame, hostServer, gatewayMock, workspace, shotDir, check });
+    // 12b. the Kiro Crew tab in VS Code's secondary side bar, with the real
+    //      ChatPanel (the stand-in's stub) drawn over it (ui/vscode-pane-crew-*.mjs)
+    await tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort });
 
     // 13. the launcher restarts a VS Code server that dies
     if (process.platform === 'win32') {
@@ -1091,6 +1098,7 @@ async function main() {
       check('after a reload the theme is confirmed unchanged, not rewritten', th3 && Date.parse(th3.at) > t10 && th3.applied && th3.changed === false, JSON.stringify(th3 && { changed: th3.changed, at: th3.at }));
       const reopenAfterReload = await api('POST', '/api/open', { path: path.join(workspace, 'other.js') });
       check('commands reach the new window after a reload (not the lingering old host)', reopenAfterReload.json && reopenAfterReload.json.ok, JSON.stringify(reopenAfterReload.json));
+      await secretReadBack({ api, check, value: secretValue, label: 'after a reload of the page' });
       const back2 = await api('POST', '/api/open', { path: target, line: 2 });
       check('hello.txt reopened for the restart check', back2.json && back2.json.ok);
       await sleep(3000); // let the workbench flush its storage
@@ -1142,6 +1150,7 @@ async function main() {
       const dead = await frame.locator('text=/Cannot reconnect|connection token/i').count().catch(() => 0);
       const reopenR = await api('POST', '/api/open', { path: target, line: 2 });
       check('the reloaded workbench is live (no reconnect error, /api/open works)', dead === 0 && reopenR.json && reopenR.json.ok, JSON.stringify(reopenR.json));
+      await secretReadBack({ api, check, value: secretValue, label: 'after a launcher restart with the page open (new frame path key)' });
       await sleep(3000); // let the workbench flush its storage
     }
 
@@ -1213,6 +1222,7 @@ async function main() {
         JSON.stringify({ readBack: th4 && th4.readBack, tier: themeBeforeRestart && themeBeforeRestart.tier, updatedAt: [themeBeforeRestart && themeBeforeRestart.updatedAt, themeAfterRestart && themeAfterRestart.updatedAt] }),
       );
       await page2.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'after-restart.png') });
+      await secretReadBack({ api, check, value: secretValue, label: 'after a launcher restart and a browser restart on the same profile' });
       const cs2 = (await api('GET', '/api/chat/status?probe=1')).json;
       check('after the launcher restart chat is available again with a fresh app token', cs2 && cs2.available && cs2.gateway.reachable === true, JSON.stringify(cs2 && cs2.gateway && { reachable: cs2.gateway.reachable, lastError: cs2.gateway.lastError }));
     }

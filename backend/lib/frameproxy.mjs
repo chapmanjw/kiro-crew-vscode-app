@@ -13,6 +13,7 @@
 
 import http from 'node:http';
 import net from 'node:net';
+import { clientHalfFrom, secretCookies } from './secretkey.mjs';
 
 const TOKEN_COOKIE = 'vscode-tkn';
 const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade']);
@@ -53,6 +54,20 @@ export function injectConnectionToken(html, token) {
   return `${html.slice(0, at)}&quot;connectionToken&quot;:&quot;${token}&quot;,${html.slice(at)}`;
 }
 
+/**
+ * Add the view-overlay script (backend/lib/view-overlay.js) to the workbench
+ * page, before </head>, as a same-origin <script src>, which the workbench
+ * CSP (`script-src 'self'`, webClientServer.ts:150) allows. Returns the HTML
+ * unchanged when there is no </head>.
+ */
+export function injectOverlayScript(html, src) {
+  if (!/^\/[A-Za-z0-9/_.-]+$/.test(src || '')) throw new Error('unsafe script path');
+  const i = html.indexOf('</head>');
+  if (i < 0) return html;
+  return `${html.slice(0, i)}<script src="${src}"></script>
+${html.slice(i)}`;
+}
+
 /** Drop the token cookie the server tries to set; the browser never needs it. */
 export function filterSetCookie(values) {
   if (!values) return values;
@@ -67,9 +82,22 @@ const NOT_READY_HTML = `<!doctype html><meta charset="utf-8"><meta http-equiv="r
 
 /**
  * @param {() => ({port:number, token:string}|null)} getTarget
+ * @param {{overlayScriptPath?: string, overlayScript?: () => string, secretKey?: boolean}} [opts]
+ *   overlayScriptPath: where the page loads the view-overlay script from (served
+ *   here, never forwarded); secretKey: set the secret-storage cookies on the
+ *   workbench page (lib/secretkey.mjs).
  */
-export function createFrameProxy(getTarget) {
+export function createFrameProxy(getTarget, opts = {}) {
   function handleRequest(req, res) {
+    if (opts.overlayScriptPath && opts.overlayScript && req.url.split('?')[0] === opts.overlayScriptPath) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { 'content-type': 'text/plain' });
+        return res.end('method not allowed');
+      }
+      const body = Buffer.from(opts.overlayScript(), 'utf8');
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'content-length': String(body.length), 'x-content-type-options': 'nosniff' });
+      return res.end(req.method === 'HEAD' ? undefined : body);
+    }
     const target = getTarget();
     if (!target) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '2' });
@@ -100,7 +128,14 @@ export function createFrameProxy(getTarget) {
         upRes.on('data', (c) => chunks.push(c));
         upRes.on('end', () => {
           const html = Buffer.concat(chunks).toString('utf8');
-          const out = Buffer.from(injectConnectionToken(html, target.token) ?? html, 'utf8');
+          const withToken = injectConnectionToken(html, target.token);
+          let page = withToken ?? html;
+          // Only the workbench page itself (it carries the config marker).
+          if (withToken !== null && opts.overlayScriptPath) page = injectOverlayScript(page, opts.overlayScriptPath);
+          if (withToken !== null && opts.secretKey) {
+            h['set-cookie'] = [...(h['set-cookie'] || []), ...secretCookies(clientHalfFrom(req.headers.cookie))];
+          }
+          const out = Buffer.from(page, 'utf8');
           delete h['transfer-encoding'];
           h['content-length'] = String(out.length);
           h['cache-control'] = 'no-store';

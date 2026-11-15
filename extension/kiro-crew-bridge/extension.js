@@ -34,6 +34,53 @@ const HOST_ID = require('crypto').randomBytes(9).toString('base64url');
 let output;
 let statusItem;
 let crewItem;
+let extensionContext = null;
+const SECRET_PROBE_KEY = 'kiroCrew.secretProbe';
+
+// ------------------------------------------------- the "Kiro Crew" view
+//
+// A webview view in VS Code's secondary side bar, next to Chat and Claude
+// Code (package.json viewsContainers.secondarySidebar `kiroCrew`). It draws
+// only a placeholder: the vscode-pane app page lays Kiro Crew's real chat
+// panel over the view's rectangle, which a script the launcher injects into
+// the workbench page reports to the page (backend/lib/view-overlay.js).
+const CREW_CONTAINER_ID = 'workbench.view.extension.kiroCrew';
+const CREW_VIEW_ID = 'kiroCrew.chatView';
+let crewView = null;
+
+function crewViewHtml() {
+  // No scripts; a strict CSP. The text shows only while the page's overlay is
+  // not drawn (VS Code opened outside the Kiro Crew app, or the overlay is
+  // hidden under a VS Code popup).
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;font:13px var(--vscode-font-family);color:var(--vscode-descriptionForeground);text-align:center;padding:16px;box-sizing:border-box}</style>
+</head><body><div>Kiro Crew chat appears here inside the Kiro Crew app.</div></body></html>`;
+}
+
+function reportCrewView() {
+  return postEvent({ type: 'crewView', resolved: !!crewView, visible: !!(crewView && crewView.visible) });
+}
+
+const crewViewProvider = {
+  resolveWebviewView(view) {
+    crewView = view;
+    view.webview.options = { enableScripts: false };
+    view.webview.html = crewViewHtml();
+    view.onDidChangeVisibility(() => reportCrewView());
+    view.onDidDispose(() => {
+      if (crewView === view) crewView = null;
+      reportCrewView();
+    });
+    reportCrewView();
+  },
+};
+
+/** Open the Kiro Crew view: its container in the secondary side bar, then the view wherever it was moved. */
+async function revealCrewView() {
+  await vscode.commands.executeCommand(CREW_CONTAINER_ID);
+  if (!crewView || !crewView.visible) await vscode.commands.executeCommand(`${CREW_VIEW_ID}.focus`);
+}
 let stopped = false;
 let connected = false;
 let lastError = '';
@@ -174,6 +221,22 @@ async function runCommand(cmd) {
     case 'openChatSession':
       if (!sessionsApi) throw new Error('the Kiro Crew chat session type is not available in this VS Code');
       return sessionsApi.openSession(String(cmd.slot || ''));
+    case 'revealCrewView':
+      return revealCrewView();
+    case 'moveCrewView':
+      // Internal workbench command (viewPaneContainer.ts MoveViews); opens the destination.
+      await vscode.commands.executeCommand('vscode.moveViews', { viewIds: [CREW_VIEW_ID], destinationId: String(cmd.container || '') });
+      return revealCrewView();
+    case 'secretProbe': {
+      // One fixed key in this extension's own secret storage, for the
+      // persistence check (POST /api/secret-probe).
+      if (!extensionContext) throw new Error('not activated');
+      if (cmd.op === 'set') {
+        await extensionContext.secrets.store(SECRET_PROBE_KEY, String(cmd.value || ''));
+        return undefined;
+      }
+      return (await extensionContext.secrets.get(SECRET_PROBE_KEY)) ?? '';
+    }
     default:
       throw new Error(`unknown command ${cmd.kind}`);
   }
@@ -201,8 +264,8 @@ async function pollLoop() {
       for (const cmd of (res && res.commands) || []) {
         log(`command ${cmd.id} ${cmd.kind}${cmd.path ? ' ' + cmd.path : ''}`);
         try {
-          await runCommand(cmd);
-          if (!cmd.__reported) await postEvent({ type: 'result', id: cmd.id, ok: true });
+          const value = await runCommand(cmd);
+          if (!cmd.__reported) await postEvent({ type: 'result', id: cmd.id, ok: true, ...(cmd.kind === 'secretProbe' && typeof value === 'string' ? { value } : {}) });
         } catch (e) {
           log(`command ${cmd.id} failed: ${e.message}`);
           await postEvent({ type: 'result', id: cmd.id, ok: false, error: e.message });
@@ -603,18 +666,25 @@ function activate(context) {
   context.subscriptions.push(statusItem);
   if (vscode.chat && typeof vscode.chat.createChatParticipant === 'function') registerChat(context);
 
-  // Opens or closes the docked Kiro Crew chat column in the app page around
-  // this VS Code (ui/, built separately): the launcher counts the toggles in
-  // GET /api/session and the page follows the count.
+  // The "Kiro Crew" tab in the secondary side bar. Ctrl+Alt+K, the status
+  // bar item and the editor title action open it.
+  extensionContext = context;
+  if (typeof vscode.window.registerWebviewViewProvider === 'function') {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(CREW_VIEW_ID, crewViewProvider, { webviewOptions: { retainContextWhenHidden: true } }),
+    );
+  }
   crewItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   crewItem.name = 'Kiro Crew chat';
   crewItem.text = '$(comment-discussion) Crew';
-  crewItem.tooltip = 'Show or hide the Kiro Crew chat (Ctrl+Alt+K)';
-  crewItem.accessibilityInformation = { label: 'Show or hide the Kiro Crew chat' };
-  crewItem.command = 'kiroCrew.toggleCrewChat';
+  crewItem.tooltip = 'Open the Kiro Crew chat (Ctrl+Alt+K)';
+  crewItem.accessibilityInformation = { label: 'Open the Kiro Crew chat' };
+  crewItem.command = 'kiroCrew.openCrewChat';
   context.subscriptions.push(
     crewItem,
-    vscode.commands.registerCommand('kiroCrew.toggleCrewChat', () => postEvent({ type: 'toggleCrewChat' })),
+    vscode.commands.registerCommand('kiroCrew.openCrewChat', () => revealCrewView()),
+    // The 0.4.0 command id, kept for keybindings users may have bound to it.
+    vscode.commands.registerCommand('kiroCrew.toggleCrewChat', () => revealCrewView()),
   );
 
   context.subscriptions.push(
