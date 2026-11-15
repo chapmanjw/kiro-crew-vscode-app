@@ -341,6 +341,18 @@ export class TurnWatcher {
 
 // ---------------------------------------------------------------- registry
 
+/**
+ * Whether `slot` is a session slot this app mints for `folder`
+ * (newSessionSlotName: slotNameFor(folder) + '-' + 8 hex). Approvals and turns
+ * are only relayed for such slots, whatever data/state/chat-sessions.json says,
+ * so a hand-edited registry cannot point the bridge at another session.
+ */
+export function isAppSessionSlot(slot, folder) {
+  if (typeof slot !== 'string' || typeof folder !== 'string' || !folder) return false;
+  const base = slotNameFor(folder);
+  return slot.length === base.length + 9 && slot.startsWith(base + '-') && /^[0-9a-f]{8}$/.test(slot.slice(base.length + 1));
+}
+
 /** A fresh slot name for a new VS Code chat session in `folder`. */
 export function newSessionSlotName(folder, rand = () => crypto.randomBytes(4).toString('hex')) {
   return `${slotNameFor(folder)}-${rand()}`;
@@ -374,7 +386,7 @@ export class SessionRegistry {
       data = null;
     }
     for (const s of Array.isArray(data && data.sessions) ? data.sessions : []) {
-      if (!s || typeof s.slot !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(s.slot) || typeof s.folder !== 'string') continue;
+      if (!s || typeof s.slot !== 'string' || typeof s.folder !== 'string' || !isAppSessionSlot(s.slot, s.folder)) continue;
       this.sessions.set(s.slot, {
         slot: s.slot,
         folder: s.folder,
@@ -401,7 +413,8 @@ export class SessionRegistry {
   }
 
   get(slot) {
-    return this.sessions.get(slot) || null;
+    const s = this.sessions.get(slot);
+    return s && isAppSessionSlot(s.slot, s.folder) ? s : null;
   }
 
   touch(slot, { title } = {}) {
@@ -415,6 +428,6 @@ export class SessionRegistry {
 
   /** Sessions whose folder `inRoots` accepts, newest first. */
   list(inRoots = () => true) {
-    return [...this.sessions.values()].filter((s) => inRoots(s.folder)).sort((a, b) => b.updated - a.updated);
+    return [...this.sessions.values()].filter((s) => isAppSessionSlot(s.slot, s.folder) && inRoots(s.folder)).sort((a, b) => b.updated - a.updated);
   }
 }

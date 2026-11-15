@@ -40,41 +40,113 @@ const SECRET_PROBE_KEY = 'kiroCrew.secretProbe';
 // ------------------------------------------------- the "Kiro Crew" view
 //
 // A webview view in VS Code's secondary side bar, next to Chat and Claude
-// Code (package.json viewsContainers.secondarySidebar `kiroCrew`). It draws
-// only a placeholder: the vscode-pane app page lays Kiro Crew's real chat
-// panel over the view's rectangle, which a script the launcher injects into
-// the workbench page reports to the page (backend/lib/view-overlay.js).
+// Code (package.json viewsContainers.secondarySidebar `kiroCrew`). It frames
+// Kiro Crew's own live dashboard chat, /embed/chat/<the folder's slot>, on the
+// launcher's tunnel origin (backend/lib/kcproxy.mjs), or shows Connect and a
+// paste field while the tunnel is not signed in (crewview.js).
+const crewViewHtmlFor = require('./crewview').crewViewHtml;
 const CREW_CONTAINER_ID = 'workbench.view.extension.kiroCrew';
 const CREW_VIEW_ID = 'kiroCrew.chatView';
 let crewView = null;
-
-function crewViewHtml() {
-  // No scripts; a strict CSP. The text shows only while the page's overlay is
-  // not drawn (VS Code opened outside the Kiro Crew app, or the overlay is
-  // hidden under a VS Code popup).
-  return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;font:13px var(--vscode-font-family);color:var(--vscode-descriptionForeground);text-align:center;padding:16px;box-sizing:border-box}</style>
-</head><body><div>Kiro Crew chat appears here inside the Kiro Crew app.</div></body></html>`;
-}
+let kcInfo = null;
+let kcRendered = '';
 
 function reportCrewView() {
   return postEvent({ type: 'crewView', resolved: !!crewView, visible: !!(crewView && crewView.visible) });
 }
 
+function firstFolder() {
+  const f = (vscode.workspace.workspaceFolders || [])[0];
+  return f && f.uri.scheme === 'file' ? f.uri.fsPath : '';
+}
+
+/**
+ * Ask the launcher for the tunnel state and the folder's embed URL, and
+ * redraw the view when what it shows changed. `opened` is true when the tab
+ * has just been shown or its folder changed: only then does the launcher
+ * create or reopen the folder's Kiro Crew session.
+ */
+async function refreshKc(opened) {
+  if (!BRIDGE_URL) return;
+  const folder = firstFolder();
+  try {
+    kcInfo = await request('GET', `/api/bridge/kc?opened=${opened ? 1 : 0}${folder ? `&folder=${encodeURIComponent(folder)}` : ''}`, undefined, 20000);
+  } catch (e) {
+    kcInfo = { available: false, reason: `Kiro Crew tunnel: ${e.message}` };
+  }
+  renderCrewView();
+}
+
+function renderCrewView() {
+  if (!crewView) return;
+  const key = JSON.stringify([kcInfo && kcInfo.available, kcInfo && kcInfo.connected, kcInfo && kcInfo.origin, kcInfo && kcInfo.slot, kcInfo && kcInfo.lastError, kcInfo && kcInfo.reason]);
+  if (key === kcRendered) return;
+  kcRendered = key;
+  const nonce = require('crypto').randomBytes(16).toString('base64');
+  crewView.webview.html = crewViewHtmlFor(kcInfo, nonce);
+}
+
 const crewViewProvider = {
   resolveWebviewView(view) {
     crewView = view;
-    view.webview.options = { enableScripts: false };
-    view.webview.html = crewViewHtml();
-    view.onDidChangeVisibility(() => reportCrewView());
+    kcRendered = '';
+    view.webview.options = { enableScripts: true, localResourceRoots: [] };
+    view.webview.onDidReceiveMessage((m) => {
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'connect') connectKc();
+      else if (m.type === 'paste' && typeof m.url === 'string') pasteKc(m.url);
+    });
+    view.onDidChangeVisibility(() => {
+      reportCrewView();
+      if (view.visible) refreshKc(true);
+    });
     view.onDidDispose(() => {
       if (crewView === view) crewView = null;
       reportCrewView();
     });
     reportCrewView();
+    renderCrewView();
+    refreshKc(view.visible);
   },
 };
+
+/** Connect: the vscode-pane page in the signed-in dashboard mints the link on its next poll. */
+async function connectKc() {
+  try {
+    await request('POST', '/api/bridge/kc/connect', {}, 8000);
+  } catch (e) {
+    log(`connect request failed: ${e.message}`);
+  }
+  // The page polls every 2 s; look again for a while.
+  for (let i = 0; i < 10 && !(kcInfo && kcInfo.connected); i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    await refreshKc(false);
+  }
+  if (!(kcInfo && kcInfo.connected)) {
+    kcRendered = '';
+    renderCrewView();
+  }
+}
+
+async function pasteKc(url) {
+  try {
+    const r = await request('POST', '/api/bridge/kc/sign-in', { url }, 20000);
+    if (r && !r.ok) vscode.window.showWarningMessage(`Kiro Crew sign-in failed: ${r.error || 'unknown error'}`);
+  } catch (e) {
+    vscode.window.showWarningMessage(`Kiro Crew sign-in failed: ${e.message}`);
+  }
+  await refreshKc(false);
+}
+
+async function disconnectKc() {
+  try {
+    await request('POST', '/api/bridge/kc/disconnect', {}, 20000);
+    vscode.window.showInformationMessage('The Kiro Crew tab is signed out.');
+  } catch (e) {
+    vscode.window.showWarningMessage(`Kiro Crew disconnect failed: ${e.message}`);
+  }
+  await refreshKc(false);
+}
 
 /** Open the Kiro Crew view: its container in the secondary side bar, then the view wherever it was moved. */
 async function revealCrewView() {
@@ -123,6 +195,8 @@ function request(method, path, body, timeoutMs) {
         method,
         headers: {
           'x-kiro-bridge-secret': BRIDGE_SECRET,
+          // This window's extension host, so the launcher checks this window's folders.
+          'x-kiro-bridge-host': HOST_ID,
           ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}),
         },
       },
@@ -223,6 +297,9 @@ async function runCommand(cmd) {
       return sessionsApi.openSession(String(cmd.slot || ''));
     case 'revealCrewView':
       return revealCrewView();
+    case 'kcChanged':
+      // The tunnel signed in or out, or rotated its origin.
+      return refreshKc(false);
     case 'moveCrewView':
       // Internal workbench command (viewPaneContainer.ts MoveViews); opens the destination.
       await vscode.commands.executeCommand('vscode.moveViews', { viewIds: [CREW_VIEW_ID], destinationId: String(cmd.container || '') });
@@ -383,7 +460,7 @@ function streamChat(body, onPart, cancelToken) {
         port: url.port,
         path: url.pathname,
         method: 'POST',
-        headers: { 'x-kiro-bridge-secret': BRIDGE_SECRET, 'content-type': 'application/json', 'content-length': data.length },
+        headers: { 'x-kiro-bridge-secret': BRIDGE_SECRET, 'x-kiro-bridge-host': HOST_ID, 'content-type': 'application/json', 'content-length': data.length },
       },
       (res) => {
         if (res.statusCode >= 400) {
@@ -685,6 +762,8 @@ function activate(context) {
     vscode.commands.registerCommand('kiroCrew.openCrewChat', () => revealCrewView()),
     // The 0.4.0 command id, kept for keybindings users may have bound to it.
     vscode.commands.registerCommand('kiroCrew.toggleCrewChat', () => revealCrewView()),
+    vscode.commands.registerCommand('kiroCrew.connect', () => connectKc()),
+    vscode.commands.registerCommand('kiroCrew.disconnect', () => disconnectKc()),
   );
 
   context.subscriptions.push(
@@ -717,7 +796,10 @@ function activate(context) {
     vscode.workspace.onDidSaveTextDocument((doc) => {
       if (doc.uri.scheme === 'file') postEvent({ type: 'saved', path: doc.uri.fsPath });
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => sendHello()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      sendHello();
+      if (crewView && crewView.visible) refreshKc(true);
+    }),
     { dispose: () => { stopped = true; clearTimeout(selTimer); } },
   );
 

@@ -33,6 +33,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { attachDashboard } from './dashboard-mock.mjs';
 
 export const MOCK_REPLY = 'Hello from the **Kiro Crew mock**.';
 
@@ -48,6 +49,7 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
   const SCOPE_DENIED = { error: 'app token not permitted for this endpoint', code: 'forbidden' };
   const notFound = { error: 'not found', code: 'slot_not_found' };
   let port = 0;
+  const dashboard = attachDashboard(rec);
 
   const json = (res, status, body) => {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -90,6 +92,7 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     rec.requests.push(`${req.method} ${url.pathname}`);
+    if (dashboard.handle(req, res, url)) return;
     if (req.method === 'POST' && url.pathname === `/api/apps/${appName}/token`) {
       if (req.headers['x-app-secret'] !== secret) return json(res, 403, { error: 'invalid secret' });
       rec.exchanges++;
@@ -249,9 +252,19 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
     return json(res, 404, { error: 'not found' });
   });
 
+  const upgraded = new Set();
+  server.on('upgrade', (req, socket) => {
+    upgraded.add(socket);
+    socket.on('close', () => upgraded.delete(socket));
+    if (new URL(req.url, 'http://x').pathname === '/api/ws') return dashboard.upgrade(req, socket);
+    socket.destroy();
+  });
+
   return {
     server,
     rec,
+    /** A sign-in link for the owner's dashboard session (test/support/dashboard-mock.mjs). */
+    mintLink: (origin) => dashboard.mintLink(origin),
     closeSlot(key) {
       rec.slots.delete(key);
     },
@@ -282,6 +295,7 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
     close() {
       for (const w of waits.values()) w.resolve('closed');
       for (const w of questionWaits.values()) w.resolve('closed');
+      for (const s of upgraded) s.destroy();
       server.closeAllConnections?.();
       return new Promise((ok) => server.close(() => ok()));
     },

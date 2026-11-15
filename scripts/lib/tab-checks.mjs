@@ -1,80 +1,79 @@
 // Smoke checks for the Kiro Crew tab in VS Code's secondary side bar: the
-// bridge's webview view, the view-overlay script the frame proxy injects
-// (backend/lib/view-overlay.js), and the ChatPanel the page draws over the
-// view (ui/vscode-pane-crew-*.mjs). Run by scripts/smoke.mjs against the
-// dashboard stand-in, whose SDK shim has a ChatPanel stub that records its props.
+// bridge's webview view framing Kiro Crew's own dashboard chat through the
+// launcher's tunnel (backend/lib/kcproxy.mjs), the three sign-in mechanisms
+// (automatic from the page, Connect in the tab, a pasted link), Disconnect,
+// containment, the self-hosted webview endpoint and the chip. The dashboard
+// behind the tunnel is the mock gateway's (test/support/dashboard-mock.mjs),
+// not the real Kiro Crew SPA.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { slotNameFor } from '../../backend/lib/gateway.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitFor(fn, ms = 10_000, step = 200) {
+async function waitFor(fn, ms = 10_000, step = 250) {
   const t = Date.now();
   let v;
   while (Date.now() - t < ms) {
-    v = await fn();
+    v = await fn().catch(() => null);
     if (v) return v;
     await sleep(step);
   }
   return v;
 }
 
-const WEBVIEW = 'iframe.webview[src*="extensionId=kiro-crew.kiro-crew-bridge"][src*="purpose=webviewView"]';
+const EMBED_RE = /^http:\/\/[0-9a-f]{32}\.localhost:\d+\/embed\/chat\//;
 
-/** The overlay's state and box in the page. */
-function overlay(page) {
-  return page.evaluate(() => {
-    const el = document.querySelector('[data-testid="vscode-pane-crew"]');
-    const hd = window.__vscodePane;
-    if (!el) return { present: false, rejected: hd.viewRejected, accepted: hd.viewAccepted };
-    const r = el.getBoundingClientRect();
-    const stub = el.querySelector('[data-testid="crew-chatpanel-stub"]');
-    const active = document.activeElement;
-    return {
-      present: true,
-      visible: el.dataset.visible === 'true' && getComputedStyle(el).visibility === 'visible',
-      reason: el.dataset.hiddenReason || '',
-      location: el.dataset.location || '',
-      box: { x: r.left, y: r.top, width: r.width, height: r.height },
-      stubSlot: stub ? stub.dataset.slot : null,
-      stubConversationOnly: stub ? stub.dataset.conversationOnly : null,
-      focusInside: !!active && el.contains(active),
-      focusTag: active ? active.tagName.toLowerCase() : '',
-      rejected: hd.viewRejected,
-      accepted: hd.viewAccepted,
-      keys: hd.keysForwarded,
-      chatPanel: window.__standinSdk && { ...window.__standinSdk.chatPanel, props: window.__standinSdk.chatPanel.props.slice(-3) },
-    };
-  });
+/** The tunnelled /embed/chat frame inside the webview, or null. */
+function embedFrame(page) {
+  return page.frames().find((f) => EMBED_RE.test(f.url())) || null;
 }
 
-/** Overlay box against the webview's own box (Playwright's page coordinates), within 1px. */
-async function matchView(page, frame) {
-  const o = await overlay(page);
-  const w = await frame.locator(WEBVIEW).first().boundingBox().catch(() => null);
-  const d = o.present && o.box && w ? [o.box.x - w.x, o.box.y - w.y, o.box.width - w.width, o.box.height - w.height].map((n) => Math.round(n * 100) / 100) : null;
-  return { ok: !!d && o.visible && d.every((n) => Math.abs(n) <= 1), d, o, w: w && [w.x, w.y, w.width, w.height].map((n) => Math.round(n)) };
-}
-
-async function waitMatch(page, frame, ms = 8000) {
-  let m;
-  const t = Date.now();
-  while (Date.now() - t < ms) {
-    m = await matchView(page, frame);
-    if (m.ok) {
-      // Stable for two more polls (a layout that is still moving is not a match).
-      await sleep(250);
-      const again = await matchView(page, frame);
-      if (again.ok) return again;
-      m = again;
-    }
-    await sleep(200);
+/** The webview's own document (crewview.js HTML), found by its data-mode. */
+async function viewFrame(page, framePort) {
+  for (const f of page.frames()) {
+    if (!new RegExp(`^http://[a-z0-9]+\\.localhost:${framePort}/`).test(f.url())) continue;
+    const mode = await f.evaluate(() => (document.body && document.body.dataset.mode) || '').catch(() => '');
+    if (mode) return { frame: f, mode };
   }
-  return m;
+  return null;
 }
 
-const show = (m) => JSON.stringify({ d: m && m.d, webview: m && m.w, visible: m && m.o && m.o.visible, reason: m && m.o && m.o.reason });
+/** Act in the webview's sign-in panel; it may be redrawn under us, so find it afresh each try. */
+async function inView(page, framePort, fn, ms = 20_000) {
+  const t = Date.now();
+  let last = null;
+  while (Date.now() - t < ms) {
+    const v = await viewFrame(page, framePort);
+    if (v && v.mode === 'signin') {
+      try {
+        await fn(v.frame);
+        return true;
+      } catch (e) {
+        last = e;
+      }
+    }
+    await sleep(400);
+  }
+  const seen = [];
+  for (const f of page.frames()) {
+    if (!/\.localhost:/.test(f.url())) continue;
+    seen.push(`${f.url().replace(/^http:\/\/([a-z0-9]{6})[a-z0-9]*/, 'http://$1…').replace(/\?.*/, '').slice(0, 90)} mode=${await f.evaluate(() => (document.body && document.body.dataset.mode) || '-').catch((e) => 'ERR ' + e.message.slice(0, 40))}`);
+  }
+  throw new Error(`the sign-in panel never showed (${last ? last.message.split('\n')[0] : 'no panel'}); frames: ${seen.join(' | ')}`);
+}
+
+async function embedState(page) {
+  const f = embedFrame(page);
+  if (!f) return null;
+  return f.evaluate(() => ({
+    url: location.href,
+    state: (document.getElementById('state') || {}).textContent || '',
+    ws: (document.getElementById('ws') || {}).textContent || '',
+    slot: (document.getElementById('slot') || {}).textContent || '',
+  })).catch(() => null);
+}
 
 async function focusWorkbench(frame) {
   await frame.locator('.monaco-workbench .part.editor').first().click({ position: { x: 200, y: 160 } }).catch(() => {});
@@ -86,267 +85,207 @@ async function runCommand(page, frame, title) {
   await page.keyboard.press('Control+Shift+KeyP');
   await frame.locator('.quick-input-widget input').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   await page.keyboard.type(title, { delay: 5 });
-  await sleep(500);
+  await sleep(600);
   await page.keyboard.press('Enter');
-  await sleep(300);
+  await sleep(400);
 }
 
-/** Toasts left by earlier steps sit bottom right, over the view, and rightly hide the overlay. */
 async function clearNotifications(page, frame) {
-  if ((await frame.locator('.notifications-toasts.visible .notification-toast-container').count().catch(() => 0)) === 0) return 0;
+  if ((await frame.locator('.notifications-toasts.visible .notification-toast-container').count().catch(() => 0)) === 0) return;
   await runCommand(page, frame, 'Notifications: Clear All Notifications');
-  await waitFor(async () => (await frame.locator('.notifications-toasts.visible .notification-toast-container').count().catch(() => 0)) === 0, 5000);
-  return 1;
 }
 
-async function auxTab(frame, label) {
-  return frame.locator(`.part.auxiliarybar .composite-bar [aria-label^="${label}"]`).first();
-}
-
-export async function tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort }) {
-  const mainKey = slotNameFor(workspace);
-  const sideKey = `vscode-chat-${mainKey.slice(-6)}-2`;
-  hostServer.crewSlots.push(
-    { key: mainKey, title: `VS Code: ${path.basename(workspace)}`, project: workspace, messages: 3, running: false, last_ts: '2026-11-15T09:00:00Z' },
-    { key: sideKey, title: 'VS Code chat: second session', project: workspace, messages: 1, running: true, last_ts: '2026-11-15T10:00:00Z' },
-    { key: 'elsewhere-1', title: 'Some other project', project: path.join(path.dirname(workspace), 'elsewhere'), messages: 1, running: false },
-  );
-
-  const cleared = await clearNotifications(page, frame);
-  if (cleared) console.log('tab checks: cleared notification toasts left by earlier steps');
-  // 1. With Chat showing, the overlay is hidden; the status bar "Crew" item opens the tab.
-  await (await auxTab(frame, 'Chat')).click().catch(() => {});
-  const hiddenWithChat = await waitFor(async () => {
-    const o = await overlay(page);
-    return o.present && !o.visible ? o : null;
-  }, 8000);
-  check('while VS Code\'s Chat tab shows, the overlay is hidden (the view is not visible)', !!hiddenWithChat, JSON.stringify(hiddenWithChat || (await overlay(page))));
-  await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click();
-  let m = await waitMatch(page, frame);
-  // 2. The tab sits in VS Code's secondary side bar next to Chat (the active
-  //    tab always shows; others can fold into "Additional Views" when narrow).
-  const tabs = await frame.locator('.part.auxiliarybar .composite-bar .action-item').evaluateAll((els) => els.map((e) => ({
+async function auxTabs(frame) {
+  return frame.locator('.part.auxiliarybar .composite-bar .action-item').evaluateAll((els) => els.map((e) => ({
     label: (e.querySelector('.action-label') || e).getAttribute('aria-label') || '',
     active: e.classList.contains('checked') || !!e.querySelector('.action-label.checked'),
   })));
-  const docked = await page.locator('[data-testid="vscode-pane-crew-sash"]').count();
-  check('VS Code\'s secondary side bar shows a "Kiro Crew" tab next to Chat, and the page has no docked column or sash',
-    tabs.some((t) => /^Kiro Crew/.test(t.label) && t.active) && tabs.some((t) => /^Chat/.test(t.label)) && docked === 0, `${JSON.stringify(tabs)}; sash ${docked}`);
-  check('the status bar "Crew" item opens the Kiro Crew tab and the overlay lands on the view within 1px', m.ok && m.o.location === 'auxiliarybar', show(m));
-  const o1 = await waitFor(async () => {
-    const o = await overlay(page);
-    return o.stubSlot ? o : null;
-  }, 8000) || (await overlay(page));
-  check('the overlay mounts ChatPanel on the folder\'s main slot with conversationOnly', o1.stubSlot === mainKey && o1.stubConversationOnly === 'true' &&
-    o1.chatPanel && o1.chatPanel.props.some((p) => p.slotKey === mainKey && p.conversationOnly === true), `${o1.stubSlot} want ${mainKey}; ${JSON.stringify(o1.chatPanel && o1.chatPanel.props)}`);
+}
 
-  // 3. Ctrl+Alt+K in VS Code opens the tab and moves the keyboard into the chat.
-  await (await auxTab(frame, 'Chat')).click().catch(() => {});
-  await waitFor(async () => !(await overlay(page)).visible, 5000);
-  await focusWorkbench(frame);
-  await page.keyboard.press('Control+Alt+KeyK');
-  const focused = await waitFor(async () => {
-    const o = await overlay(page);
-    return o.visible && o.focusInside ? o : null;
-  }, 8000);
-  check('Ctrl+Alt+K in VS Code opens the Kiro Crew tab and the keyboard lands in the chat composer drawn over it',
-    !!focused && focused.focusTag === 'textarea', JSON.stringify(focused || (await overlay(page))));
+const signedIn = async (page) => {
+  const s = await embedState(page);
+  return s && /Signed in to Kiro Crew mock/.test(s.state) && /hello from the mock gateway/.test(s.ws) ? s : null;
+};
 
-  // 4. The overlay follows the view: a dashboard layout change, a side-bar width drag, a window resize.
-  await page.evaluate(() => {
-    document.getElementById('shell').style.gridTemplateColumns = '200px minmax(0,1fr)';
-  });
-  m = await waitMatch(page, frame);
-  check('after the dashboard layout narrows the pane, the overlay still matches the view within 1px', m.ok, show(m));
-  await page.evaluate(() => {
-    document.getElementById('shell').style.gridTemplateColumns = '';
-  });
-  m = await waitMatch(page, frame);
-  const aux0 = await frame.locator('.part.auxiliarybar').first().boundingBox();
-  const sy = Math.round(aux0.y + aux0.height / 2);
-  // VS Code's sash takes a press only after the pointer has hovered it.
-  const sx = Math.round(aux0.x) - 1;
-  await page.mouse.move(sx, sy);
-  await sleep(300);
-  await page.mouse.down();
-  await sleep(100);
-  for (let i = 1; i <= 10; i++) {
-    await page.mouse.move(sx - i * 30, sy, { steps: 3 });
-    await sleep(30);
-  }
-  await page.mouse.up();
+let exchangesAfterChecks = null;
+
+export async function tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort, dataDir, rawRequest, cdnRequests }) {
+  const mainKey = slotNameFor(workspace);
+  const dash = gatewayMock.rec.dash;
+  await clearNotifications(page, frame);
+
+  // 1. (a) The page signed the tunnel in by itself when it opened: a link
+  //    minted with the dashboard's own session cookie, no user step.
+  const auto = await waitFor(async () => {
+    const s = (await api('GET', '/api/session')).json;
+    return s && s.kc && s.kc.connected ? s.kc : null;
+  }, 20_000);
+  // The page's own record of it went with an earlier reload; the stand-in's is kept.
+  check('(a) opening the page signs the Kiro Crew tab in automatically with a link minted from the dashboard session (its HttpOnly cookie sent by a plain fetch)',
+    !!auto && auto.via === 'auto' && hostServer.mints[0] && hostServer.mints[0].status === 200 && hostServer.mints[0].cookie === true && dash.exchanges >= 1,
+    JSON.stringify({ kc: auto && { connected: auto.connected, via: auto.via }, standinMints: hostServer.mints, exchanges: dash.exchanges }));
+
+  // 2. The status bar "Crew" item opens the tab, which frames the tunnelled
+  //    /embed/chat for the folder's slot, signed in, with its WebSocket open.
+  await frame.locator('.part.auxiliarybar .composite-bar [aria-label^="Chat"]').first().click().catch(() => {});
   await sleep(500);
-  const aux1 = await frame.locator('.part.auxiliarybar').first().boundingBox();
-  m = await waitMatch(page, frame);
-  check('dragging the secondary side bar\'s sash 300px left widens the view and the overlay matches it within 1px',
-    aux1.width - aux0.width >= 250 && m.ok, `side bar ${Math.round(aux0.width)} -> ${Math.round(aux1.width)}px; ${show(m)}`);
-  await page.setViewportSize({ width: 1220, height: 780 });
-  m = await waitMatch(page, frame);
-  check('after a window resize the overlay matches the view within 1px', m.ok, show(m));
-  await page.setViewportSize({ width: 1400, height: 900 });
-  m = await waitMatch(page, frame);
+  await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click();
+  const s1 = await waitFor(() => signedIn(page), 30_000);
+  check("the status bar item opens the Kiro Crew tab, framing Kiro Crew's /embed/chat for the folder's slot through the tunnel, signed in with the WebSocket open",
+    !!s1 && s1.url.endsWith(`/embed/chat/${mainKey}`) && s1.slot === mainKey, JSON.stringify(s1 || (await embedState(page))));
+  const tabs = await auxTabs(frame);
+  const docked = await page.locator('[data-testid="vscode-pane-crew"], [data-testid="vscode-pane-crew-sash"]').count();
+  check('VS Code\'s secondary side bar shows the "Kiro Crew" tab next to Chat, and the page draws no column or overlay of its own',
+    tabs.some((t) => /^Kiro Crew/.test(t.label) && t.active) && tabs.some((t) => /^Chat/.test(t.label)) && docked === 0, `${JSON.stringify(tabs)}; page elements ${docked}`);
+  const made = gatewayMock.rec.slots.get(mainKey);
+  check('opening the tab created the folder\'s session pointed at the folder, whose name has a space', /\s/.test(path.basename(workspace)) && !!made && String(made.project).toLowerCase() === workspace.toLowerCase(),
+    JSON.stringify({ folder: path.basename(workspace), slot: mainKey, project: made && made.project }));
 
-  // 5. Idle, the frame script measures on change only (no 60 Hz loop).
-  const wbFrame = page.frames().find((f) => f.url().startsWith(`http://127.0.0.1:${framePort}/vsc-`));
-  const meas0 = await wbFrame.evaluate(() => window.__kcViewOverlay.measures);
-  await sleep(3000);
-  const meas1 = await wbFrame.evaluate(() => window.__kcViewOverlay.measures);
-  check('idle for 3 s the workbench script measures the view only on change (not every frame)', meas1 - meas0 <= 60, `${meas1 - meas0} measurements in 3 s`);
+  // 3. The chain is all loopback: the webview comes from the self-hosted
+  //    endpoint, nothing from vscode-cdn.net.
+  const vf = await waitFor(() => viewFrame(page, framePort), 5000);
+  check('the tab\'s webview is served from http://<uuid>.localhost:<frame port>, and no webview loads from vscode-cdn.net',
+    !!vf && vf.mode === 'frame' && cdnRequests.length === 0, `${vf && vf.frame.url().replace(/\?.*/, '')}; cdn ${JSON.stringify(cdnRequests.slice(0, 3))}`);
 
-  // 6. VS Code's popups over the view hide the overlay: the command palette,
-  //    a notification toast, and the palette opened by F1 from inside the chat.
-  await clearNotifications(page, frame);
-  await focusWorkbench(frame);
-  await page.keyboard.press('Control+Shift+KeyP');
-  const qi = await frame.locator('.quick-input-widget').first().boundingBox().catch(() => null);
-  const ob = (await overlay(page)).box;
-  const hiddenQi = await waitFor(async () => {
-    const o = await overlay(page);
-    return !o.visible && /quickInput/.test(o.reason) ? o : null;
-  }, 5000);
-  const crosses = !!qi && !!ob && qi.x < ob.x + ob.width && ob.x < qi.x + qi.width && qi.y < ob.y + ob.height && ob.y < qi.y + qi.height;
-  check('the command palette opened over the view hides the overlay', crosses && !!hiddenQi, `palette ${JSON.stringify(qi && [qi.x, qi.y, qi.width, qi.height].map(Math.round))} crosses overlay ${crosses}; ${JSON.stringify(hiddenQi || (await overlay(page)))}`);
-  // Run "Show Bridge Status": its notification toast sits bottom right, over the view.
-  await page.keyboard.type('Kiro Crew: Show Bridge Status', { delay: 5 });
-  await sleep(400);
-  await page.keyboard.press('Enter');
-  const toastHidden = await waitFor(async () => {
-    const o = await overlay(page);
-    return !o.visible && /notification/.test(o.reason) ? o : null;
-  }, 8000);
-  check('a VS Code notification toast over the view hides the overlay', !!toastHidden, JSON.stringify(toastHidden || (await overlay(page))));
-  await clearNotifications(page, frame);
-  await focusWorkbench(frame);
-  await page.keyboard.press('Escape');
-  m = await waitMatch(page, frame);
-  check('when the palette and toast close, the overlay shows again on the view', m.ok, show(m));
-  await page.locator('[data-testid="vscode-pane-crew"] textarea').first().click();
-  const keys0 = (await overlay(page)).keys;
-  await page.keyboard.press('F1');
-  const f1 = await waitFor(async () => {
-    const o = await overlay(page);
-    const open = await frame.locator('.quick-input-widget').first().isVisible().catch(() => false);
-    return open && !o.visible && o.keys > keys0 ? o : null;
-  }, 6000);
-  check('F1 pressed in the chat goes to VS Code: the command palette opens and the overlay steps aside', !!f1, JSON.stringify(f1 || (await overlay(page))));
-  await page.keyboard.press('Escape');
-  m = await waitMatch(page, frame);
-  check('Escape closes the palette (keyboard was handed to VS Code) and the overlay returns', m.ok, show(m));
-
-  // 7. The view collapsing: the secondary side bar closed hides the overlay; reopened, it returns.
-  await focusWorkbench(frame);
-  await page.keyboard.press('Control+Alt+KeyB');
-  const collapsed = await waitFor(async () => {
-    const o = await overlay(page);
-    return !o.visible && /view/.test(o.reason) ? o : null;
-  }, 6000);
-  await page.keyboard.press('Control+Alt+KeyB');
-  m = await waitMatch(page, frame);
-  check('closing the secondary side bar hides the overlay, reopening it shows the overlay on the view again', !!collapsed && m.ok, `${JSON.stringify(collapsed)}; ${show(m)}`);
-
-  // 8. Messages that are not the frame's own are ignored: the page's own
-  //    window, a wrong nonce from the frame, the right nonce from another
-  //    window on the frame's origin.
-  const rej0 = (await overlay(page)).rejected;
-  const fake = (nonce) => ({ type: 'kc-view', nonce, seq: 1e9, view: { found: true, visible: false, rect: null, location: 'none', focused: false }, blocked: [], dragging: false, viewport: { w: 100, h: 100 }, hidden: false });
-  const nonce = await page.evaluate(() => window.__vscodePane.viewNonce);
-  await page.evaluate((msg) => window.postMessage(msg, '*'), fake(nonce));
-  await wbFrame.evaluate((msg) => window.parent.postMessage(msg, '*'), fake('0'.repeat(32)));
-  await page.evaluate((src) => new Promise((ok) => {
-    const f = document.createElement('iframe');
-    f.id = 'smoke-foreign-frame';
-    f.style.cssText = 'position:fixed;left:0;top:0;width:10px;height:10px;opacity:0';
-    f.onload = ok;
-    f.src = src;
-    document.body.appendChild(f);
-  }), `http://127.0.0.1:${framePort}/not-the-workbench`);
-  const foreign = page.frames().find((f) => f.url().endsWith('/not-the-workbench'));
-  if (foreign) await foreign.evaluate((msg) => window.parent.postMessage(msg, '*'), fake(nonce)).catch(() => {});
-  await sleep(800);
-  const after = await overlay(page);
-  m = await matchView(page, frame);
-  check('postMessages from the page itself, with a wrong nonce, or from another window on the frame origin are ignored',
-    after.rejected - rej0 === 3 && m.ok, `rejected +${after.rejected - rej0}; overlay ${show(m)}`);
-  await page.evaluate(() => document.getElementById('smoke-foreign-frame')?.remove());
-
-  // 9. The chip: hidden inside the embedded chat, the other app's chip kept.
-  const chips = await page.evaluate(() => Array.from(document.querySelectorAll('[data-testid="vscode-pane-crew"] [data-session-control-chip]'))
-    .map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
-  check('inside the embedded ChatPanel the app\'s "VS Code" chip is hidden and another app\'s chip still shows',
+  // 4. The chip: hidden inside the tunnelled chat, another app's kept.
+  const ef = embedFrame(page);
+  const chips = await ef.evaluate(() => Array.from(document.querySelectorAll('[data-session-control-chip]')).map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
+  check('inside the tunnelled chat the app\'s "VS Code" chip is hidden and another app\'s chip shows',
     chips.length === 2 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none', JSON.stringify(chips));
 
-  // 10. The view moved to the primary side bar and back: the overlay follows.
-  const mv = await api('POST', '/api/crew/view', { action: 'move', to: 'sidebar' });
-  m = await waitMatch(page, frame, 10_000);
-  check('moved to the primary side bar, the overlay follows the view within 1px', mv.json && mv.json.ok && m.ok && m.o.location === 'sidebar', `${JSON.stringify(mv.json)}; ${show(m)} at ${m.o && m.o.location}`);
-  const back = await api('POST', '/api/crew/view', { action: 'move', to: 'auxiliarybar' });
-  m = await waitMatch(page, frame, 10_000);
-  check('moved back to the secondary side bar, the overlay is on the view again', back.json && back.json.ok && m.ok && m.o.location === 'auxiliarybar', `${show(m)} at ${m.o && m.o.location}`);
-  const badMove = await api('POST', '/api/crew/view', { action: 'move', to: 'window' });
-  check('POST /api/crew/view refuses an unknown destination', badMove.status === 400, String(badMove.status));
+  // 5. The session stays in the launcher.
+  const jar = await page.context().cookies();
+  const kcCookies = jar.filter((c) => /^mc_(token|refresh)_\d+$/.test(c.name));
+  const stateFile = path.join(dataDir, 'state', 'kc-session.json');
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const logText = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
+  let acl = 'n/a';
+  let aclOk = true;
+  if (process.platform === 'win32') {
+    const r = spawnSync('icacls', [stateFile], { encoding: 'utf8', windowsHide: true });
+    const aces = String(r.stdout || '').split(/\r?\n/).map((l) => l.replace(stateFile, '').trim()).filter((l) => /:\(/.test(l));
+    acl = aces.join(' | ');
+    aclOk = aces.length === 1 && /:\(F\)$/.test(aces[0]) && !/\(I\)/.test(acl);
+  }
+  check('no Kiro Crew session cookie in the browser; the launcher keeps it owner-only in data/state/kc-session.json and never logs it',
+    kcCookies.length === 0 && !!saved.token && !!saved.refresh && aclOk && !logText.includes(saved.token) && !logText.includes(saved.refresh),
+    `browser mc_* cookies ${kcCookies.length}; acl ${acl}`);
 
-  // 11. The session switcher and "Open in Kiro Crew" in the slim header.
-  await page.click('[data-testid="vscode-pane-crew-switcher"]');
-  const listed = await waitFor(async () => {
-    const keys = await page.$$eval('[data-testid="vscode-pane-crew-menu"] [role="option"]', (els) => els.map((e) => e.dataset.slot));
-    return keys.length >= 2 ? keys : null;
-  }, 5000);
-  check('the header\'s session switcher lists this folder\'s sessions (main first) and not other projects',
-    listed && listed[0] === mainKey && listed.includes(sideKey) && !listed.includes('elsewhere-1'), JSON.stringify(listed));
-  await page.click(`[data-testid="vscode-pane-crew-menu"] [data-slot="${sideKey}"]`);
-  const switched = await waitFor(async () => (await overlay(page)).stubSlot === sideKey, 5000);
-  check('picking a session rebinds the overlay\'s ChatPanel to it', !!switched, String((await overlay(page)).stubSlot));
-  await page.click('[data-testid="vscode-pane-crew-switcher"]');
-  await page.click(`[data-testid="vscode-pane-crew-menu"] [data-slot="${mainKey}"]`);
-  await waitFor(async () => (await overlay(page)).stubSlot === mainKey, 5000);
+  // 6. Containment, from inside the tunnelled chat and from outside.
+  const origin = new URL(ef.url()).origin;
+  const kcPort = Number(new URL(origin).port);
+  const tried = await ef.evaluate(async () => {
+    const out = {};
+    for (const p of ['/api/token/local', '/api/auth/mobile-link', '/api/tailnet/qr']) out[p] = (await fetch(p, { method: 'POST' })).status;
+    return out;
+  });
+  const bare = await rawRequest({ port: kcPort, path: '/', headers: { host: `127.0.0.1:${kcPort}` } });
+  const foreign = await rawRequest({ port: kcPort, method: 'POST', path: '/api/auth/refresh', headers: { host: new URL(origin).host, origin: 'http://localhost:5476' } });
+  check('from the tab, credential-minting routes are refused by the tunnel; a bare Host gets 421 and a foreign Origin 403',
+    Object.values(tried).every((v) => v === 403) && dash.forbiddenHits.length === 0 && bare.status === 421 && foreign.status === 403,
+    JSON.stringify({ tried, reachedGateway: dash.forbiddenHits, bare: bare.status, foreign: foreign.status }));
 
-  // 12. Tabbing away unmounts the chat with the page; the /chat view keeps the
-  //     chip; coming back puts the overlay on the view again.
-  const mounts0 = (await overlay(page)).chatPanel.mounts;
-  await page.click('#nav-chat');
-  await page.locator('[data-testid="composer-context-shelf"]').waitFor({ timeout: 5000 });
-  const away = await page.evaluate(() => ({
-    overlay: !!document.querySelector('[data-testid="vscode-pane-crew"]'),
-    live: window.__standinSdk.chatPanel.live,
-    chip: (() => {
-      const b = document.querySelector('[data-testid="composer-context-shelf"] [data-chip-id^="vscode-pane:"]');
-      return b ? getComputedStyle(b).display : 'missing';
-    })(),
-    style: !!document.getElementById('vscode-pane-crew-style-0-5-0'),
-  }));
-  check('on a normal Kiro Crew session the "VS Code" chip still shows (the hiding rule is scoped to the overlay)', away.chip !== 'none' && away.chip !== 'missing' && away.style, JSON.stringify(away));
-  await page.click('#nav-vscode');
-  m = await waitMatch(page, frame, 10_000);
-  const o2 = await overlay(page);
-  check('tabbing away unmounts the overlay\'s ChatPanel; coming back remounts it on the same session over the view',
-    !away.overlay && away.live === 0 && o2.chatPanel.mounts === mounts0 + 1 && o2.stubSlot === mainKey && m.ok, JSON.stringify({ away, mounts: `${mounts0} -> ${o2.chatPanel.mounts}`, slot: o2.stubSlot, m: show(m) }));
+  // 7. Ctrl+Alt+K from VS Code opens the tab again.
+  await frame.locator('.part.auxiliarybar .composite-bar [aria-label^="Chat"]').first().click().catch(() => {});
+  await sleep(500);
+  await focusWorkbench(frame);
+  await page.keyboard.press('Control+Alt+KeyK');
+  const reopened = await waitFor(async () => ((await auxTabs(frame)).find((t) => /^Kiro Crew/.test(t.label) && t.active) ? signedIn(page) : null), 10_000);
+  check('Ctrl+Alt+K in VS Code reveals the Kiro Crew tab, still signed in', !!reopened, JSON.stringify(await auxTabs(frame)));
 
-  // 13. A host without ChatPanel shows "Open in Kiro Crew" instead.
-  await page.evaluate(() => window.__standinSdk.setChatPanel(false));
-  await page.click('#nav-chat');
-  await page.click('#nav-vscode');
-  const fb = await waitFor(async () => (await page.locator('[data-testid="vscode-pane-crew-fallback"]').count()) > 0, 8000);
-  check('without ChatPanel the overlay shows the "Open in Kiro Crew" fallback', !!fb);
-  await page.locator('[data-testid="vscode-pane-crew-fallback"] button').click().catch(() => {});
-  const landed = await waitFor(() => page.evaluate(() => (location.pathname.startsWith('/chat/') ? location.pathname : '')), 5000);
-  check('"Open in Kiro Crew" goes to the session on the Chat page', landed === `/chat/${encodeURIComponent(mainKey)}`, landed);
-  await page.evaluate(() => window.__standinSdk.setChatPanel(true));
-  await page.click('#nav-vscode');
-  await waitMatch(page, frame, 10_000);
+  // 8. Disconnect (the view's title action, here from the palette).
+  const logouts0 = dash.logouts;
+  await runCommand(page, frame, 'Kiro Crew: Disconnect the Kiro Crew Tab');
+  const out = await waitFor(async () => {
+    const v = await viewFrame(page, framePort);
+    const s = (await api('GET', '/api/session')).json;
+    return v && v.mode === 'signin' && s.kc && !s.kc.connected ? { mode: v.mode } : null;
+  }, 15_000);
+  const pageState = await waitFor(async () => ((await page.locator('[data-testid="vscode-pane-kc-state"]').getAttribute('data-connected')) === 'false' ? 'false' : null), 8000) || 'true';
+  check('Disconnect signs the tab out at the gateway, rotates the origin and shows Connect and the paste field',
+    !!out && dash.logouts === logouts0 + 1 && !embedFrame(page) && pageState === 'false', JSON.stringify({ out, logouts: dash.logouts - logouts0, page: pageState }));
+  check('after Disconnect the old tunnel origin is refused', (await rawRequest({ port: kcPort, path: '/', headers: { host: new URL(origin).host } })).status === 421);
 
-  // 14. The launcher names the folder's slot and created it in Kiro Crew.
-  const raw = await page.evaluate((f) => fetch(`/apps/vscode-pane/api/session?folder=${encodeURIComponent(f)}`).then((r) => r.json()), workspace);
-  const made = gatewayMock && gatewayMock.rec.slots.get(mainKey);
-  check("the launcher reports the folder's crew slot and the view's state, and has created the slot in Kiro Crew pointed at the folder",
-    !!raw && raw.crewSlot && raw.crewSlot.key === mainKey && raw.crewView && raw.crewView.resolved === true && raw.crewView.visible === true &&
-      !!made && String(made.project).toLowerCase() === workspace.toLowerCase(),
-    JSON.stringify({ crewSlot: raw && raw.crewSlot, crewView: raw && raw.crewView }));
+  // 9. (b) The tab's Connect button: the page mints the link on its next poll.
+  await clearNotifications(page, frame);
+  await inView(page, framePort, (f) => f.click('#connect', { timeout: 3000 }));
+  const viaConnect = await waitFor(() => signedIn(page), 30_000);
+  const mints2 = await page.evaluate(() => window.__vscodePane.kcMints);
+  check('(b) Connect in the tab signs it in again through the page (a dashboard-minted link), with no paste',
+    !!viaConnect && mints2.at(-1).via === 'connect' && mints2.at(-1).ok === true, JSON.stringify({ last: mints2.at(-1), embed: viaConnect }));
 
-  // 15. Dark screenshot of the tab in VS Code's right pane.
-  await (await auxTab(frame, 'Kiro Crew')).click().catch(() => {});
-  m = await waitMatch(page, frame);
-  await sleep(600);
+  // 10. (c) No dashboard URL in Settings: the mint is refused (409); a pasted
+  //     `kirocrew token` link signs the tab in instead.
+  await runCommand(page, frame, 'Kiro Crew: Disconnect the Kiro Crew Tab');
+  await waitFor(async () => ((await viewFrame(page, framePort)) || {}).mode === 'signin', 15_000);
+  hostServer.mobileLink = 'unavailable';
+  await clearNotifications(page, frame);
+  await inView(page, framePort, (f) => f.click('#connect', { timeout: 3000 }));
+  const refused = await waitFor(async () => {
+    const v = await viewFrame(page, framePort);
+    if (!v || v.mode !== 'signin') return null;
+    const txt = await v.frame.evaluate(() => document.body.innerText).catch(() => '');
+    return /external_origin_unavailable/.test(txt) ? txt : null;
+  }, 20_000);
+  check('(b) when the dashboard has no URL configured, Connect reports external_origin_unavailable in the tab and stays signed out', !!refused, String(refused || '').slice(0, 200));
+  const link = gatewayMock.mintLink();
+  await inView(page, framePort, async (f) => {
+    await f.fill('#link', link, { timeout: 3000 });
+    await f.click('#paste', { timeout: 3000 });
+  });
+  const viaPaste = await waitFor(() => signedIn(page), 30_000);
+  const kcNow = (await api('GET', '/api/session')).json.kc;
+  check('(c) a pasted sign-in link signs the tab in', !!viaPaste && kcNow.connected && kcNow.via === 'paste', JSON.stringify({ via: kcNow.via, embed: viaPaste }));
+  hostServer.mobileLink = 'ok';
+
+  // 11. Built-in webviews still work from the self-hosted endpoint: the Markdown preview.
+  const md = path.join(workspace, 'preview me.md');
+  fs.writeFileSync(md, '# Preview works through loopback\n\nSome *markdown*.\n');
+  await api('POST', '/api/open', { path: md });
+  await sleep(1000);
+  await runCommand(page, frame, 'Markdown: Open Preview to the Side');
+  const preview = await waitFor(async () => {
+    for (const f of page.frames()) {
+      if (!new RegExp(`^http://[a-z0-9]+\\.localhost:${framePort}/`).test(f.url())) continue;
+      const t = await f.evaluate(() => (document.body && document.body.innerText) || '').catch(() => '');
+      if (/Preview works through loopback/.test(t)) return f.url().replace(/\?.*/, '');
+    }
+    return null;
+  }, 30_000);
+  check('the Markdown preview renders from the self-hosted webview endpoint, with no webview from vscode-cdn.net', !!preview && cdnRequests.length === 0, `${preview}; cdn ${cdnRequests.length}`);
+  // Leave the editors as the later restore checks expect: no preview, hello.txt active.
+  for (let i = 0; i < 4; i++) {
+    await runCommand(page, frame, 'View: Close All Editors');
+    const left = await waitFor(async () => ((await frame.locator('.part.editor .tabs-container .tab').count()) === 0 ? 'none' : null), 4000);
+    if (left) break;
+  }
+  const leftTabs = await frame.locator('.part.editor .tabs-container .tab').count();
+  await api('POST', '/api/open', { path: path.join(workspace, 'hello.txt'), line: 2 });
+  await sleep(1500);
+  check('the preview is closed again (later restore checks expect hello.txt alone)', leftTabs === 0, `${leftTabs} editor tabs left`);
+
+  // 12. Dark screenshot of the tab in VS Code's right pane (mock dashboard behind the tunnel).
+  await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click();
+  await waitFor(() => signedIn(page), 10_000);
+  await sleep(800);
   const shot = path.join(shotDir, 'crew-tab-dark.png');
   await page.screenshot({ path: shot });
-  check('dark screenshot of the Kiro Crew tab in VS Code\'s right pane saved', fs.existsSync(shot) && m.ok, shot);
+  check('dark screenshot of the Kiro Crew tab (the mock dashboard through the tunnel) saved', fs.existsSync(shot), shot);
+  exchangesAfterChecks = dash.exchanges;
+}
+
+/** After a launcher restart: still signed in with no new link, and (with a page) the tab still shows the chat. */
+export async function tunnelPersists({ api, check, gatewayMock, label, page }) {
+  const s = await waitFor(async () => {
+    const j = (await api('GET', '/api/session').catch(() => ({ json: null }))).json;
+    return j && j.kc && j.kc.available ? j : null;
+  }, 30_000);
+  let embed = true;
+  if (page) {
+    await api('POST', '/api/crew/view', { action: 'reveal' });
+    embed = await waitFor(() => signedIn(page), 40_000);
+  }
+  check(`the Kiro Crew tab stays signed in ${label}, with no new sign-in`,
+    !!s && s.kc.connected === true && exchangesAfterChecks !== null && gatewayMock.rec.dash.exchanges === exchangesAfterChecks && !!embed,
+    JSON.stringify({ connected: s && s.kc.connected, exchanges: [exchangesAfterChecks, gatewayMock.rec.dash.exchanges], embed: !!embed }));
 }

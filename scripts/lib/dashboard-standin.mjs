@@ -28,8 +28,13 @@
 //    (components/chat-input/ContextShelf.tsx: a wrapper div of
 //    <button data-session-control-chip> with an AppIcon lucide <svg
 //    class="lucide lucide-<icon>">), both in the /chat view and inside the
-//    ChatPanel stub, plus a second app's chip with another icon, so the page's
-//    chip-hiding rule can be checked in both places
+//    ChatPanel stub, plus a second app's chip with another icon
+//  - the owner's dashboard session: every page load sets an HttpOnly session
+//    cookie, and POST /api/auth/mobile-link mints a sign-in link (through the
+//    mock gateway's `mintLink`) only for a request that carries it, as the real
+//    route needs an authenticated, non-app session (handlers/auth_mobile.py).
+//    `server.mobileLink = 'unavailable'` answers 409 external_origin_unavailable
+//    (no dashboard URL in Settings); `server.mints` records each call
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -173,7 +178,8 @@ html,body{margin:0;height:100%;background:var(--bg,#808080);color:var(--text,#00
 .popover{position:absolute;bottom:34px;left:0;width:340px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 `;
 
-export function createDashboardStandin({ repoRoot, launcherPort, secret, recentDirs = [], chatCwd = '' }) {
+export function createDashboardStandin({ repoRoot, launcherPort, secret, recentDirs = [], chatCwd = '', mintLink = null }) {
+  const SESSION = `standin-${Math.random().toString(36).slice(2)}`;
   const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'app.json'), 'utf8'));
   const uiDir = path.join(repoRoot, 'ui');
   const control = ((manifest.contributes || {}).sessionControls || [])[0] || null;
@@ -265,8 +271,21 @@ createRoot(document.getElementById('main-content')).render(h(Root));
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/auth/mobile-link' && req.method === 'POST') {
+      req.resume();
+      const hasCookie = new RegExp(`(?:^|;\\s*)standin_session=${SESSION}(?:;|$)`).test(req.headers.cookie || '');
+      const json = (status, v) => {
+        server.mints.push({ status, cookie: hasCookie, origin: req.headers.origin || null });
+        res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(v));
+      };
+      if (!hasCookie) return json(401, { error: 'unauthenticated', code: 'unauthenticated' });
+      if (server.mobileLink === 'unavailable' || !mintLink) return json(409, { error: 'external_origin_unavailable', code: 'external_origin_unavailable' });
+      return json(200, { url: mintLink(), expires_in: 300 });
+    }
     if (url.pathname === '/' || url.pathname === '/chat' || url.pathname.startsWith('/apps/vscode-pane') && !url.pathname.startsWith('/apps/vscode-pane/api/')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      // The owner's dashboard session, as the gateway sets mc_token_<port>.
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': `standin_session=${SESSION}; HttpOnly; SameSite=Lax; Path=/` });
       return res.end(page);
     }
     if (url.pathname === '/sdk.mjs') {
@@ -361,6 +380,8 @@ createRoot(document.getElementById('main-content')).render(h(Root));
   server.themePosts = themePosts;
   server.slotPosts = slotPosts;
   server.crewSlots = crewSlots;
+  server.mobileLink = 'ok';
+  server.mints = [];
   // A restarted backend listens on a new port, as the gateway's proxy would
   // follow it; the page keeps calling the same /apps/vscode-pane/api/ URLs.
   server.setLauncherPort = (p) => {

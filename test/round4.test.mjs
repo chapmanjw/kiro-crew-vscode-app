@@ -1,7 +1,8 @@
 // Round 4 (0.5.0): the workbench's secret-storage key (backend/lib/secretkey.mjs
-// and the frame proxy), the "Kiro Crew" view in VS Code's secondary side bar
-// (extension package.json, backend/lib/crewview.mjs, backend/lib/view-overlay.js)
-// and the page's overlay helpers (ui/vscode-pane-crew-core-*.mjs).
+// and the frame proxy), the self-hosted webview endpoint, and the "Kiro Crew"
+// view in VS Code's secondary side bar (extension package.json and crewview.js,
+// backend/lib/crewview.mjs, kctab.mjs, chipcss.mjs). The tunnel itself is in
+// test/kcproxy.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,24 +10,24 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import Module from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
   KEY_BYTES, MINT_PATH, decodeKeyPart, encodeKeyPart, mintKey, readCookie, clientHalfFrom, secretCookies, loadServerHalf, mintAllowed, restrictToUser,
 } from '../backend/lib/secretkey.mjs';
-import { createFrameProxy, injectOverlayScript, isLoopbackHost } from '../backend/lib/frameproxy.mjs';
+import { createFrameProxy, injectWebviewEndpoint, isLoopbackHost } from '../backend/lib/frameproxy.mjs';
 import { parseCrewViewRequest, parseSecretProbe, CREW_VIEW_HOMES } from '../backend/lib/crewview.mjs';
+import { crewSlotRequest, dashboardOrigins } from '../backend/lib/kctab.mjs';
+import { chipHideCss, CHIP_ICON } from '../backend/lib/chipcss.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
 const ext = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension', 'kiro-crew-bridge', 'package.json'), 'utf8'));
-const pick = (re) => fs.readdirSync(UI).find((f) => re.test(f));
-const crewCoreFile = pick(/^vscode-pane-crew-core-.*\.mjs$/);
-const crewFile = pick(/^vscode-pane-crew-\d.*\.mjs$/);
-const core = await import(pathToFileURL(path.join(UI, crewCoreFile)).href);
 const pageSrc = fs.readFileSync(path.join(UI, manifest.ui.entry), 'utf8');
-const crewSrc = fs.readFileSync(path.join(UI, crewFile), 'utf8');
+const VIEW = path.join(ROOT, 'extension', 'kiro-crew-bridge', 'crewview.js');
+const crewview = Module.createRequire(VIEW)(VIEW);
 
 // ------------------------------------------------------------ secret key
 
@@ -157,19 +158,21 @@ function get(port, p, headers = {}) {
   });
 }
 
-test('injectOverlayScript adds one same-origin script before </head> and refuses an unsafe path', () => {
-  const out = injectOverlayScript(WORKBENCH, '/vsc-abc/_kiro-crew/view-overlay.js');
-  assert.match(out, /<script src="\/vsc-abc\/_kiro-crew\/view-overlay\.js"><\/script>\n<\/head>/);
-  assert.equal(injectOverlayScript('<html><body></body></html>', '/x.js'), '<html><body></body></html>');
-  assert.throws(() => injectOverlayScript(WORKBENCH, '"><script>alert(1)</script>'));
-  assert.throws(() => injectOverlayScript(WORKBENCH, 'https://evil.example/x.js'));
+test('injectWebviewEndpoint points webviews at <uuid>.localhost on the frame port, under the static route', () => {
+  const html = WORKBENCH.replace('</head>', '<script type="module" src="/vsc-k/stable-abc123/static/out/vs/code/browser/workbench/workbench.js"></script></head>');
+  const out = injectWebviewEndpoint(html, 4123);
+  assert.ok(out.includes('&quot;webviewEndpoint&quot;:&quot;http://{{uuid}}.localhost:4123/vsc-k/stable-abc123/static/out/vs/workbench/contrib/webview/browser/pre/&quot;,'));
+  assert.equal(injectWebviewEndpoint(WORKBENCH, 4123), null, 'no workbench.js, no endpoint');
+  assert.throws(() => injectWebviewEndpoint(html, 0));
+  assert.equal(isLoopbackHost('0a1b2c.localhost:4123'), true, 'webview origins are <uuid>.localhost');
+  assert.equal(isLoopbackHost('evil.example:4123'), false);
+  assert.equal(isLoopbackHost('a.b.localhost'), false, 'one label only');
 });
 
-test('the proxy sets the secret cookies and the overlay script on the workbench page only, and serves the script', async () => {
-  const up = await upstream(WORKBENCH, { 'set-cookie': ['vscode-tkn=t0k3n; Path=/', 'other=1'] });
-  const proxy = createFrameProxy(() => ({ port: up.address().port, token: 't0k3n' }), {
-    overlayScriptPath: '/vsc-k/_kiro-crew/view-overlay.js', overlayScript: () => '/* overlay */', secretKey: true,
-  });
+test('the proxy sets the secret cookies and the webview endpoint on the workbench page only', async () => {
+  const html = WORKBENCH.replace('</head>', '<script type="module" src="/vsc-k/stable-c/static/out/vs/code/browser/workbench/workbench.js"></script></head>');
+  const up = await upstream(html, { 'set-cookie': ['vscode-tkn=t0k3n; Path=/', 'other=1'] });
+  const proxy = createFrameProxy(() => ({ port: up.address().port, token: 't0k3n' }), { webviewPort: () => 4555, secretKey: true });
   const srv = http.createServer(proxy.handleRequest);
   await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
   const port = srv.address().port;
@@ -177,8 +180,9 @@ test('the proxy sets the secret cookies and the overlay script on the workbench 
     const half = encodeKeyPart(crypto.randomBytes(32));
     const page = await get(port, '/vsc-k/', { cookie: `vscode-cli-secret-half=${half}` });
     assert.equal(page.status, 200);
-    assert.match(page.body, /<script src="\/vsc-k\/_kiro-crew\/view-overlay\.js"><\/script>/);
+    assert.match(page.body, /&quot;webviewEndpoint&quot;:&quot;http:\/\/\{\{uuid\}\}\.localhost:4555\/vsc-k\/stable-c\/static\//);
     assert.match(page.body, /&quot;connectionToken&quot;:&quot;t0k3n&quot;/);
+    assert.doesNotMatch(page.body, /view-overlay/, 'no overlay script any more');
     const sc = page.headers['set-cookie'];
     assert.ok(!sc.some((c) => c.startsWith('vscode-tkn=')), 'the token cookie is still dropped');
     assert.ok(sc.includes('other=1'));
@@ -189,11 +193,6 @@ test('the proxy sets the secret cookies and the overlay script on the workbench 
     assert.ok(decodeKeyPart(newHalf) && newHalf !== half, 'a browser without a half gets a new one');
     const asset = await get(port, '/vsc-k/asset.css');
     assert.equal(asset.headers['set-cookie'], undefined, 'no cookies on assets');
-    const script = await get(port, '/vsc-k/_kiro-crew/view-overlay.js');
-    assert.equal(script.status, 200);
-    assert.equal(script.body, '/* overlay */');
-    assert.match(script.headers['content-type'], /^text\/javascript/);
-    assert.equal(script.headers['cache-control'], 'no-store');
   } finally {
     srv.close();
     up.close();
@@ -213,6 +212,9 @@ test('the bridge contributes a "Kiro Crew" webview view to the secondary side ba
   assert.ok(c.commands.some((x) => x.command === 'kiroCrew.openCrewChat'));
   assert.ok(c.commands.some((x) => x.command === 'kiroCrew.toggleCrewChat'), 'the 0.4.0 id still runs');
   assert.equal(CREW_VIEW_HOMES.auxiliarybar, `workbench.view.extension.${c.viewsContainers.secondarySidebar[0].id}`);
+  assert.ok(c.commands.some((x) => x.command === 'kiroCrew.disconnect'), 'Disconnect command');
+  assert.ok(c.commands.some((x) => x.command === 'kiroCrew.connect'));
+  assert.deepEqual(c.menus['view/title'].map((m) => m.command), ['kiroCrew.disconnect']);
   const src = fs.readFileSync(path.join(ROOT, 'extension', 'kiro-crew-bridge', 'extension.js'), 'utf8');
   assert.match(src, /registerWebviewViewProvider\(CREW_VIEW_ID/);
   assert.match(src, /const CREW_CONTAINER_ID = 'workbench\.view\.extension\.kiroCrew'/);
@@ -228,130 +230,62 @@ test('POST /api/crew/view and /api/secret-probe bodies', () => {
   for (const bad of [{ op: 'set' }, { op: 'set', value: '' }, { op: 'set', value: 'x'.repeat(201) }, { op: 'set', value: 'a\nb' }, { op: 'del' }]) assert.ok(parseSecretProbe(bad).error, JSON.stringify(bad));
 });
 
-test('the view-overlay script finds the view by extension id and purpose, posts only to the hello origin and reacts to change only', () => {
-  const s = fs.readFileSync(path.join(ROOT, 'backend', 'lib', 'view-overlay.js'), 'utf8');
-  assert.match(s, /var EXT = 'kiro-crew\.kiro-crew-bridge'/);
-  assert.match(s, /purpose'\) === 'webviewView'/);
-  assert.match(s, /window\.parent\.postMessage\(report, st\.parentOrigin\)/);
-  assert.match(s, /if \(e\.source !== window\.parent\) return;/);
-  assert.match(s, /new ResizeObserver\(schedule\)/);
-  assert.match(s, /new MutationObserver\(/);
-  assert.doesNotMatch(s, /setInterval/);
-  // The only '*' post is the data-free ready ping.
-  const stars = [...s.matchAll(/postMessage\(([^)]*), '\*'\)/g)].map((m) => m[1]);
-  assert.deepEqual(stars, ["{ type: 'kc-view-ready' }"]);
-  for (const sel of ['.quick-input-widget', '.context-view', '.monaco-dialog-modal-block', '.notifications-toasts.visible', '.notifications-center.visible', '.workbench-hover']) assert.ok(s.includes(sel), sel);
-  assert.match(s, /dragstart/);
-});
-
-// ------------------------------------------------------------ overlay helpers
-
-const { acceptViewMessage, isReadyMessage, hiddenReason, overlayPlacement, shouldForwardKey, keyPayload, newNonce, frameOrigin, chipHideCss, CHIP_ICON } = core;
-
-test('crew files carry the same version as the page entry; no docked column left', () => {
-  const v = /-(\d+\.\d+\.\d+)\.mjs$/.exec(manifest.ui.entry)[1];
-  assert.equal(crewCoreFile, `vscode-pane-crew-core-${v}.mjs`);
-  assert.equal(crewFile, `vscode-pane-crew-${v}.mjs`);
-  for (const gone of ['CrewColumn', 'crewChatToggle', 'clampCrewWidth', 'vscode-pane-crew-sash']) {
-    assert.ok(!pageSrc.includes(gone) && !crewSrc.includes(gone), gone);
+test('the view frames /embed/chat/<slot> on the tunnel origin only, with a CSP that allows only that frame', () => {
+  const origin = `http://${'a'.repeat(32)}.localhost:41234`;
+  const kc = { available: true, connected: true, origin, slot: 'vscode-my-folder-0123456789' };
+  const html = crewview.crewViewHtml(kc, 'n0nce');
+  assert.equal(crewview.viewMode(kc), 'frame');
+  assert.match(html, new RegExp(`<iframe id="kc" title="Kiro Crew" src="${origin}/embed/chat/vscode-my-folder-0123456789"`));
+  assert.match(html, new RegExp(`default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-n0nce'; frame-src ${origin}"`));
+  // Not signed in: Connect and paste, no frame.
+  const signin = crewview.crewViewHtml({ ...kc, connected: false, lastError: '<b>x</b>' }, 'n');
+  assert.equal(crewview.viewMode({ ...kc, connected: false }), 'signin');
+  assert.doesNotMatch(signin, /<iframe/);
+  assert.match(signin, /id="connect"/);
+  assert.match(signin, /id="paste"/);
+  assert.match(signin, /&lt;b&gt;x&lt;\/b&gt;/, 'errors are escaped');
+  // Anything but the exact tunnel origin shape is not framed.
+  for (const bad of ['http://localhost:5476', `https://${'a'.repeat(32)}.localhost:1`, `http://${'a'.repeat(32)}.localhost:1/x`, 'javascript:alert(1)']) {
+    assert.equal(crewview.viewMode({ ...kc, origin: bad }), 'unavailable', bad);
+    assert.doesNotMatch(crewview.crewViewHtml({ ...kc, origin: bad }, 'n'), /<iframe/);
   }
-  assert.match(pageSrc, /h\(CrewOverlay, \{ api, session, folder, kind, overlayRef: crewRef, mountPanel: crewMounted \}\)/);
-  assert.match(crewSrc, /h\(Panel, \{ key: slotKey, slotKey, conversationOnly: true \}\)/);
+  assert.equal(crewview.viewMode({ ...kc, slot: '' }), 'nofolder');
 });
 
-function msg(over = {}) {
-  const win = {};
-  const nonce = 'n'.repeat(32);
-  return {
-    win,
-    nonce,
-    event: {
-      origin: 'http://127.0.0.1:4000', source: win,
-      data: { type: 'kc-view', nonce, seq: 4, view: { found: true, visible: true, rect: { x: 10, y: 20, width: 300, height: 600 }, location: 'auxiliarybar', focused: false }, blocked: [], dragging: false, viewport: { w: 1300, h: 800 }, hidden: false, ...over },
-    },
-  };
-}
-
-test('acceptViewMessage takes only the frame origin, its window and the nonce', () => {
-  const { win, nonce, event } = msg();
-  const ctx = { origin: 'http://127.0.0.1:4000', source: win, nonce };
-  const r = acceptViewMessage(event, ctx);
-  assert.deepEqual(r.view, { found: true, visible: true, rect: { x: 10, y: 20, width: 300, height: 600 }, location: 'auxiliarybar', focused: false });
-  assert.equal(r.seq, 4);
-  assert.equal(acceptViewMessage({ ...event, origin: 'http://localhost:5476' }, ctx), null, 'wrong origin');
-  assert.equal(acceptViewMessage({ ...event, source: {} }, ctx), null, 'another window');
-  assert.equal(acceptViewMessage({ ...event, data: { ...event.data, nonce: 'x'.repeat(32) } }, ctx), null, 'wrong nonce');
-  assert.equal(acceptViewMessage({ ...event, data: { ...event.data, nonce: undefined } }, ctx), null, 'no nonce');
-  assert.equal(acceptViewMessage(event, { ...ctx, nonce: '' }), null, 'no nonce of our own yet');
-  assert.equal(acceptViewMessage({ ...event, data: 'kc-view' }, ctx), null);
-  // Malformed fields are dropped, not trusted.
-  const odd = acceptViewMessage(msg({ view: { found: true, visible: true, rect: { x: 'a' } }, blocked: ['quickInput', '<img>'], viewport: { w: -1 } }).event, ctx);
-  assert.equal(odd, null, 'another window (each msg() has its own source)');
-  const { event: e2, win: w2, nonce: n2 } = msg({ view: { found: true, visible: true, rect: { x: 'a' }, location: 'x' }, blocked: ['quickInput', '<img>'], viewport: { w: -1, h: 3 } });
-  const r2 = acceptViewMessage(e2, { origin: 'http://127.0.0.1:4000', source: w2, nonce: n2 });
-  assert.equal(r2.view.visible, false, 'no usable rect means not visible');
-  assert.equal(r2.view.location, 'unknown');
-  assert.deepEqual(r2.blocked, ['quickInput']);
-  assert.equal(r2.viewport, null);
-  assert.equal(isReadyMessage({ origin: 'http://127.0.0.1:4000', source: win, data: { type: 'kc-view-ready' } }, ctx), true);
-  assert.equal(isReadyMessage({ origin: 'http://evil', source: win, data: { type: 'kc-view-ready' } }, ctx), false);
+test('S-3: the folder slot is created only when the tab opens, for an absolute existing folder the window has open', () => {
+  const roots = ['C:\\w\\proj'];
+  const base = { roots, isAbsolute: path.win32.isAbsolute, exists: (f) => f.startsWith('C:\\w\\'), inRoots: (f, r) => r.some((x) => f.toLowerCase().startsWith(x.toLowerCase())) };
+  assert.deepEqual(crewSlotRequest({ ...base, folder: 'C:\\w\\proj', opened: true }), { folder: 'C:\\w\\proj', ensure: true });
+  assert.deepEqual(crewSlotRequest({ ...base, folder: 'C:\\w\\proj', opened: false }), { folder: 'C:\\w\\proj', ensure: false }, 'a poll only names it');
+  assert.ok(crewSlotRequest({ ...base, folder: 'relative\\proj', opened: true }).error);
+  assert.ok(crewSlotRequest({ ...base, folder: 'C:\\gone\\proj', opened: true }).error, 'must exist');
+  assert.ok(crewSlotRequest({ ...base, folder: 'C:\\w\\other', opened: true }).error, 'must be open in the window');
+  assert.ok(crewSlotRequest({ ...base, folder: undefined, opened: true }).error);
+  // GET /api/session no longer creates the slot (it only names it).
+  const launcher = fs.readFileSync(path.join(ROOT, 'backend', 'launcher.mjs'), 'utf8');
+  const sessionFn = launcher.slice(launcher.indexOf('function sessionBody('), launcher.indexOf('function chatProblem('));
+  assert.doesNotMatch(sessionFn, /ensureCrewSlot|ensureSlot/);
 });
 
-test('hiddenReason: view hidden, covered by a VS Code popup, a drag, or a hidden document', () => {
-  const { win, nonce, event } = msg();
-  const ctx = { origin: 'http://127.0.0.1:4000', source: win, nonce };
-  assert.equal(hiddenReason(null), 'no report');
-  assert.equal(hiddenReason(acceptViewMessage(event, ctx)), '');
-  const with_ = (over) => acceptViewMessage({ ...event, data: { ...event.data, ...over } }, ctx);
-  assert.equal(hiddenReason(with_({ blocked: ['quickInput', 'notification'] })), 'covered by quickInput, notification');
-  assert.equal(hiddenReason(with_({ dragging: true })), 'drag');
-  assert.equal(hiddenReason(with_({ view: { found: true, visible: false } })), 'view hidden');
-  assert.equal(hiddenReason(with_({ view: { found: false } })), 'view not created');
-  assert.equal(hiddenReason(with_({ hidden: true })), 'document hidden');
+test('dashboardOrigins: the gateway origin in both loopback spellings, plus the override; nothing else', () => {
+  assert.deepEqual(dashboardOrigins({ KIROCREW_GATEWAY_ORIGIN: 'http://localhost:5476' }).sort(), ['http://127.0.0.1:5476', 'http://localhost:5476']);
+  assert.deepEqual(dashboardOrigins({ KIROCREW_GATEWAY_ORIGIN: 'http://127.0.0.1:5476/', VSCODE_PANE_DASHBOARD_ORIGIN: 'http://localhost:9000, https://evil.example, http://evil.example:1' }).sort(),
+    ['http://127.0.0.1:5476', 'http://127.0.0.1:9000', 'http://localhost:5476', 'http://localhost:9000']);
+  assert.deepEqual(dashboardOrigins({}), []);
 });
 
-test('overlayPlacement maps the view through the iframe box, scales for zoom and clips to the bounds', () => {
-  const iframe = { left: 100, top: 50, width: 1300, height: 800 };
-  const p = overlayPlacement({ x: 1000, y: 30, width: 300, height: 770 }, { w: 1300, h: 800 }, iframe, { left: 0, top: 0, width: 2000, height: 2000 });
-  assert.deepEqual(p, { left: 1100, top: 80, width: 300, height: 770, clip: 'inset(0px 0px 0px 0px)' });
-  // The frame drawn at 1.25x its CSS viewport (a zoomed iframe): everything scales.
-  const z = overlayPlacement({ x: 800, y: 24, width: 240, height: 616 }, { w: 1040, h: 640 }, iframe, null);
-  assert.deepEqual([z.left, z.top, z.width, z.height], [1100, 80, 300, 770]);
-  // <main> cut off at y=600: the overlay is clipped, not moved.
-  const c = overlayPlacement({ x: 1000, y: 30, width: 300, height: 770 }, { w: 1300, h: 800 }, iframe, { left: 0, top: 0, width: 2000, height: 600 });
-  assert.equal(c.clip, 'inset(0px 0px 250px 0px)');
-  assert.equal(overlayPlacement({ x: 0, y: 0, width: 10, height: 10 }, { w: 1300, h: 800 }, iframe, { left: 0, top: 0, width: 50, height: 50 }), null);
-  assert.equal(overlayPlacement(null, null, iframe, null), null);
-});
-
-test('shouldForwardKey sends VS Code chords and F-keys, keeps typing and editing keys in the chat', () => {
-  const k = (key, mods = {}) => ({ key, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, defaultPrevented: false, getModifierState: () => false, ...mods });
-  for (const e of [k('F1'), k('P', { ctrlKey: true, shiftKey: true }), k('p', { ctrlKey: true }), k('k', { ctrlKey: true, altKey: true }), k('b', { ctrlKey: true, altKey: true }), k('`', { ctrlKey: true }), k('j', { metaKey: true })]) {
-    assert.equal(shouldForwardKey(e), true, JSON.stringify(e));
-  }
-  for (const e of [k('a'), k('Enter'), k('Escape'), k('c', { ctrlKey: true }), k('v', { ctrlKey: true }), k('z', { ctrlKey: true }), k('Z', { ctrlKey: true, shiftKey: true }),
-    k('ArrowLeft', { ctrlKey: true }), k('Backspace', { ctrlKey: true }), k('Enter', { ctrlKey: true }), k('ArrowUp', { altKey: true }), k('Control', { ctrlKey: true }),
-    k('p', { ctrlKey: true, defaultPrevented: true }), k('@', { ctrlKey: true, altKey: true, getModifierState: (m) => m === 'AltGraph' })]) {
-    assert.equal(shouldForwardKey(e), false, JSON.stringify(e));
-  }
-  assert.deepEqual(keyPayload({ key: 'P', code: 'KeyP', keyCode: 80, ctrlKey: true, shiftKey: true }), { key: 'P', code: 'KeyP', keyCode: 80, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false });
-});
-
-test('nonce and frame origin', () => {
-  const a = newNonce();
-  assert.match(a, /^[0-9a-f]{32}$/);
-  assert.notEqual(a, newNonce());
-  assert.equal(frameOrigin('http://127.0.0.1:4000/vsc-abc/?folder=x'), 'http://127.0.0.1:4000');
-  assert.equal(frameOrigin('nope'), '');
-});
-
-test('the chip-hiding CSS is scoped to the overlay and matches the manifest chip by its icon class', () => {
+test('the chip-hiding CSS matches the manifest chip by its icon class, never by text', () => {
   assert.equal(CHIP_ICON, manifest.contributes.sessionControls[0].icon);
-  const css = chipHideCss('.vscp-crew-overlay');
-  for (const line of css.split('\n')) assert.ok(line.startsWith('.vscp-crew-overlay '), line);
-  assert.match(css, /button\[data-session-control-chip\]:has\(svg\.lucide-package\)\{display:none !important\}/);
-  assert.match(chipHideCss('.x', 'AudioLines'), /lucide-audio-lines/);
-  assert.doesNotMatch(css, /VS Code|aria-label|title/, 'never by text');
-  assert.throws(() => chipHideCss('body div'));
-  assert.match(crewSrc, /\$\{chipHideCss\('\.' \+ ROOT_CLASS\)\}/);
+  const css = chipHideCss();
+  assert.match(css, /^button\[data-session-control-chip\]:has\(svg\.lucide-package\)\{display:none !important\}/);
+  assert.match(chipHideCss('AudioLines'), /lucide-audio-lines/);
+  assert.doesNotMatch(css, /VS Code|aria-label|title/);
+});
+
+test('the page has no overlay or docked column; it signs the tunnel in with the dashboard session', () => {
+  for (const gone of ['CrewOverlay', 'CrewColumn', 'crewChatToggle', 'kc-view', 'overlayPlacement', 'vscode-pane-crew-sash']) assert.ok(!pageSrc.includes(gone), gone);
+  assert.ok(!fs.readdirSync(UI).some((f) => /^vscode-pane-crew-/.test(f)), 'the crew modules are gone');
+  assert.ok(!fs.existsSync(path.join(ROOT, 'backend', 'lib', 'view-overlay.js')));
+  assert.match(pageSrc, /fetch\('\/api\/auth\/mobile-link', \{ method: 'POST', credentials: 'same-origin'/);
+  assert.match(pageSrc, /api\.post\(`\$\{API\}\/kc\/sign-in`, \{ url: j\.url, via \}\)/);
 });

@@ -27,6 +27,9 @@ import { BRIDGE_ID, bridgeFolderName, upsertBridgeEntry, staleBridgeFolders } fr
 import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/frameproxy.mjs';
 import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
+import { createKcProxy } from './lib/kcproxy.mjs';
+import { chipHideCss } from './lib/chipcss.mjs';
+import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
@@ -104,9 +107,6 @@ const retry = new RetryPolicy();
 // environment variable or a command line.
 const SECRET_HALF_FILE = path.join(DATA_DIR, 'state', 'secret-key-half');
 const secretHalf = loadServerHalf(SECRET_HALF_FILE);
-// The view-overlay script the frame proxy adds to the workbench page; read
-// once, served from under the frame prefix.
-const OVERLAY_SCRIPT = fs.readFileSync(path.join(APP_ROOT, 'backend', 'lib', 'view-overlay.js'), 'utf8');
 
 // Kiro Crew gateway access for the built-in Chat, with this app's own token.
 const gateway = new GatewayClient({
@@ -515,24 +515,24 @@ function parseJson(buf) {
 }
 
 
-// The folder's crew slot that GET /api/session names must exist and point at
-// the folder before the page's ChatPanel opens it, even when no VS Code chat
-// turn has run yet. ensureSlot is idempotent (create by name, project only if it
-// changed); it is re-run at most every CREW_SLOT_RECHECK_MS per folder, which
-// also reopens a slot the user closed in Kiro Crew and retries after a failure.
-const CREW_SLOT_RECHECK_MS = 30_000;
-const crewSlotChecked = new Map(); // folder -> last attempt (ms)
+// The folder's own crew slot is created (or reopened) in Kiro Crew only when
+// VS Code's "Kiro Crew" tab opens on it: the bridge asks GET /api/bridge/kc
+// with opened=1 when the view becomes visible or its folder changes. Polls and
+// page loads never create it, so a session closed in Kiro Crew stays closed
+// until the tab is opened again, and only an absolute folder that exists is
+// accepted (lib/kctab.mjs crewSlotRequest).
 function ensureCrewSlot(folder) {
-  if (!folder) return;
-  const last = crewSlotChecked.get(folder);
-  if (last !== undefined && Date.now() - last < CREW_SLOT_RECHECK_MS) return;
-  crewSlotChecked.set(folder, Date.now());
-  gateway.ensureSlot(folder).catch((e) => log('crew slot: could not ensure for', folder, '-', e.message));
+  return gateway.ensureSlot(folder).then(
+    () => true,
+    (e) => {
+      log('crew slot: could not ensure for', folder, '-', e.message);
+      return false;
+    },
+  );
 }
 
 function sessionBody(folderParam) {
   const folder = folderParam || (fs.existsSync(config.workspace) ? config.workspace : null);
-  ensureCrewSlot(folder);
   const ready = state.status === 'ready' && !!state.serverPort;
   return {
     status: state.status,
@@ -549,11 +549,12 @@ function sessionBody(folderParam) {
     bridge: { connected: bridge.connected, extension: bridge.extension },
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
     chat: chatProblem(),
-    // The folder's own Kiro Crew slot {key, folder, title} for the chat the
-    // page overlays on VS Code's "Kiro Crew" view, always present when there
-    // is a folder (ensureCrewSlot above creates it). The overlay lists the
-    // per-session slots itself from GET /api/chat/slots.
+    // The folder's own Kiro Crew slot {key, folder, title}, the session VS
+    // Code's "Kiro Crew" tab opens on (named here, created only when the tab
+    // opens), and the tab's state as the bridge reports it.
     crewView: bridge.crewView,
+    // The tunnel's sign-in state for the page: never its origin or a cookie.
+    kc: kcBody(),
     crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,
   };
 }
@@ -616,16 +617,21 @@ async function chatStatusBody(probe) {
   return out;
 }
 
-/** The folders this VS Code window has open (or the default workspace when none). */
-function windowRoots() {
-  return bridge.extension?.workspaceFolders?.length ? bridge.extension.workspaceFolders : [config.workspace];
+/**
+ * The folders the calling VS Code window has open (X-Kiro-Bridge-Host names
+ * it), or every live window's when it does not, or the default workspace when
+ * no window has said hello or the window has no folder.
+ */
+function windowRoots(host) {
+  const roots = bridge.rootsFor(host);
+  return roots && roots.length ? roots : [config.workspace];
 }
 
-/** A registered session whose folder this window has open, or null. */
-function sessionFor(slot) {
+/** A registered session whose folder the calling window has open, or null. */
+function sessionFor(slot, host) {
   if (typeof slot !== 'string') return null;
   const s = sessions.get(slot);
-  return s && folderInRoots(s.folder, windowRoots()) ? s : null;
+  return s && folderInRoots(s.folder, windowRoots(host)) ? s : null;
 }
 
 /**
@@ -643,12 +649,12 @@ function applyChatPrefs(next, source) {
 }
 
 /** POST /api/bridge/chat with a slot: a turn of a Kiro Crew session type session. */
-async function nativeChat(raw, res) {
-  const parsed = parseNativeChatRequest(raw, { defaultFolder: windowRoots()[0] || null });
+async function nativeChat(raw, res, host) {
+  const parsed = parseNativeChatRequest(raw, { defaultFolder: windowRoots(host)[0] || null });
   if (parsed.error) return sendJson(res, 400, { error: parsed.error });
-  const s = sessionFor(parsed.slot);
+  const s = sessionFor(parsed.slot, host);
   if (!s) return sendJson(res, 404, { error: 'unknown session' });
-  if (!folderInRoots(parsed.folder, windowRoots())) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
+  if (!folderInRoots(parsed.folder, windowRoots(host))) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
   res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
   const ac = new AbortController();
   res.on('close', () => {
@@ -673,8 +679,59 @@ async function nativeChat(raw, res) {
 
 const frameProxy = createFrameProxy(
   () => (state.status === 'ready' && state.serverPort ? { port: state.serverPort, token: state.token } : null),
-  { overlayScriptPath: `${BASE_PATH}/_kiro-crew/view-overlay.js`, overlayScript: () => OVERLAY_SCRIPT, secretKey: true },
+  { webviewPort: () => framePort, secretKey: true },
 );
+
+// ------------------------------------------------------------ the Kiro Crew tunnel
+//
+// The live dashboard on the launcher's own loopback origin (lib/kcproxy.mjs),
+// framed by the bridge's "Kiro Crew" view at /embed/chat/<slot>. The session
+// cookie stays here; the page and the bridge only learn whether it is connected.
+const KC_STATE_FILE = path.join(DATA_DIR, 'state', 'kc-session.json');
+const gatewayUrl = (() => {
+  try {
+    const u = new URL(env.KIROCREW_GATEWAY_ORIGIN || '');
+    return u.protocol === 'http:' && isLoopbackHost(u.host) ? u : null;
+  } catch {
+    return null;
+  }
+})();
+const kcSignIn = { attempts: 0, lastAttempt: null, lastError: null, via: null, connectRequests: 0 };
+const kc = gatewayUrl
+  ? createKcProxy({
+    gatewayHost: '127.0.0.1',
+    gatewayPort: Number(gatewayUrl.port || 80),
+    stateFile: KC_STATE_FILE,
+    css: chipHideCss(),
+    // The frame chain: the dashboard, the workbench, the self-hosted webview origins.
+    frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`],
+    log,
+    onChange: () => bridge.enqueueLatest({ kind: 'kcChanged' }),
+  })
+  : null;
+
+function kcBody() {
+  if (!kc) return { available: false, connected: false, reason: 'no Kiro Crew gateway address (KIROCREW_GATEWAY_ORIGIN)' };
+  return { available: !!kc.port, ...kc.status(), ...kcSignIn };
+}
+
+/** For the bridge only: the tunnel origin (a capability) and the embed URL for the folder's slot. */
+function kcBridgeBody(folder) {
+  const body = kcBody();
+  if (!kc || !kc.port) return body;
+  const slot = folder ? slotNameFor(folder) : '';
+  return { ...body, origin: kc.origin, slot, embedUrl: `${kc.origin}/embed/chat/${encodeURIComponent(slot)}`, folder };
+}
+
+async function kcDoSignIn(link, via) {
+  kcSignIn.attempts++;
+  kcSignIn.lastAttempt = new Date().toISOString();
+  kcSignIn.via = via;
+  const r = await kc.signIn(link);
+  kcSignIn.lastError = r.ok ? null : r.error;
+  log('kc sign-in via', via, r.ok ? 'ok' : `failed (${r.error})`);
+  return r;
+}
 
 /**
  * POST /_vscode-cli/mint-key on the frame port: the workbench's secret-storage
@@ -736,6 +793,9 @@ async function handle(req, res) {
       return sendJson(res, 401, { error: 'bad bridge secret' });
     }
   }
+  // The VS Code window a bridge call comes from (one extension host each).
+  const bridgeHost = route.auth === 'bridge' ? String(req.headers['x-kiro-bridge-host'] || '').slice(0, 64) || null : null;
+  if (bridgeHost) bridge.seeHost(bridgeHost);
 
   switch (route.name) {
     case 'health':
@@ -836,6 +896,54 @@ async function handle(req, res) {
       const result = await done;
       return sendJson(res, 200, { id, ...result, bridgeConnected: bridge.connected });
     }
+    case 'kcSignIn': {
+      // The page traded the dashboard's own session for a sign-in link
+      // (POST /api/auth/mobile-link with the dashboard's cookie) and hands it
+      // over, or reports why it could not.
+      if (!kc || !kc.port) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
+      const parsed = parseJson(body);
+      if (parsed && typeof parsed.error === 'string' && !parsed.url) {
+        kcSignIn.attempts++;
+        kcSignIn.lastAttempt = new Date().toISOString();
+        kcSignIn.via = parsed.via === 'connect' ? 'connect' : 'auto';
+        kcSignIn.lastError = parsed.error.slice(0, 200);
+        log('kc sign-in from the page failed:', kcSignIn.lastError);
+        return sendJson(res, 200, { ok: false, kc: kcBody() });
+      }
+      if (!parsed || typeof parsed.url !== 'string') return sendJson(res, 400, { error: 'body must be {url} or {error}' });
+      const r = await kcDoSignIn(parsed.url, parsed.via === 'connect' ? 'connect' : parsed.via === 'paste' ? 'paste' : 'auto');
+      return sendJson(res, r.ok ? 200 : r.status === 400 ? 400 : 200, { ok: r.ok, error: r.error || null, kc: kcBody() });
+    }
+    case 'kcDisconnect': {
+      if (!kc) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
+      await kc.disconnect();
+      return sendJson(res, 200, { ok: true, kc: kcBody() });
+    }
+    case 'bridgeKc': {
+      const roots = windowRoots(bridgeHost);
+      const asked = url.searchParams.get('folder');
+      const reqd = crewSlotRequest({ folder: asked || roots[0], opened: url.searchParams.get('opened') === '1', roots, isAbsolute: path.isAbsolute, exists: fs.existsSync, inRoots: folderInRoots });
+      if (reqd.error) return sendJson(res, 403, { error: reqd.error });
+      let created = null;
+      if (reqd.ensure) created = await ensureCrewSlot(reqd.folder);
+      return sendJson(res, 200, { ...kcBridgeBody(reqd.folder), ensured: created });
+    }
+    case 'bridgeKcSignIn': {
+      if (!kc || !kc.port) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
+      const parsed = parseJson(body);
+      if (!parsed || typeof parsed.url !== 'string') return sendJson(res, 400, { error: 'body must be {url}' });
+      const r = await kcDoSignIn(parsed.url, 'paste');
+      return sendJson(res, r.status === 400 ? 400 : 200, { ok: r.ok, error: r.error || null, kc: kcBody() });
+    }
+    case 'bridgeKcConnect':
+      // The tab's Connect button: the page (inside the signed-in dashboard)
+      // sees the request on its next session poll and mints the link.
+      kcSignIn.connectRequests++;
+      return sendJson(res, 200, { ok: true, connectRequests: kcSignIn.connectRequests });
+    case 'bridgeKcDisconnect':
+      if (!kc) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
+      await kc.disconnect();
+      return sendJson(res, 200, { ok: true, kc: kcBody() });
     case 'crewView': {
       // Reveal VS Code's "Kiro Crew" view, or move it to another part.
       const parsed = parseCrewViewRequest(parseJson(body));
@@ -870,19 +978,19 @@ async function handle(req, res) {
     case 'chatOpenSession': {
       // Opens a Kiro Crew chat session in VS Code's Chat (by its slot).
       const parsed = parseJson(body);
-      const s = sessionFor(parsed && parsed.slot);
+      const s = sessionFor(parsed && parsed.slot, bridgeHost);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
       const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 12000);
       return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
     }
     case 'bridgeSessions': {
-      const roots = windowRoots();
+      const roots = windowRoots(bridgeHost);
       return sendJson(res, 200, { sessions: sessions.list((f) => folderInRoots(f, roots)) });
     }
     case 'bridgeSessionCreate': {
       const parsed = parseJson(body);
       const folder = parsed && typeof parsed.folder === 'string' ? parsed.folder : '';
-      if (!folder || !path.isAbsolute(folder) || !folderInRoots(folder, windowRoots())) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
+      if (!folder || !path.isAbsolute(folder) || !folderInRoots(folder, windowRoots(bridgeHost))) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
       const title = sessionTitle(parsed.title);
       const slot = newSessionSlotName(folder);
       try {
@@ -895,7 +1003,7 @@ async function handle(req, res) {
       return sendJson(res, 200, { session: s });
     }
     case 'bridgeSessionHistory': {
-      const s = sessionFor(url.searchParams.get('slot'));
+      const s = sessionFor(url.searchParams.get('slot'), bridgeHost);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
       try {
         const detail = await gateway.slotDetail(s.slot, 400);
@@ -907,7 +1015,7 @@ async function handle(req, res) {
     }
     case 'bridgeApprove': {
       const parsed = parseJson(body);
-      const s = sessionFor(parsed && parsed.slot);
+      const s = sessionFor(parsed && parsed.slot, bridgeHost);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
       const action = parsed.action;
       const requestId = parsed.requestId;
@@ -925,7 +1033,7 @@ async function handle(req, res) {
     }
     case 'bridgeQuestion': {
       const parsed = parseJson(body);
-      const s = sessionFor(parsed && parsed.slot);
+      const s = sessionFor(parsed && parsed.slot, bridgeHost);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
       const askId = parsed.askId;
       const answers = parsed.answers;
@@ -939,14 +1047,14 @@ async function handle(req, res) {
     }
     case 'bridgeChat': {
       const raw = parseJson(body);
-      if (raw && raw.slot !== undefined) return nativeChat(raw, res);
+      if (raw && raw.slot !== undefined) return nativeChat(raw, res, bridgeHost);
       const parsed = parseChatRequest(raw, {
-        defaultFolder: bridge.extension?.workspaceFolders?.[0] || (fs.existsSync(config.workspace) ? config.workspace : null),
+        defaultFolder: bridge.rootsFor(bridgeHost)?.[0] || (fs.existsSync(config.workspace) ? config.workspace : null),
       });
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });
       // A chat turn runs Kiro Crew with tools in the folder, so only a folder
       // this VS Code window has open (or the default workspace when none is).
-      const roots = bridge.extension?.workspaceFolders?.length ? bridge.extension.workspaceFolders : [config.workspace];
+      const roots = windowRoots(bridgeHost);
       if (!folderInRoots(parsed.folder, roots)) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
       const ac = new AbortController();
@@ -1043,6 +1151,7 @@ function shutdown(code = 0) {
   bridge.cancelWaiters();
   server.close();
   frameServer.close();
+  if (kc) kc.close();
   setTimeout(() => process.exit(code), 200).unref();
 }
 process.on('SIGTERM', () => shutdown(0));
@@ -1066,6 +1175,14 @@ server.listen(PORT, HOST, async () => {
   }
   if (framePort !== frameState.port || !fs.existsSync(FRAME_STATE_FILE) || frameStateHasKey(frameStateText)) {
     fs.writeFileSync(FRAME_STATE_FILE, serializeFrameState({ port: framePort }), { mode: 0o600 });
+  }
+  if (kc) {
+    try {
+      await kc.listen();
+      log('kc tunnel listening on 127.0.0.1:' + kc.port, 'upstream', gatewayUrl.host);
+    } catch (e) {
+      log('kc tunnel could not listen:', e.message);
+    }
   }
   log('secret storage key half', secretHalf.created ? `created${secretHalf.restricted ? ' (owner-only)' : ' (could not restrict access)'}` : 'loaded');
   log('launcher listening', `${HOST}:${listenPort}`, 'frame', `${HOST}:${framePort}`, framePort === frameState.port ? '(saved port)' : '(new port)', 'data', DATA_DIR, 'signed', PROXY_SECRET ? 'yes' : 'no');

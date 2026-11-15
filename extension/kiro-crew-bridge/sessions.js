@@ -239,8 +239,7 @@ function register(context, deps) {
       try {
         const r = await invokeConfirmation(vscode, { title, message, buttons: [APPROVE, REJECT] }, req.toolInvocationToken, token);
         const first = r && r.content && r.content[0];
-        const v = first && typeof first.value === 'string' ? first.value : '';
-        return v === APPROVE || v === 'yes' ? 'approved' : 'rejected';
+        return approvalFromConfirmation(first && first.value);
       } catch (e) {
         if (token.isCancellationRequested) return null;
         // A denied confirmation throws a cancellation (languageModelToolsService
@@ -497,4 +496,14 @@ function register(context, deps) {
   };
 }
 
-module.exports = { register, available, toolCard, commandOf, invokeConfirmation, SESSION_TYPE, MODEL_VENDOR, CONFIRM_TOOL };
+/**
+ * The decision a confirmation card's answer means. Only the Approve button
+ * approves. 'yes' is what the tool returns when no button was picked
+ * (auto-confirm, a default accept: confirmationTool.ts:211-218), which must
+ * never approve a Kiro Crew tool call.
+ */
+function approvalFromConfirmation(value) {
+  return value === APPROVE ? 'approved' : 'rejected';
+}
+
+module.exports = { register, approvalFromConfirmation, available, toolCard, commandOf, invokeConfirmation, SESSION_TYPE, MODEL_VENDOR, CONFIRM_TOOL };

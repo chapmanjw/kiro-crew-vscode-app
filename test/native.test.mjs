@@ -16,7 +16,7 @@ import { GatewayClient, slotNameFor } from '../backend/lib/gateway.mjs';
 import { runNativeTurn, parseNativeChatRequest } from '../backend/lib/chatbridge.mjs';
 import {
   NativeTurnRenderer, reconcileTools, historyTurns, approvalStateIn, normalizeQuestions, toolTitle,
-  SessionRegistry, newSessionSlotName, sessionTitle, currentTurnRows,
+  SessionRegistry, newSessionSlotName, isAppSessionSlot, sessionTitle, currentTurnRows,
 } from '../backend/lib/nativechat.mjs';
 import { chatSettings, parseChatPrefs } from '../backend/lib/chatprefs.mjs';
 import { seedThemeSettings } from '../backend/lib/theme.mjs';
@@ -144,21 +144,46 @@ test('SessionRegistry persists sessions per folder, newest first, and survives a
   const file = path.join(dir, 'chat-sessions.json');
   let t = 1000;
   const reg = new SessionRegistry({ file, now: () => t, max: 3 });
-  const a = reg.add({ slot: newSessionSlotName(FOLDER, () => 'aaaa'), folder: FOLDER, title: '' });
+  const a = reg.add({ slot: newSessionSlotName(FOLDER, () => 'aaaaaaaa'), folder: FOLDER, title: '' });
+  const other = newSessionSlotName('/elsewhere', () => 'bbbbbbbb');
   t = 2000;
-  reg.add({ slot: 'other-1', folder: '/elsewhere', title: 'x'.repeat(200) });
-  assert.equal(a.slot, `${slotNameFor(FOLDER)}-aaaa`);
+  reg.add({ slot: other, folder: '/elsewhere', title: 'x'.repeat(200) });
+  assert.equal(a.slot, `${slotNameFor(FOLDER)}-aaaaaaaa`);
   assert.equal(a.title, 'New chat');
   t = 3000;
   reg.touch(a.slot, { title: 'fix the build' });
   const again = new SessionRegistry({ file, now: () => t });
-  assert.deepEqual(again.list().map((s) => s.slot), [a.slot, 'other-1']);
+  assert.deepEqual(again.list().map((s) => s.slot), [a.slot, other]);
   assert.equal(again.get(a.slot).title, 'fix the build');
-  assert.equal(again.get('other-1').title.length, 80);
+  assert.equal(again.get(other).title.length, 80);
   assert.deepEqual(again.list((f) => f === FOLDER).map((s) => s.slot), [a.slot]);
-  fs.writeFileSync(file, '{"sessions":[{"slot":"bad slot!","folder":"/x"},{"slot":"ok","folder":"/x"}]}');
-  assert.deepEqual(new SessionRegistry({ file }).list().map((s) => s.slot), ['ok'], 'malformed slot names are dropped');
+  const okSlot = newSessionSlotName('/x', () => '0123abcd');
+  fs.writeFileSync(file, JSON.stringify({ sessions: [{ slot: 'bad slot!', folder: '/x' }, { slot: okSlot, folder: '/x' }] }));
+  assert.deepEqual(new SessionRegistry({ file }).list().map((s) => s.slot), [okSlot], 'malformed slot names are dropped');
   assert.equal(sessionTitle('  a\n b  '), 'a b');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('S-2: the registry relays only slots the app minted for that same folder', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscp-reg2-'));
+  const file = path.join(dir, 'chat-sessions.json');
+  const mine = newSessionSlotName(FOLDER, () => '89abcdef');
+  const forged = [
+    { slot: 'dashboard:chat-1', folder: FOLDER }, // John's own session, hand-registered
+    { slot: slotNameFor(FOLDER), folder: FOLDER }, // the folder's main slot, not a VS Code chat
+    { slot: newSessionSlotName('/other', () => '89abcdef'), folder: FOLDER }, // minted for another folder
+    { slot: `${slotNameFor(FOLDER)}-89ABCDEF`, folder: FOLDER }, // not lower-case hex
+    { slot: `${slotNameFor(FOLDER)}-89abcdef0`, folder: FOLDER }, // too long
+  ];
+  fs.writeFileSync(file, JSON.stringify({ sessions: [{ slot: mine, folder: FOLDER }, ...forged] }));
+  const reg = new SessionRegistry({ file });
+  assert.deepEqual(reg.list().map((s) => s.slot), [mine]);
+  for (const f of forged) assert.equal(reg.get(f.slot), null, f.slot);
+  // An entry injected after load is refused on use as well.
+  reg.sessions.set('dashboard:chat-1', { slot: 'dashboard:chat-1', folder: FOLDER, title: 'x', created: 1, updated: 1 });
+  assert.equal(reg.get('dashboard:chat-1'), null);
+  assert.equal(isAppSessionSlot(mine, FOLDER), true);
+  assert.equal(isAppSessionSlot(mine, '/other'), false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -393,8 +418,8 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     return { status: r.status, json: await r.json().catch(() => null) };
   };
   let br;
-  const bridgeCall = async (method, p, body) => {
-    const r = await fetch(base + p, { method, headers: { 'x-kiro-bridge-secret': br.secret, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const bridgeCall = async (method, p, body, host) => {
+    const r = await fetch(base + p, { method, headers: { 'x-kiro-bridge-secret': br.secret, ...(host ? { 'x-kiro-bridge-host': host } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
     const text = await r.text();
     return { status: r.status, text, json: (() => { try { return JSON.parse(text); } catch { return null; } })() };
   };
@@ -417,9 +442,50 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(s.crewView, null);
     assert.equal(s.crewChatToggle, undefined, 'no docked-column toggle counter any more');
     assert.deepEqual(s.crewSlot, { key: slotNameFor(workspace), folder: workspace, title: `VS Code: ${path.basename(workspace)}` });
-    // ...and the slot it names exists in Kiro Crew, pointed at the folder, before any chat turn
-    for (let i = 0; i < 100 && !mock.rec.slots.has(slotNameFor(workspace)); i++) await sleep(50);
-    assert.equal(mock.rec.slots.get(slotNameFor(workspace))?.project, workspace, 'GET /api/session creates the crew slot it names');
+    // S-3: naming is not creating. Polls never create the slot; the Kiro Crew
+    // tab opening (GET /api/bridge/kc?opened=1) does, for an existing folder only.
+    const main = slotNameFor(workspace);
+    await sleep(300);
+    assert.equal(mock.rec.slots.has(main), false, 'GET /api/session does not create the slot');
+    let k = await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    assert.equal(k.status, 200);
+    assert.equal(mock.rec.slots.has(main), false, 'a poll without opened=1 does not create it');
+    assert.equal(k.json.slot, main);
+    assert.equal((await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(path.join(workspace, 'missing'))}`, undefined, 'h1')).status, 403, 'a folder that does not exist');
+    assert.equal((await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=relative`, undefined, 'h1')).status, 403, 'a relative folder');
+    k = await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    assert.equal(k.json.ensured, true);
+    assert.equal(mock.rec.slots.get(main)?.project, workspace, 'opening the tab creates the slot pointed at the folder');
+    mock.closeSlot(main);
+    await proxy('GET', `/api/session?folder=${encodeURIComponent(workspace)}`);
+    await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    await sleep(300);
+    assert.equal(mock.rec.slots.has(main), false, 'closing it in Kiro Crew sticks until the tab is opened again');
+    await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    assert.equal(mock.rec.slots.has(main), true, 'reopening the tab brings it back');
+
+    // The tunnel: the page sees only connected/not; the bridge gets the origin and embed URL.
+    assert.deepEqual([s.kc.available, s.kc.connected], [true, false]);
+    assert.equal(k.json.connected, false);
+    assert.match(k.json.origin, /^http:\/\/[0-9a-f]{32}\.localhost:\d+$/);
+    assert.equal(k.json.embedUrl, `${k.json.origin}/embed/chat/${main}`);
+    const signed = (await proxy('POST', '/api/kc/sign-in', { url: mock.mintLink(), via: 'auto' })).json;
+    assert.equal(signed.ok, true);
+    s = (await proxy('GET', '/api/session')).json;
+    assert.equal(s.kc.connected, true);
+    assert.equal(s.kc.via, 'auto');
+    assert.ok(!JSON.stringify(s).includes(k.json.origin.slice(7, 39)), 'the tunnel origin is not in the page\'s session');
+    assert.ok(!JSON.stringify(s).includes('mc_token'), 'no cookie in the page\'s session');
+    const failed = (await proxy('POST', '/api/kc/sign-in', { error: 'external_origin_unavailable', via: 'connect' })).json;
+    assert.equal(failed.kc.lastError, 'external_origin_unavailable');
+    assert.equal(failed.kc.connected, true, 'a failed mint leaves the session as it was');
+    assert.equal((await bridgeCall('POST', '/api/bridge/kc/connect', {}, 'h1')).json.connectRequests, 1);
+    assert.equal((await proxy('GET', '/api/session')).json.kc.connectRequests, 1);
+    assert.equal((await proxy('POST', '/api/kc/disconnect', {})).json.kc.connected, false);
+    const k2 = (await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1')).json;
+    assert.notEqual(k2.origin, k.json.origin, 'Disconnect rotates the origin');
+    assert.equal((await bridgeCall('POST', '/api/bridge/kc/sign-in', { url: mock.mintLink() }, 'h1')).json.ok, true, 'a pasted link signs in');
+    assert.equal((await proxy('GET', '/api/session')).json.kc.via, 'paste');
     await bridgeCall('POST', '/api/bridge/events', { type: 'crewView', resolved: true, visible: true });
     s = (await proxy('GET', '/api/session')).json;
     assert.equal(s.crewView.visible, true);
@@ -448,6 +514,21 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.ok(parts.some((p) => p.kind === 'tool' && p.state === 'done' && p.toolKind === 'read'));
     assert.equal(mock.rec.turns.at(-1).slot, a.slot);
     assert.equal((await bridgeCall('POST', '/api/bridge/chat', { prompt: 'x', folder: workspace, slot: 'not-ours' })).status, 404, 'only registered sessions');
+
+    // S-4: a second VS Code window on another folder does not take the first
+    // window's sessions away; each window is checked against its own folders.
+    const other = path.join(dataDir, 'second window');
+    fs.mkdirSync(other, { recursive: true });
+    assert.equal((await bridgeCall('POST', '/api/bridge/events', { type: 'hello', host: 'h2', workspaceFolders: [other] })).status, 204);
+    const h1Hist = await bridgeCall('GET', `/api/bridge/sessions/history?slot=${encodeURIComponent(a.slot)}`, undefined, 'h1');
+    assert.equal(h1Hist.status, 200, 'window 1 still reaches its session after window 2 said hello');
+    assert.equal((await bridgeCall('GET', `/api/bridge/sessions/history?slot=${encodeURIComponent(a.slot)}`, undefined, 'h2')).status, 404, 'window 2 cannot use window 1\'s session');
+    assert.deepEqual((await bridgeCall('GET', '/api/bridge/sessions', undefined, 'h1')).json.sessions.map((x) => x.slot).sort(), [a.slot, b.slot].sort());
+    assert.deepEqual((await bridgeCall('GET', '/api/bridge/sessions', undefined, 'h2')).json.sessions, []);
+    assert.equal((await bridgeCall('POST', '/api/bridge/sessions', { folder: other, title: 'w2' }, 'h2')).status, 200, 'window 2 creates sessions in its own folder');
+    assert.equal((await bridgeCall('POST', '/api/bridge/sessions', { folder: other, title: 'w2' }, 'h1')).status, 403);
+    // A call that names no window may act on any live window's folders.
+    assert.equal((await bridgeCall('GET', `/api/bridge/sessions/history?slot=${encodeURIComponent(a.slot)}`)).status, 200);
 
     // history comes back from the slot
     const h = (await bridgeCall('GET', `/api/bridge/sessions/history?slot=${encodeURIComponent(a.slot)}`)).json;
@@ -495,7 +576,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(prefs.prefs.hideCopilotAgents, false);
     assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'data', 'state', 'chat-prefs.json'), 'utf8')).hideCopilotAgents, false);
     const status = (await proxy('GET', '/api/chat/status')).json;
-    assert.equal(status.native.sessions, 2);
+    assert.equal(status.native.sessions, 3, 'two in window 1, one in window 2');
     assert.equal(status.native.prefs.hideCopilotAgents, false);
   } finally {
     child.kill();

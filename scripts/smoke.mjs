@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
-import { tabChecks } from './lib/tab-checks.mjs';
+import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
@@ -431,7 +431,9 @@ async function main() {
   if (!serverDir && !APP) throw new Error('no VS Code server build; run the R1-B probe or pass --server-dir');
   const runDir = path.join(ROOT, '.cache', 'smoke', `run-${Date.now()}`);
   const dataDir = path.join(runDir, 'data');
-  const workspace = path.join(runDir, 'workspace');
+  // A folder name with a space (V3 N-5, V4 N-5): slot names, folder checks,
+  // terminal paths and the Kiro Crew tab all have to cope with it.
+  const workspace = path.join(runDir, 'my workspace');
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
   const target = path.join(workspace, 'hello.txt');
@@ -444,6 +446,10 @@ async function main() {
 
   SECRET = crypto.randomBytes(24).toString('hex');
   PORT = await freePort();
+  // The stand-in dashboard's ports, chosen now so every launcher start can name
+  // them as frame ancestors of the Kiro Crew tunnel (VSCODE_PANE_DASHBOARD_ORIGIN).
+  const hostPort = await freePort();
+  const hostPort2 = await freePort();
   console.log(`run dir ${runDir}\nserver build ${serverDir}\nlauncher port ${PORT}${MINIMAL_ENV ? '\nlauncher env: gateway minimal_env allowlist only' : ''}`);
 
   // A mock Kiro Crew gateway for the chat round trip; the launcher trades the
@@ -474,6 +480,7 @@ async function main() {
         VSCODE_PANE_WORKSPACE: workspace,
         ...(APP ? {} : { VSCODE_PANE_SERVER_DIR: serverDir }),
         VSCODE_PANE_NO_DOWNLOAD: '1',
+        VSCODE_PANE_DASHBOARD_ORIGIN: `http://localhost:${hostPort},http://localhost:${hostPort2}`,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -486,6 +493,7 @@ async function main() {
   const firstLauncherPort = PORT;
 
   let browser;
+  let browserCdn = [];
   let hostServer;
   let tree = [];
   let earlierTree = [];
@@ -582,8 +590,7 @@ async function main() {
     const exe = findBrowser();
     if (!check('found a local Chrome/Edge', !!exe, exe || '')) throw new Error('no browser');
     const pw = await loadPlaywright(DEPS_ROOT);
-    const hostPort = await freePort();
-    hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace], chatCwd: chatProject });
+    hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace], chatCwd: chatProject, mintLink: () => gatewayMock.mintLink() });
     await new Promise((ok) => hostServer.listen(hostPort, '127.0.0.1', ok));
     // A persistent profile, so browser-side VS Code state can be checked across
     // a launcher restart (step 15).
@@ -594,7 +601,12 @@ async function main() {
     const pageErrors = [];
     // Every workbench page load (the frame's own document), to prove a remount does not reload it.
     let workbenchLoads = 0;
+    // Webviews must come from the self-hosted loopback endpoint, never the CDN
+    // (VS Code's own product fetches from main.vscode-cdn.net are not webviews).
+    const cdnRequests = [];
+    browserCdn = cdnRequests;
     page.on('request', (r) => {
+      if (/vscode-cdn\.net\/.*\/contrib\/webview\//.test(r.url())) cdnRequests.push(r.url().slice(0, 100));
       if (r.resourceType() === 'document' && r.url().startsWith(`http://127.0.0.1:${framePort}/vsc-`)) workbenchLoads++;
     });
     page.on('pageerror', (e) => pageErrors.push(e.message));
@@ -1029,7 +1041,7 @@ async function main() {
 
     // 12b. the Kiro Crew tab in VS Code's secondary side bar, with the real
     //      ChatPanel (the stand-in's stub) drawn over it (ui/vscode-pane-crew-*.mjs)
-    await tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort });
+    await tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort, dataDir, rawRequest, cdnRequests: browserCdn });
 
     // 13. the launcher restarts a VS Code server that dies
     if (process.platform === 'win32') {
@@ -1083,6 +1095,10 @@ async function main() {
         st3 = (await api('GET', '/api/state')).json;
         if (st3 && st3.extension && Date.parse(st3.extension.at) > t10 && st3.activeEditor && st3.activeEditor.path) break;
         await sleep(500);
+      }
+      if (!(st3 && st3.activeEditor)) {
+        await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'reload-no-editor.png') }).catch(() => {});
+        console.log('after reload, /api/state:', JSON.stringify(st3 && { connected: st3.connected, at: st3.extension && st3.extension.at, active: st3.activeEditor }));
       }
       check(
         'after a reload of the pane the open editor is restored without reopening it',
@@ -1151,6 +1167,7 @@ async function main() {
       const reopenR = await api('POST', '/api/open', { path: target, line: 2 });
       check('the reloaded workbench is live (no reconnect error, /api/open works)', dead === 0 && reopenR.json && reopenR.json.ok, JSON.stringify(reopenR.json));
       await secretReadBack({ api, check, value: secretValue, label: 'after a launcher restart with the page open (new frame path key)' });
+      await tunnelPersists({ api, check, gatewayMock, label: 'after a launcher restart with the page open' });
       await sleep(3000); // let the workbench flush its storage
     }
 
@@ -1184,8 +1201,7 @@ async function main() {
       const logNow = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
       const spawnedNow = [...logNow.matchAll(/server spawned pid (\d+) port (\d+)/g)];
       if (spawnedNow.length) serverPort = Number(spawnedNow.at(-1)[2]);
-      const hostPort2 = await freePort();
-      hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace] });
+      hostServer = createDashboardStandin({ repoRoot: APP_ROOT, launcherPort: PORT, secret: SECRET, recentDirs: [workspace], mintLink: () => gatewayMock.mintLink() });
       await new Promise((ok) => hostServer.listen(hostPort2, '127.0.0.1', ok));
       const pw2 = await loadPlaywright(DEPS_ROOT);
       // Same browser profile as before: the browser keeps its storage, the
@@ -1223,6 +1239,7 @@ async function main() {
       );
       await page2.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'after-restart.png') });
       await secretReadBack({ api, check, value: secretValue, label: 'after a launcher restart and a browser restart on the same profile' });
+      await tunnelPersists({ api, check, gatewayMock, label: 'after a launcher restart and a browser restart', page: page2 });
       const cs2 = (await api('GET', '/api/chat/status?probe=1')).json;
       check('after the launcher restart chat is available again with a fresh app token', cs2 && cs2.available && cs2.gateway.reachable === true, JSON.stringify(cs2 && cs2.gateway && { reachable: cs2.gateway.reachable, lastError: cs2.gateway.lastError }));
     }

@@ -23,6 +23,10 @@ export class Bridge {
     // runs out (remoteExtensionHostAgentServer.ts:381-391), so commands go to
     // the newest host only.
     this.currentHost = null;
+    // Every live extension host (one per VS Code window) and its folders, so
+    // two windows each keep their own sessions: host -> {folders, at}.
+    this.hosts = new Map();
+    this.hostTtlMs = 10 * 60 * 1000;
     this.events = 0;
     // VS Code's "Kiro Crew" webview view as the extension last reported it
     // ({resolved, visible, at}); GET /api/session carries it.
@@ -164,7 +168,10 @@ export class Bridge {
           chat: chatInfo(ev.chat),
           at,
         };
-        if (typeof ev.host === 'string' && ev.host) this.currentHost = ev.host.slice(0, 64);
+        if (typeof ev.host === 'string' && ev.host) {
+          this.currentHost = ev.host.slice(0, 64);
+          this.hosts.set(this.currentHost, { folders: this.extension.workspaceFolders, at: this.now() });
+        }
         return true;
       case 'theme':
         this.theme = {
@@ -214,6 +221,25 @@ export class Bridge {
       default:
         return false;
     }
+  }
+
+  /** Mark a host as alive (it called a bridge route). */
+  seeHost(host) {
+    const h = host && this.hosts.get(String(host).slice(0, 64));
+    if (h) h.at = this.now();
+  }
+
+  /**
+   * The folders a bridge request may act on: the calling window's own folders
+   * when it names its host, else every live window's, else null (no window).
+   */
+  rootsFor(host) {
+    const now = this.now();
+    for (const [k, v] of this.hosts) if (now - v.at > this.hostTtlMs) this.hosts.delete(k);
+    const own = host && this.hosts.get(String(host).slice(0, 64));
+    if (own) return own.folders;
+    if (!this.hosts.size) return null;
+    return [...new Set([...this.hosts.values()].flatMap((v) => v.folders))];
   }
 
   /** The extension host went away (server restart): forget it until it says hello again. */

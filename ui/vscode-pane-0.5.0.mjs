@@ -11,13 +11,13 @@
 // the page's placeholder while the page is mounted and hidden (never removed)
 // while it is not.
 //
-// The Kiro Crew chat is drawn over VS Code's own "Kiro Crew" view (a tab in
-// VS Code's secondary side bar, next to Chat and Claude Code). A script the
-// launcher injects into the workbench reports that view's rectangle by
-// postMessage (backend/lib/view-overlay.js); the page accepts it only from the
-// frame's origin and window with this run's nonce, and places the overlay
-// (ui/vscode-pane-crew-0.5.0.mjs) over it, hiding it while VS Code draws a
-// popup over the view.
+// The Kiro Crew chat lives in VS Code itself: the bridge's "Kiro Crew" tab in
+// VS Code's secondary side bar frames Kiro Crew's own dashboard chat through
+// the launcher's tunnel (backend/lib/kcproxy.mjs). This page signs that tunnel
+// in: it runs inside the signed-in dashboard, so it asks the dashboard for a
+// sign-in link (POST /api/auth/mobile-link, the "Connect your phone" mint) and
+// hands it to the launcher (POST /api/kc/sign-in), once when the page opens and
+// again whenever the tab's Connect button asks.
 import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import { useAppApi, useTheme } from '@kirocrew/app-sdk';
 import {
@@ -30,17 +30,6 @@ import {
   framePlacement,
   CARD_MARGIN,
 } from './vscode-pane-core-0.5.0.mjs';
-import {
-  acceptViewMessage,
-  isReadyMessage,
-  hiddenReason,
-  overlayPlacement,
-  shouldForwardKey,
-  keyPayload,
-  newNonce,
-  frameOrigin,
-} from './vscode-pane-crew-core-0.5.0.mjs';
-import { CrewOverlay } from './vscode-pane-crew-0.5.0.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
@@ -149,19 +138,12 @@ const holder = {
   session: null, // last session seen, so a remount shows the live frame at once
   owner: null, // the mounted page's token, or null while unmounted
   kind: '', // last resolved dashboard kind, so a remount styles itself at once
-  // The Kiro Crew view overlay (ui/vscode-pane-crew-*.mjs). The nonce is new
-  // for every load of this module (each dashboard window run); the frame's
-  // script learns it from the page's hello and echoes it in every report.
-  viewNonce: typeof crypto !== 'undefined' && crypto.getRandomValues ? newNonce() : '',
-  view: null, // the last accepted report from the frame
-  viewAccepted: 0,
-  viewRejected: 0, // kc-view messages refused for origin, window or nonce (the smoke reads it)
-  hellos: 0,
-  crewShown: false,
-  crewReason: 'no report',
-  crewPlacements: 0,
-  keysForwarded: 0,
-  onFrameLoad: null,
+  // Tunnel sign-in from this page (the smoke reads these).
+  kcAuto: false, // the automatic attempt for this page load has run
+  kcSeenConnect: null, // last connectRequests reading
+  sessionSeq: 0, // GET /api/session requests sent
+  sessionApplied: 0, // the newest one applied
+  kcMints: [], // {via, ok, status} of each mint attempt
 };
 
 function ensureFrame() {
@@ -178,12 +160,6 @@ function ensureFrame() {
   });
   const iframe = document.createElement('iframe');
   iframe.title = 'VS Code';
-  // A reloaded workbench (Reload, a new server, a VS Code window reload) needs
-  // the page's hello again; its script also asks with 'kc-view-ready'.
-  iframe.addEventListener('load', () => {
-    holder.view = null;
-    if (holder.onFrameLoad) holder.onFrameLoad();
-  });
   iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
   Object.assign(iframe.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', border: '0', display: 'block' });
   wrap.appendChild(iframe);
@@ -315,11 +291,37 @@ function storeFolder(v) {
   }
 }
 
-/** The composer (or else the first focusable control) inside the Kiro Crew overlay. */
-function crewFocusTarget(root) {
-  if (!root) return null;
-  return root.querySelector('textarea:not([disabled]), [contenteditable="true"]') ||
-    root.querySelector('button:not([disabled]), input:not([type="hidden"]):not([disabled]), [tabindex]:not([tabindex="-1"])');
+/**
+ * Mint a sign-in link with the dashboard's own session and give it to the
+ * launcher. The page is a module inside the dashboard document, so a plain
+ * same-origin fetch carries the dashboard's HttpOnly session cookie; the
+ * gateway refuses app tokens on this route (handlers/auth_mobile.py:83-88), so
+ * it must be the user's session, not useAppApi. It answers 409
+ * external_origin_unavailable until Settings has a dashboard URL
+ * (auth_mobile.py:105-111); the tab then offers the paste field.
+ */
+async function mintAndSignIn(api, via) {
+  let entry = { via, ok: false, status: 0 };
+  try {
+    const r = await fetch('/api/auth/mobile-link', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+    entry.status = r.status;
+    const j = await r.json().catch(() => null);
+    if (r.ok && j && typeof j.url === 'string') {
+      const done = await call(api.post(`${API}/kc/sign-in`, { url: j.url, via }));
+      entry.ok = !!done.ok;
+      entry.error = done.error || null;
+    } else {
+      const code = (j && (j.code || j.error)) || `HTTP ${r.status}`;
+      entry.error = code === 'external_origin_unavailable'
+        ? 'Kiro Crew can mint a sign-in link only when Settings has a dashboard URL (external_origin_unavailable). Paste a kirocrew token link instead.'
+        : `the dashboard refused a sign-in link: ${code}`;
+      await call(api.post(`${API}/kc/sign-in`, { error: entry.error, via })).catch(() => {});
+    }
+  } catch (e) {
+    entry.error = errText(e);
+  }
+  holder.kcMints.push(entry);
+  return entry;
 }
 
 export default function VsCodePane() {
@@ -352,11 +354,8 @@ export default function VsCodePane() {
   const [kind, setKind] = useState(holder.kind || 'dark');
   const rootRef = useRef(null);
   const placeholderRef = useRef(null);
-  // The Kiro Crew overlay's root; place() positions it over VS Code's view.
-  const crewRef = useRef(null);
-  // ChatPanel mounts once the view has shown (then stays for this mount).
-  const [crewMounted, setCrewMounted] = useState(holder.crewShown);
   const [crewResult, setCrewResult] = useState('');
+  const [kcBusy, setKcBusy] = useState(false);
 
   const ready = !!(session && session.ready && session.url);
   const key = frameKey(session, nonce);
@@ -386,9 +385,14 @@ export default function VsCodePane() {
   }, [applyFolder]);
 
   const loadSession = useCallback(async () => {
+    // Overlapping polls (a folder change restarts the loop while one is in
+    // flight) must not let an older answer overwrite a newer one.
+    const seq = ++holder.sessionSeq;
     try {
       const q = folder ? `?folder=${encodeURIComponent(folder)}` : '';
       const s = await call(api.get(`${API}/session${q}`));
+      if (seq < holder.sessionApplied) return;
+      holder.sessionApplied = seq;
       holder.session = s;
       setSession(s);
       setSessionError('');
@@ -492,73 +496,49 @@ export default function VsCodePane() {
     postTheme(false);
   }, [sdkTheme && sdkTheme.mode, sdkTheme && sdkTheme.colorTheme, sdkTheme && sdkTheme.accent, postTheme]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The frame's view reports. Accepted only from the frame's own origin and
-  // contentWindow with this run's nonce; anything else is counted and dropped.
-  const sessionUrl = session && session.url;
-  const originRef = useRef('');
-  originRef.current = frameOrigin(sessionUrl || (holder.iframe && holder.iframe.src) || '');
+  // Tunnel sign-in: once per page load when it is not connected (a), and on
+  // every Connect press in VS Code's Kiro Crew tab (b), which the launcher
+  // counts in session.kc.connectRequests.
+  const kcState = session && session.kc;
+  const kcConnected = !!(kcState && kcState.connected);
+  const kcAvailable = !!(kcState && kcState.available);
+  const kcRequests = kcState && Number.isInteger(kcState.connectRequests) ? kcState.connectRequests : null;
+  const signIn = useCallback(async (via) => {
+    setKcBusy(true);
+    try {
+      await mintAndSignIn(api, via);
+      await loadSession();
+    } finally {
+      setKcBusy(false);
+    }
+  }, [loadSession]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const sendHello = () => {
-      const w = holder.iframe && holder.iframe.contentWindow;
-      const origin = originRef.current;
-      if (!w || !origin || !holder.viewNonce) return;
-      holder.hellos += 1;
-      w.postMessage({ type: 'kc-view-hello', nonce: holder.viewNonce }, origin);
-    };
-    const onMessage = (e) => {
-      const ctx = { origin: originRef.current, source: holder.iframe && holder.iframe.contentWindow, nonce: holder.viewNonce };
-      if (isReadyMessage(e, ctx)) return sendHello();
-      const d = e.data;
-      const report = acceptViewMessage(e, ctx);
-      if (!report) {
-        if (d && typeof d === 'object' && d.type === 'kc-view') holder.viewRejected += 1;
-        return;
-      }
-      if (holder.view && report.seq && holder.view.seq && report.seq < holder.view.seq) return; // out of order
-      const wasFocused = !!(holder.view && holder.view.view.focused);
-      holder.view = report;
-      holder.viewAccepted += 1;
-      scheduleRef.current();
-      // VS Code moved focus into the view (its tab was clicked, Ctrl+Alt+K):
-      // the keyboard belongs in the chat drawn over it.
-      if (report.view.focused && !wasFocused && !hiddenReason(report)) holder.focusCrewSoon = true;
-    };
-    window.addEventListener('message', onMessage);
-    holder.onFrameLoad = sendHello;
-    sendHello();
-    return () => {
-      window.removeEventListener('message', onMessage);
-      if (holder.onFrameLoad === sendHello) holder.onFrameLoad = null;
-    };
-  }, []);
-  // A new frame URL (another folder, a restarted backend) is another origin
-  // or document; say hello again once it is set.
+    // The first tunnel reading of this page load decides: signed out, sign in
+    // now; already signed in, nothing to do. Either way it is used up, so a
+    // Disconnect later in this page load is not undone behind the user's back.
+    if (!kcAvailable || holder.kcAuto) return;
+    holder.kcAuto = true;
+    if (!kcConnected) signIn('auto');
+  }, [kcAvailable, kcConnected, signIn]);
   useEffect(() => {
-    if (holder.onFrameLoad) holder.onFrameLoad();
-  }, [sessionUrl]);
-
-  // Shortcuts pressed in the overlay go to VS Code, as they would in its own
-  // view: F1, Ctrl+Shift+P, Ctrl+Alt+K and other chords the chat leaves alone.
-  useEffect(() => {
-    const el = crewRef.current;
-    if (!el) return undefined;
-    const onKey = (e) => {
-      if (!shouldForwardKey(e)) return;
-      const w = holder.iframe && holder.iframe.contentWindow;
-      const origin = originRef.current;
-      if (!w || !origin) return;
-      e.preventDefault();
-      e.stopPropagation();
-      holder.keysForwarded += 1;
-      // The keyboard goes to VS Code with the shortcut: a popup it opens
-      // (quick input) closes on blur if focus stayed in this document.
-      if (document.activeElement && el.contains(document.activeElement)) document.activeElement.blur();
-      holder.iframe.focus();
-      w.postMessage({ type: 'kc-view-key', nonce: holder.viewNonce, key: keyPayload(e) }, origin);
-    };
-    el.addEventListener('keydown', onKey);
-    return () => el.removeEventListener('keydown', onKey);
-  }, []);
+    if (kcRequests === null) return;
+    const seen = holder.kcSeenConnect;
+    holder.kcSeenConnect = kcRequests;
+    // The first reading is a baseline; a lower count is a restarted launcher.
+    if (seen === null || kcRequests <= seen) return;
+    if (!kcConnected) signIn('connect');
+  }, [kcRequests, kcConnected, signIn]);
+  const kcDisconnect = async () => {
+    setKcBusy(true);
+    try {
+      await call(api.post(`${API}/kc/disconnect`, {}));
+      await loadSession();
+    } catch (e) {
+      setSessionError(errText(e));
+    } finally {
+      setKcBusy(false);
+    }
+  };
 
   const revealCrew = async () => {
     setCrewResult('');
@@ -622,7 +602,6 @@ export default function VsCodePane() {
       }
       if (!showRef.current || !holder.wrap || holder.owner !== token) {
         hideFrame();
-        placeCrew(null, 'frame hidden', 0);
         return;
       }
       const radius = parseFloat(getComputedStyle(root).borderBottomLeftRadius) || 0;
@@ -630,74 +609,6 @@ export default function VsCodePane() {
       const p = framePlacement(ph.getBoundingClientRect(), bounds, [0, 0, inner, inner]);
       if (p) placeFrame(p);
       else hideFrame();
-      placeCrew(p ? bounds : null, p ? '' : 'frame hidden', inner);
-    };
-    // The Kiro Crew overlay over VS Code's view: the reported rect mapped
-    // through the iframe's box, clipped to <main>, the frame's rounded bottom
-    // corners kept. Hidden while the view is hidden, collapsed, in another
-    // window, or covered by a VS Code popup or a drag.
-    const placeCrew = (bounds, frameReason, inner) => {
-      const el = crewRef.current;
-      if (!el) return;
-      holder.crewPlacements += 1;
-      const report = holder.view;
-      let reason = frameReason || hiddenReason(report);
-      let p = null;
-      if (!reason) {
-        p = overlayPlacement(report.view.rect, report.viewport, holder.iframe.getBoundingClientRect(), bounds);
-        if (!p) reason = 'clipped';
-      }
-      const s = el.style;
-      const set = (k, v) => {
-        if (s[k] !== v) s[k] = v;
-      };
-      if (!p) {
-        holder.crewShown = false;
-        holder.crewReason = reason;
-        el.setAttribute('data-visible', 'false');
-        el.setAttribute('data-hidden-reason', reason);
-        set('visibility', 'hidden');
-        set('pointerEvents', 'none');
-        // Keyboard focus must not stay in an overlay nobody can see; give it
-        // back to VS Code (its popup, when one is open over the view).
-        if (el.contains(document.activeElement)) {
-          document.activeElement.blur();
-          if (holder.iframe && holder.wrap && holder.wrap.style.visibility !== 'hidden') {
-            holder.iframe.focus();
-            const w = holder.iframe.contentWindow;
-            if (w && originRef.current) w.postMessage({ type: 'kc-view-focus', nonce: holder.viewNonce }, originRef.current);
-          }
-        }
-        return;
-      }
-      // Round the overlay's corners where they meet the frame's rounded ones.
-      const frame = holder.iframe.getBoundingClientRect();
-      const near = (a, b) => Math.abs(a - b) < 1.5;
-      const br = near(p.left + p.width, frame.right) && near(p.top + p.height, frame.bottom) ? inner : 0;
-      const bl = near(p.left, frame.left) && near(p.top + p.height, frame.bottom) ? inner : 0;
-      set('left', `${p.left}px`);
-      set('top', `${p.top}px`);
-      set('width', `${p.width}px`);
-      set('height', `${p.height}px`);
-      set('clipPath', p.clip.replace(/\)$/, ` round 0px 0px ${br}px ${bl}px)`));
-      set('visibility', 'visible');
-      set('pointerEvents', 'auto');
-      el.setAttribute('data-visible', 'true');
-      el.setAttribute('data-hidden-reason', '');
-      el.setAttribute('data-location', report.view.location);
-      holder.crewShown = true;
-      holder.crewReason = '';
-      setCrewMounted(true);
-      if (holder.focusCrewSoon) {
-        holder.focusCrewSoon = false;
-        // After the overlay is visible; ChatPanel may mount in this commit.
-        const tryFocus = (left) => {
-          const t = crewFocusTarget(crewRef.current);
-          if (t && holder.crewShown) t.focus();
-          else if (left > 0) setTimeout(() => tryFocus(left - 1), 100);
-        };
-        requestAnimationFrame(() => tryFocus(10));
-      }
     };
     const schedule = () => {
       if (!raf) raf = requestAnimationFrame(place);
@@ -730,7 +641,7 @@ export default function VsCodePane() {
   // card's colours) is a change no observer sees.
   useLayoutEffect(() => {
     scheduleRef.current();
-  }, [showFrame, key, kind, crewMounted]);
+  }, [showFrame, key, kind]);
 
   const reloadFrame = () => {
     holder.nonce += 1;
@@ -799,6 +710,22 @@ export default function VsCodePane() {
       type: 'button', className: 'vscp-btn', onClick: revealCrew, disabled: !ready,
       title: crewResult || 'Open the Kiro Crew tab in VS Code (Ctrl+Alt+K in VS Code)', 'data-testid': 'vscode-pane-crew-reveal',
     }, 'Kiro Crew'),
+    h('span', {
+      className: 'vscp-group vscp-muted', 'data-testid': 'vscode-pane-kc-state',
+      'data-connected': kcConnected ? 'true' : 'false',
+      title: kcConnected
+        ? 'VS Code\'s Kiro Crew tab is signed in to this Kiro Crew'
+        : (kcState && kcState.lastError) || (kcState && kcState.reason) || 'VS Code\'s Kiro Crew tab is not signed in',
+    },
+    h('span', { className: 'vscp-dot', style: { background: kcConnected ? STATUS_VAR.ready : STATUS_VAR.idle } }),
+    h('span', null, kcConnected ? 'Tab connected' : 'Tab not connected')),
+    kcAvailable
+      ? h('button', {
+        type: 'button', className: 'vscp-btn', disabled: kcBusy, 'data-testid': kcConnected ? 'vscode-pane-kc-disconnect' : 'vscode-pane-kc-connect',
+        onClick: kcConnected ? kcDisconnect : () => signIn('connect'),
+        title: kcConnected ? 'Sign VS Code\'s Kiro Crew tab out' : 'Sign VS Code\'s Kiro Crew tab in with this dashboard\'s session',
+      }, kcConnected ? 'Disconnect' : 'Connect')
+      : null,
     h('button', { type: 'button', className: 'vscp-btn', onClick: reloadFrame, title: 'Reload the VS Code view' }, 'Reload'),
     h('button', { type: 'button', className: 'vscp-btn', onClick: doRestart, title: 'Restart the VS Code server process' }, 'Restart server'),
     h('span', { className: 'vscp-sep', 'aria-hidden': 'true' }),
@@ -846,6 +773,5 @@ export default function VsCodePane() {
   session && session.chat && session.chat.message
     ? h('div', { className: 'vscp-note', role: 'alert', 'data-testid': 'vscode-pane-chat-problem' }, `VS Code Chat: ${session.chat.message}`)
     : null,
-  h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay),
-  h(CrewOverlay, { api, session, folder, kind, overlayRef: crewRef, mountPanel: crewMounted }));
+  h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay));
 }

@@ -55,17 +55,38 @@ export function injectConnectionToken(html, token) {
 }
 
 /**
- * Add the view-overlay script (backend/lib/view-overlay.js) to the workbench
- * page, before </head>, as a same-origin <script src>, which the workbench
- * CSP (`script-src 'self'`, webClientServer.ts:150) allows. Returns the HTML
- * unchanged when there is no </head>.
+ * Serve VS Code's webviews from loopback instead of https://*.vscode-cdn.net:
+ * set `webviewEndpoint` in the workbench configuration (read before the
+ * product default, environmentService.ts webviewExternalEndpoint) to
+ * http://{{uuid}}.localhost:<frame port><static route>/out/vs/workbench/contrib/webview/browser/pre/.
+ * The webview host page requires its host name to start with a hash of the
+ * parent origin and a secure context (pre/index.html), which a
+ * `<uuid>.localhost` host on loopback satisfies with one origin per webview.
+ * Every frame in the chain is then loopback, so the Kiro Crew tab (a webview
+ * framing the tunnel) never crosses from a public origin to loopback, and
+ * webviews work offline. The static route is read from the page's own
+ * workbench.js URL. Returns null when the marker or the route is missing.
  */
-export function injectOverlayScript(html, src) {
-  if (!/^\/[A-Za-z0-9/_.-]+$/.test(src || '')) throw new Error('unsafe script path');
-  const i = html.indexOf('</head>');
-  if (i < 0) return html;
-  return `${html.slice(0, i)}<script src="${src}"></script>
-${html.slice(i)}`;
+export function injectWebviewEndpoint(html, framePort) {
+  if (!Number.isInteger(framePort) || framePort <= 0) throw new Error('bad port');
+  const m = /src="([^"]*)\/out\/vs\/code\/browser\/workbench\/workbench\.js"/.exec(html);
+  if (!m || !/^\/[A-Za-z0-9/_.-]*$/.test(m[1])) return null;
+  const i = html.indexOf(CONFIG_MARKER);
+  if (i < 0) return null;
+  const endpoint = `http://{{uuid}}.localhost:${framePort}${m[1]}/out/vs/workbench/contrib/webview/browser/pre/`;
+  const at = i + CONFIG_MARKER.length;
+  return `${html.slice(0, at)}&quot;webviewEndpoint&quot;:&quot;${endpoint}&quot;,${html.slice(at)}`;
+}
+
+/** Add http://*.localhost:<port> to a CSP's frame-src (or create one), leaving every other directive alone. */
+export function allowWebviewFrames(csp, port) {
+  const src = `http://*.localhost:${port}`;
+  const parts = String(csp).split(';').map((d) => d.trim()).filter(Boolean);
+  const i = parts.findIndex((d) => /^frame-src\s/i.test(d) || d.toLowerCase() === 'frame-src');
+  if (i >= 0) {
+    if (!parts[i].split(/\s+/).includes(src)) parts[i] = `${parts[i]} ${src}`;
+  } else parts.push(`frame-src 'self' ${src}`);
+  return parts.join('; ') + ';';
 }
 
 /** Drop the token cookie the server tries to set; the browser never needs it. */
@@ -82,22 +103,13 @@ const NOT_READY_HTML = `<!doctype html><meta charset="utf-8"><meta http-equiv="r
 
 /**
  * @param {() => ({port:number, token:string}|null)} getTarget
- * @param {{overlayScriptPath?: string, overlayScript?: () => string, secretKey?: boolean}} [opts]
- *   overlayScriptPath: where the page loads the view-overlay script from (served
- *   here, never forwarded); secretKey: set the secret-storage cookies on the
+ * @param {{webviewPort?: () => number, secretKey?: boolean}} [opts]
+ *   webviewPort: serve webviews from http://<uuid>.localhost:<port> (see
+ *   injectWebviewEndpoint); secretKey: set the secret-storage cookies on the
  *   workbench page (lib/secretkey.mjs).
  */
 export function createFrameProxy(getTarget, opts = {}) {
   function handleRequest(req, res) {
-    if (opts.overlayScriptPath && opts.overlayScript && req.url.split('?')[0] === opts.overlayScriptPath) {
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        res.writeHead(405, { 'content-type': 'text/plain' });
-        return res.end('method not allowed');
-      }
-      const body = Buffer.from(opts.overlayScript(), 'utf8');
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'content-length': String(body.length), 'x-content-type-options': 'nosniff' });
-      return res.end(req.method === 'HEAD' ? undefined : body);
-    }
     const target = getTarget();
     if (!target) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '2' });
@@ -131,7 +143,15 @@ export function createFrameProxy(getTarget, opts = {}) {
           const withToken = injectConnectionToken(html, target.token);
           let page = withToken ?? html;
           // Only the workbench page itself (it carries the config marker).
-          if (withToken !== null && opts.overlayScriptPath) page = injectOverlayScript(page, opts.overlayScriptPath);
+          if (withToken !== null && opts.webviewPort && opts.webviewPort() > 0) {
+            const withEndpoint = injectWebviewEndpoint(page, opts.webviewPort());
+            if (withEndpoint !== null) {
+              page = withEndpoint;
+              // The workbench CSP frames only 'self' and https://*.vscode-cdn.net
+              // (webClientServer.ts:152); allow the self-hosted webview origins.
+              if (h['content-security-policy']) h['content-security-policy'] = allowWebviewFrames(h['content-security-policy'], opts.webviewPort());
+            }
+          }
           if (withToken !== null && opts.secretKey) {
             h['set-cookie'] = [...(h['set-cookie'] || []), ...secretCookies(clientHalfFrom(req.headers.cookie))];
           }
@@ -184,7 +204,9 @@ export function createFrameProxy(getTarget, opts = {}) {
 /** Host header names a loopback address (blocks DNS rebinding to the launcher). */
 export function isLoopbackHost(hostHeader) {
   const h = String(hostHeader || '').replace(/:\d+$/, '').toLowerCase();
-  return h === '127.0.0.1' || h === 'localhost' || h === '[::1]';
+  // <name>.localhost always resolves to loopback (RFC 6761); the self-hosted
+  // webview origins (injectWebviewEndpoint) use it.
+  return h === '127.0.0.1' || h === 'localhost' || h === '[::1]' || /^[a-z0-9-]{1,63}\.localhost$/.test(h);
 }
 
 /**

@@ -79,6 +79,15 @@
       {
         "command": "kiroCrew.toggleCrewChat",
         "title": "Kiro Crew: Open Crew Chat (0.4.0 id)"
+      },
+      {
+        "command": "kiroCrew.connect",
+        "title": "Kiro Crew: Connect the Kiro Crew Tab"
+      },
+      {
+        "command": "kiroCrew.disconnect",
+        "title": "Kiro Crew: Disconnect the Kiro Crew Tab",
+        "icon": "$(debug-disconnect)"
       }
     ],
     "chatSessions": [
@@ -119,6 +128,13 @@
         {
           "command": "kiroCrew.toggleCrewChat",
           "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "kiroCrew.disconnect",
+          "when": "view == kiroCrew.chatView",
+          "group": "navigation@10"
         }
       ]
     },

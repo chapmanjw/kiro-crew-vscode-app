@@ -20,6 +20,8 @@ export const ROUTES = [
   { method: 'POST', path: '/api/chat/open-session', name: 'chatOpenSession', auth: 'proxy' },
   { method: 'POST', path: '/api/crew/view', name: 'crewView', auth: 'proxy' },
   { method: 'POST', path: '/api/secret-probe', name: 'secretProbe', auth: 'proxy' },
+  { method: 'POST', path: '/api/kc/sign-in', name: 'kcSignIn', auth: 'proxy' },
+  { method: 'POST', path: '/api/kc/disconnect', name: 'kcDisconnect', auth: 'proxy' },
   { method: 'GET', path: '/api/bridge/commands', name: 'bridgeCommands', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/events', name: 'bridgeEvents', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/chat', name: 'bridgeChat', auth: 'bridge' },
@@ -28,6 +30,10 @@ export const ROUTES = [
   { method: 'GET', path: '/api/bridge/sessions/history', name: 'bridgeSessionHistory', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/approve', name: 'bridgeApprove', auth: 'bridge' },
   { method: 'POST', path: '/api/bridge/question', name: 'bridgeQuestion', auth: 'bridge' },
+  { method: 'GET', path: '/api/bridge/kc', name: 'bridgeKc', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/kc/sign-in', name: 'bridgeKcSignIn', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/kc/connect', name: 'bridgeKcConnect', auth: 'bridge' },
+  { method: 'POST', path: '/api/bridge/kc/disconnect', name: 'bridgeKcDisconnect', auth: 'bridge' },
 ];
 
 /**
