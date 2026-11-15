@@ -11,7 +11,11 @@
 /**
  * Variables we accept. The first seven are the contract; the rest are other
  * names the dashboard defines on :root (KiroCrew website/src/lib/widgetSrcdoc.ts
- * THEME_VAR_NAMES, plus --panel/--chrome/--card from the theme CSS).
+ * THEME_VAR_NAMES, plus --panel/--chrome/--card from the theme CSS), and every
+ * name the page sends (THEME_VARS in ui/vscode-pane-core-*.mjs, from
+ * design-tokens.css). A name the page sends but this list lacks would make the
+ * whole palette fall back to tier "base", so test/contract.test.mjs keeps the
+ * two lists in step.
  */
 export const THEME_KEYS = Object.freeze([
   '--bg', '--surface', '--panel', '--border', '--text', '--muted', '--accent',
@@ -19,6 +23,9 @@ export const THEME_KEYS = Object.freeze([
   '--text-strong', '--muted-strong', '--border-strong',
   '--accent-hover', '--accent-subtle',
   '--ok', '--warn', '--danger', '--info',
+  '--bg-accent', '--panel-strong', '--border-hover', '--accent-fg', '--ring',
+  '--diff-add', '--diff-add-text', '--diff-del', '--diff-del-text',
+  '--search-highlight',
 ]);
 export const REQUIRED_KEYS = Object.freeze(['--bg', '--text']);
 export const MAX_THEME_BYTES = 4096;
