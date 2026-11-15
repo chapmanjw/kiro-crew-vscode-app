@@ -24,7 +24,7 @@ import { verifyProxySignature, checkBridgeSecret, randomSecret, PROXY_HEADER, BR
 import { matchRoute, parseOpenRequest, fileMenuToCommand } from './lib/router.mjs';
 import { Bridge } from './lib/bridge.mjs';
 import { BRIDGE_ID, bridgeFolderName, upsertBridgeEntry, staleBridgeFolders } from './lib/extensions.mjs';
-import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/frameproxy.mjs';
+import { createFrameProxy, isLoopbackHost, isWebviewHost, webviewRequestAllowed, upgradeAllowed } from './lib/frameproxy.mjs';
 import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { createKcProxy } from './lib/kcproxy.mjs';
@@ -696,7 +696,7 @@ const gatewayUrl = (() => {
     return null;
   }
 })();
-const kcSignIn = { attempts: 0, lastAttempt: null, lastError: null, via: null, connectRequests: 0 };
+const kcSignIn = { attempts: 0, lastAttempt: null, lastError: null, lastCode: null, via: null, connectRequests: 0 };
 const kc = gatewayUrl
   ? createKcProxy({
     gatewayHost: '127.0.0.1',
@@ -729,6 +729,7 @@ async function kcDoSignIn(link, via) {
   kcSignIn.via = via;
   const r = await kc.signIn(link);
   kcSignIn.lastError = r.ok ? null : r.error;
+  kcSignIn.lastCode = null;
   log('kc sign-in via', via, r.ok ? 'ok' : `failed (${r.error})`);
   return r;
 }
@@ -753,6 +754,11 @@ function handleMint(req, res) {
 
 /** The frame listener serves only the workbench under its key, and only to a loopback Host. */
 function handleFrame(req, res) {
+  // A webview origin gets the webview host files and nothing else (V5 M-1).
+  if (isWebviewHost(req.headers.host) && !webviewRequestAllowed(req.method, req.url, BASE_PATH)) {
+    req.resume();
+    return sendJson(res, 403, { error: 'not available to webviews' });
+  }
   const url = new URL(req.url, `http://${HOST}`);
   if (url.pathname === MINT_PATH) return handleMint(req, res);
   const route = matchRoute(req.method, url.pathname, BASE_PATH);
@@ -906,11 +912,16 @@ async function handle(req, res) {
         kcSignIn.attempts++;
         kcSignIn.lastAttempt = new Date().toISOString();
         kcSignIn.via = parsed.via === 'connect' ? 'connect' : 'auto';
-        kcSignIn.lastError = parsed.error.slice(0, 200);
+        kcSignIn.lastError = parsed.error.slice(0, 400);
+        kcSignIn.lastCode = typeof parsed.code === 'string' && /^[A-Za-z0-9_ -]{1,60}$/.test(parsed.code) ? parsed.code : null;
         log('kc sign-in from the page failed:', kcSignIn.lastError);
         return sendJson(res, 200, { ok: false, kc: kcBody() });
       }
       if (!parsed || typeof parsed.url !== 'string') return sendJson(res, 400, { error: 'body must be {url} or {error}' });
+      // Disconnect sticks until the user presses Connect or pastes a link (V5 S-3).
+      if (parsed.via !== 'connect' && parsed.via !== 'paste' && kc.status().userDisconnected) {
+        return sendJson(res, 409, { ok: false, error: 'the tab was disconnected; press Connect to sign it in again', code: 'user_disconnected', kc: kcBody() });
+      }
       const r = await kcDoSignIn(parsed.url, parsed.via === 'connect' ? 'connect' : parsed.via === 'paste' ? 'paste' : 'auto');
       return sendJson(res, r.ok ? 200 : r.status === 400 ? 400 : 200, { ok: r.ok, error: r.error || null, kc: kcBody() });
     }
@@ -1102,7 +1113,7 @@ const frameServer = http.createServer((req, res) => {
 frameServer.on('upgrade', (req, socket, head) => {
   const p = (req.url || '').split('?')[0];
   if (p !== BASE_PATH && !p.startsWith(BASE_PATH + '/')) return socket.destroy();
-  if (!upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort: framePort })) {
+  if (isWebviewHost(req.headers.host) || !upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort: framePort })) {
     log('refused WebSocket upgrade', `host=${String(req.headers.host).slice(0, 80)}`, `origin=${String(req.headers.origin).slice(0, 80)}`);
     socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;

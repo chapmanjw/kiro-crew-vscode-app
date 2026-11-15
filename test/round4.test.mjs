@@ -277,9 +277,13 @@ test('dashboardOrigins: the gateway origin in both loopback spellings, plus the 
 test('the chip-hiding CSS matches the manifest chip by its icon class, never by text', () => {
   assert.equal(CHIP_ICON, manifest.contributes.sessionControls[0].icon);
   const css = chipHideCss();
-  assert.match(css, /^button\[data-session-control-chip\]:has\(svg\.lucide-package\)\{display:none !important\}/);
+  // V5 S-6: our chip only, by its label and icon; another app's Package chip is kept.
+  assert.equal(manifest.contributes.sessionControls[0].label, 'VS Code');
+  assert.ok(!('statusPath' in manifest.contributes.sessionControls[0]), 'no status, so the aria-label is the label alone');
+  assert.match(css, /^button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)\{display:none !important\}/);
+  assert.throws(() => chipHideCss('Package', 'x"]{}'));
   assert.match(chipHideCss('AudioLines'), /lucide-audio-lines/);
-  assert.doesNotMatch(css, /VS Code|aria-label|title/);
+  assert.doesNotMatch(css, /title=/);
 });
 
 test('the page has no overlay or docked column; it signs the tunnel in with the dashboard session', () => {

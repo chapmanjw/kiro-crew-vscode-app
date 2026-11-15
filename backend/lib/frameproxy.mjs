@@ -209,6 +209,39 @@ export function isLoopbackHost(hostHeader) {
   return h === '127.0.0.1' || h === 'localhost' || h === '[::1]' || /^[a-z0-9-]{1,63}\.localhost$/.test(h);
 }
 
+/** A self-hosted webview origin (`<uuid>.localhost:<port>`), not the workbench's own 127.0.0.1/localhost. */
+export function isWebviewHost(hostHeader) {
+  const h = String(hostHeader || '').replace(/:\d+$/, '').toLowerCase();
+  return /^[a-z0-9-]{1,63}\.localhost$/.test(h);
+}
+
+const WEBVIEW_PRE = '/out/vs/workbench/contrib/webview/browser/pre/';
+
+/**
+ * What a webview origin may fetch from the frame listener: GET or HEAD of the
+ * webview host files only, `<base path>/<product path>/static/out/vs/workbench/contrib/webview/browser/pre/<file>`.
+ * Everything else is 403, `/vscode-remote-resource` (any file the account can
+ * read, remoteExtensionHostAgentServer.ts:157-188) and the workbench included:
+ * webview URLs carry the frame key in their path, so without this gate script
+ * in any webview could reach the whole workbench with the connection token
+ * the proxy adds. A webview's own resources go through its service worker and
+ * the workbench (postMessage), not this listener.
+ */
+export function webviewRequestAllowed(method, rawUrl, basePath) {
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  const target = String(rawUrl || '');
+  if (!target.startsWith('/')) return false;
+  const p = target.split('?')[0];
+  // No encoding tricks and no dot segments: the path must be the plain file path.
+  if (/%|\\|\/\.{1,2}(\/|$)|\/\//.test(p)) return false;
+  const prefix = `${basePath}/`;
+  if (!p.startsWith(prefix)) return false;
+  const rest = p.slice(prefix.length); // <product path>/static/out/vs/.../pre/<file>
+  const m = /^[A-Za-z0-9._-]+\/static(\/.*)$/.exec(rest);
+  if (!m || !m[1].startsWith(WEBVIEW_PRE)) return false;
+  return /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(m[1].slice(WEBVIEW_PRE.length));
+}
+
 /**
  * A WebSocket upgrade to the workbench must come to a loopback Host and either
  * carry no Origin (non-browser clients) or the frame's own origin

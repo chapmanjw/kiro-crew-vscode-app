@@ -139,7 +139,7 @@ const holder = {
   owner: null, // the mounted page's token, or null while unmounted
   kind: '', // last resolved dashboard kind, so a remount styles itself at once
   // Tunnel sign-in from this page (the smoke reads these).
-  kcAuto: false, // the automatic attempt for this page load has run
+  kcAutoEpoch: null, // the tunnel epoch the automatic attempt last ran for (once per page load and epoch)
   kcSeenConnect: null, // last connectRequests reading
   sessionSeq: 0, // GET /api/session requests sent
   sessionApplied: 0, // the newest one applied
@@ -300,6 +300,18 @@ function storeFolder(v) {
  * external_origin_unavailable until Settings has a dashboard URL
  * (auth_mobile.py:105-111); the tab then offers the paste field.
  */
+/**
+ * The one-time setup that lets the dashboard mint links: dashboard.url set to
+ * the dashboard's own origin. The dashboard cannot write it (the config PATCH
+ * refuses URL-valued keys, handlers/config_all_settings.py TEXT_EDIT_PATHS),
+ * so the page shows the CLI command (cli_parser_gateway.py:443) and never
+ * changes config itself. The value takes effect after a restart
+ * (config/sections_dashboard.py, restart=True).
+ */
+function dashboardUrlCommand() {
+  return `kirocrew config set dashboard.url ${window.location.origin}`;
+}
+
 async function mintAndSignIn(api, via) {
   let entry = { via, ok: false, status: 0 };
   try {
@@ -312,10 +324,11 @@ async function mintAndSignIn(api, via) {
       entry.error = done.error || null;
     } else {
       const code = (j && (j.code || j.error)) || `HTTP ${r.status}`;
+      entry.code = String(code).slice(0, 60);
       entry.error = code === 'external_origin_unavailable'
-        ? 'Kiro Crew can mint a sign-in link only when Settings has a dashboard URL (external_origin_unavailable). Paste a kirocrew token link instead.'
+        ? `This Kiro Crew has no dashboard URL, so it cannot mint a sign-in link (external_origin_unavailable). Run "${dashboardUrlCommand()}" and restart Kiro Crew; the tab then signs in by itself. Or paste a kirocrew token link into the tab.`
         : `the dashboard refused a sign-in link: ${code}`;
-      await call(api.post(`${API}/kc/sign-in`, { error: entry.error, via })).catch(() => {});
+      await call(api.post(`${API}/kc/sign-in`, { error: entry.error, code: entry.code, via })).catch(() => {});
     }
   } catch (e) {
     entry.error = errText(e);
@@ -512,22 +525,26 @@ export default function VsCodePane() {
       setKcBusy(false);
     }
   }, [loadSession]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Automatic sign-in: at most once per page load and tunnel epoch (the epoch
+  // moves when a session ends, say a 401 after 30 idle days), and never after
+  // the user pressed Disconnect, which the launcher keeps until Connect or a
+  // paste (V5 S-2, S-3).
+  const kcEpoch = kcState && Number.isInteger(kcState.epoch) ? kcState.epoch : 0;
+  const kcUserOff = !!(kcState && kcState.userDisconnected);
   useEffect(() => {
-    // The first tunnel reading of this page load decides: signed out, sign in
-    // now; already signed in, nothing to do. Either way it is used up, so a
-    // Disconnect later in this page load is not undone behind the user's back.
-    if (!kcAvailable || holder.kcAuto) return;
-    holder.kcAuto = true;
-    if (!kcConnected) signIn('auto');
-  }, [kcAvailable, kcConnected, signIn]);
+    if (!kcAvailable || holder.kcAutoEpoch === kcEpoch) return;
+    holder.kcAutoEpoch = kcEpoch;
+    if (!kcConnected && !kcUserOff) signIn('auto');
+  }, [kcAvailable, kcConnected, kcUserOff, kcEpoch, signIn]);
   useEffect(() => {
     if (kcRequests === null) return;
     const seen = holder.kcSeenConnect;
     holder.kcSeenConnect = kcRequests;
     // The first reading is a baseline; a lower count is a restarted launcher.
     if (seen === null || kcRequests <= seen) return;
-    if (!kcConnected) signIn('connect');
-  }, [kcRequests, kcConnected, signIn]);
+    // Even when the tunnel says connected: its session may be dead (V5 S-2).
+    signIn('connect');
+  }, [kcRequests, signIn]);
   const kcDisconnect = async () => {
     setKcBusy(true);
     try {
@@ -772,6 +789,20 @@ export default function VsCodePane() {
   // left the new API permissions unapproved).
   session && session.chat && session.chat.message
     ? h('div', { className: 'vscp-note', role: 'alert', 'data-testid': 'vscode-pane-chat-problem' }, `VS Code Chat: ${session.chat.message}`)
+    : null,
+  // The tab cannot sign in by itself until the dashboard has a URL (V5 S-1):
+  // say so with the one command that fixes it. Nothing is changed for you.
+  kcAvailable && !kcConnected && kcState && kcState.lastCode === 'external_origin_unavailable'
+    ? h('div', { className: 'vscp-note', role: 'status', 'data-testid': 'vscode-pane-kc-setup' },
+      'VS Code\'s Kiro Crew tab signs in with a link this dashboard mints, and it can mint one only once Settings has a dashboard URL. Run ',
+      h('code', { 'data-testid': 'vscode-pane-kc-setup-command' }, dashboardUrlCommand()),
+      ' and restart Kiro Crew; the tab then signs in by itself. Or paste a kirocrew token link into the tab. ',
+      h('button', {
+        type: 'button', className: 'vscp-btn', 'data-testid': 'vscode-pane-kc-setup-copy',
+        onClick: () => {
+          if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(dashboardUrlCommand()).then(() => setCrewResult('Command copied'), () => setCrewResult('Copy the command by hand'));
+        },
+      }, 'Copy command'))
     : null,
   h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay));
 }

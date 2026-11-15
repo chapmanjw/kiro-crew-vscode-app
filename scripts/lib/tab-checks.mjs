@@ -150,8 +150,8 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   // 4. The chip: hidden inside the tunnelled chat, another app's kept.
   const ef = embedFrame(page);
   const chips = await ef.evaluate(() => Array.from(document.querySelectorAll('[data-session-control-chip]')).map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
-  check('inside the tunnelled chat the app\'s "VS Code" chip is hidden and another app\'s chip shows',
-    chips.length === 2 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none', JSON.stringify(chips));
+  check('inside the tunnelled chat the app\'s "VS Code" chip is hidden while other apps\' chips show, one with the same Package icon included',
+    chips.length === 3 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none' && chips.find((c) => c.id.startsWith('package-app:'))?.display !== 'none', JSON.stringify(chips));
 
   // 5. The session stays in the launcher.
   const jar = await page.context().cookies();
@@ -206,6 +206,18 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     !!out && dash.logouts === logouts0 + 1 && !embedFrame(page) && pageState === 'false', JSON.stringify({ out, logouts: dash.logouts - logouts0, page: pageState }));
   check('after Disconnect the old tunnel origin is refused', (await rawRequest({ port: kcPort, path: '/', headers: { host: new URL(origin).host } })).status === 421);
 
+  // V5 S-3: reloading the dashboard does not undo the Disconnect.
+  const mintsBefore = hostServer.mints.length;
+  await page.reload();
+  await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
+  await sleep(6000);
+  const afterReload = (await api('GET', '/api/session')).json.kc;
+  check('after Disconnect, a dashboard reload leaves the tab signed out (no automatic sign-in)',
+    afterReload.connected === false && afterReload.userDisconnected === true && hostServer.mints.length === mintsBefore,
+    JSON.stringify({ connected: afterReload.connected, userDisconnected: afterReload.userDisconnected, mints: hostServer.mints.length - mintsBefore }));
+  await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click().catch(() => {});
+  await waitFor(async () => ((await viewFrame(page, framePort)) || {}).mode === 'signin', 30_000);
+
   // 9. (b) The tab's Connect button: the page mints the link on its next poll.
   await clearNotifications(page, frame);
   await inView(page, framePort, (f) => f.click('#connect', { timeout: 3000 }));
@@ -228,6 +240,10 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     return /external_origin_unavailable/.test(txt) ? txt : null;
   }, 20_000);
   check('(b) when the dashboard has no URL configured, Connect reports external_origin_unavailable in the tab and stays signed out', !!refused, String(refused || '').slice(0, 200));
+  const setupCmd = await waitFor(async () => page.locator('[data-testid="vscode-pane-kc-setup-command"]').textContent({ timeout: 1000 }).catch(() => null), 8000);
+  const pageOrigin = new URL(page.url()).origin;
+  check('V5 S-1: the page names the one-time fix, the exact command for this dashboard, and the tab says the same',
+    setupCmd === `kirocrew config set dashboard.url ${pageOrigin}` && /kirocrew config set dashboard\.url/.test(String(refused)), `${setupCmd}`);
   const link = gatewayMock.mintLink();
   await inView(page, framePort, async (f) => {
     await f.fill('#link', link, { timeout: 3000 });
@@ -253,6 +269,39 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     return null;
   }, 30_000);
   check('the Markdown preview renders from the self-hosted webview endpoint, with no webview from vscode-cdn.net', !!preview && cdnRequests.length === 0, `${preview}; cdn ${cdnRequests.length}`);
+  // V5 M-1: script in a webview cannot reach the workbench or any file through the frame proxy.
+  // The browser-side probe: a webview's own CSP may already stop the fetch.
+  // The direct probe below sends the same requests with the webview's real
+  // Host, which a webview page with a looser CSP would produce.
+  let probed = null;
+  let direct = null;
+  for (const f of page.frames()) {
+    if (!new RegExp(`^http://[a-z0-9]+\\.localhost:${framePort}/vsc-[^/]+/.*/pre/`).test(f.url())) continue;
+    if (!direct) {
+      const u = new URL(f.url());
+      const key = u.pathname.split('/')[1];
+      const file = encodeURIComponent(path.join(workspace, 'hello.txt'));
+      direct = {
+        remoteResource: (await rawRequest({ port: framePort, path: `/${key}/vscode-remote-resource?path=${file}`, headers: { host: u.host } })).status,
+        workbench: (await rawRequest({ port: framePort, path: `/${key}/`, headers: { host: u.host } })).status,
+        preFile: (await rawRequest({ port: framePort, path: u.pathname, headers: { host: u.host } })).status,
+        workbenchHostStillWorks: (await rawRequest({ port: framePort, path: `/${key}/vscode-remote-resource?path=${file}`, headers: { host: `127.0.0.1:${framePort}` } })).status,
+      };
+    }
+    probed = await f.evaluate(async (file) => {
+      const key = location.pathname.split('/')[1];
+      const out = {};
+      for (const [name, url] of [['remoteResource', `/${key}/vscode-remote-resource?path=${encodeURIComponent(file)}`], ['workbench', `/${key}/`], ['preRelative', './../../../../../../../vscode-remote-resource?path=' + encodeURIComponent(file)]]) {
+        out[name] = await fetch(url).then((r) => r.status, () => 'blocked');
+      }
+      return out;
+    }, path.join(workspace, 'hello.txt')).catch((e) => ({ error: e.message.slice(0, 80) }));
+    if (probed && !probed.error) break;
+  }
+  check('V5 M-1: a webview origin gets /vscode-remote-resource and the workbench refused (403) while its own pre/ files load and the preview renders',
+    !!direct && !!preview && direct.remoteResource === 403 && direct.workbench === 403 && direct.preFile === 200 && direct.workbenchHostStillWorks === 200 &&
+      !!probed && Object.values(probed).every((v) => v === 403 || v === 'blocked'),
+    JSON.stringify({ direct, inBrowser: probed }));
   // Leave the editors as the later restore checks expect: no preview, hello.txt active.
   for (let i = 0; i < 4; i++) {
     await runCommand(page, frame, 'View: Close All Editors');

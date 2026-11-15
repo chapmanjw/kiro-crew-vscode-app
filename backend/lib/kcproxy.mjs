@@ -37,7 +37,10 @@ import { restrictToUser } from './secretkey.mjs';
 const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade']);
 const DROP_REQ = new Set(['cookie', 'origin', 'host', 'referer', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'accept-encoding']);
 
-/** Routes that mint credentials or change security setup: never through the tunnel. */
+/**
+ * Routes that mint, reveal or hand out credentials, or change security setup:
+ * never through the tunnel, whatever the method (V5 review section 2).
+ */
 export const DENY = [
   /^\/api\/token\/local(\/|$)/i,
   /^\/api\/logout(\/|$)/i,
@@ -48,6 +51,24 @@ export const DENY = [
   /^\/api\/webhooks\/tokens(\/|$)/i,
   /^\/api\/relay-viewer\/token(\/|$)/i,
   /^\/api\/secrets(\/|$|-)/i,
+  /^\/api\/reveal(\/|$)/i,
+  /^\/api\/connections\/(mint|premint|oauth-clients)(\/|$)/i,
+  /^\/api\/mcp\/oauth\/relay(\/|$)/i,
+  /^\/api\/kas-login\/(device|loopback|poll|cancel|logout)(\/|$)/i,
+  /^\/api\/channels\/(whatsapp|weixin)\/(qr|unlink)(\/|$)/i,
+];
+
+/**
+ * Prefixes the tab may read but never change: guest invites and their
+ * credentials, security settings (credential redaction), cron secret grants,
+ * channel and gateway configuration.
+ */
+export const DENY_MUTATING = [
+  /^\/api\/shared-crew(\/|$)/i,
+  /^\/api\/security(\/|$)/i,
+  /^\/api\/crons\/[^/]+\/secrets(\/|$)/i,
+  /^\/api\/(whatsapp|weixin)\/config(\/|$)/i,
+  /^\/api\/config(\/|$)/i,
 ];
 
 /** The request path, decoded and with repeated slashes collapsed, for the deny list. */
@@ -61,9 +82,17 @@ export function normalPath(url) {
   return p.replace(/\/{2,}/g, '/').replace(/\/\.(?=\/|$)/g, '');
 }
 
-export function denied(url) {
-  const p = normalPath(url);
-  return p === null || /\/\.\.(\/|$)/.test(p) || DENY.some((re) => re.test(p));
+/**
+ * Whether the tunnel refuses a request target. Only origin-form targets
+ * (`/path?query`) pass: an absolute-form target (`http://host/path`) would
+ * slip past the path rules while the gateway still routed it (V5 S-4).
+ */
+export function denied(url, method = 'GET') {
+  const raw = String(url || '');
+  if (!raw.startsWith('/')) return true;
+  const p = normalPath(raw);
+  if (p === null || /\/\.\.(\/|$)/.test(p) || DENY.some((re) => re.test(p))) return true;
+  return !['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase()) && DENY_MUTATING.some((re) => re.test(p));
 }
 
 /** A sign-in link (`http://host/?token=…`) or a bare link token, to the token; null when it is neither. */
@@ -93,14 +122,14 @@ export function jwtExp(token) {
 }
 
 /** Capture mc_token_* / mc_refresh_* from Set-Cookie lines into `session` ({token, refresh}); true if it changed. */
-export function captureCookies(setCookie, session) {
+export function captureCookies(setCookie, session, port = null) {
   let changed = false;
   for (const line of [].concat(setCookie || [])) {
     const [pair, ...attrs] = String(line).split(';');
     const eq = pair.indexOf('=');
     if (eq < 1) continue;
-    const m = /^mc_(token|refresh)_\d+$/.exec(pair.slice(0, eq).trim());
-    if (!m) continue;
+    const m = /^mc_(token|refresh)_(\d+)$/.exec(pair.slice(0, eq).trim());
+    if (!m || (port !== null && Number(m[2]) !== port)) continue;
     const kind = m[1] === 'token' ? 'token' : 'refresh';
     const value = pair.slice(eq + 1).trim().replace(/^"|"$/g, '');
     const dead = value === '' || attrs.some((a) => /^\s*max-age\s*=\s*(0|-\d+)\s*$/i.test(a) || (/^\s*expires\s*=/i.test(a) && Date.parse(a.split('=')[1]) < Date.now()));
@@ -141,15 +170,17 @@ export function loadKcState(file) {
     token: ok(v && v.token),
     refresh: ok(v && v.refresh),
     signedInAt: v && typeof v.signedInAt === 'string' ? v.signedInAt : null,
+    // The user pressed Disconnect: no automatic sign-in until Connect or a paste (V5 S-3).
+    userDisconnected: !!(v && v.userDisconnected === true),
   };
 }
 
 export function saveKcState(file, st, { restrict = restrictToUser } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: st.label, port: st.port, token: st.token, refresh: st.refresh, signedInAt: st.signedInAt }) + '\n', { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify({ label: st.label, port: st.port, token: st.token, refresh: st.refresh, signedInAt: st.signedInAt, userDisconnected: !!st.userDisconnected }) + '\n', { mode: 0o600 });
   fs.renameSync(tmp, file);
-  restrict(file);
+  return restrict(file);
 }
 
 /**
@@ -167,12 +198,15 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
   let port = 0;
   let refreshChain = Promise.resolve();
   let lastError = '';
+  // Bumped whenever the session is cleared (Disconnect, a 401); a refresh that
+  // started before the bump must not write its cookies back (V5 N-1).
+  let epoch = 0;
   const publicHost = () => `${st.label}.localhost:${port}`;
   const publicOrigin = () => `http://${publicHost()}`;
   const upstreamHost = () => `127.0.0.1:${port}`;
   const persist = () => {
     try {
-      saveKcState(stateFile, st, { restrict });
+      if (!saveKcState(stateFile, st, { restrict })) log('kc: could not restrict data/state/kc-session.json to this user');
     } catch (e) {
       log(`kc: could not save the session (${e.code || e.message})`);
     }
@@ -214,10 +248,23 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     return h;
   }
 
-  function rewriteHeaders(h) {
+  /** The session is dead: forget it so the page or Connect can sign in again (V5 S-2). */
+  function dropSession(why) {
+    if (!st.token && !st.refresh) return;
+    st.token = '';
+    st.refresh = '';
+    st.signedInAt = null;
+    epoch++;
+    lastError = why;
+    log(`kc session ended (${why})`);
+    changed();
+  }
+
+  function rewriteHeaders(h, startEpoch = epoch) {
     const out = { ...h };
-    if (captureCookies(out['set-cookie'], st)) {
+    if (startEpoch === epoch && captureCookies(out['set-cookie'], st, port)) {
       if (st.token && !st.signedInAt) st.signedInAt = new Date().toISOString();
+      if (st.token) st.userDisconnected = false;
       if (!st.token && !st.refresh) st.signedInAt = null;
       changed();
     }
@@ -238,12 +285,18 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
 
   /** Forward one request upstream; resolves when the response is finished. */
   function forward(req, res, pathname, body) {
+    const startEpoch = epoch;
     return new Promise((resolve) => {
       const up = http.request(
         { host: gatewayHost, port: gatewayPort, method: req.method, path: req.url, headers: upstreamHeaders(req.rawHeaders, { hasOrigin: req.headers.origin !== undefined, pathname }) },
         (upRes) => {
           log(`kc ${req.method} ${pathname} ${upRes.statusCode}`);
-          const h = rewriteHeaders(upRes.headers);
+          if (upRes.statusCode < 500) lastError = '';
+          // A 401 from the session's own checks means it is over (expired,
+          // revoked, kirocrew logout): stop reporting it as connected.
+          const sessionCheck = /^\/api\/auth\/(refresh|me)$/i.test(pathname) && !/[?&]token=/.test(req.url);
+          if (upRes.statusCode === 401 && sessionCheck && startEpoch === epoch) dropSession(`${pathname} answered 401`);
+          const h = rewriteHeaders(upRes.headers, startEpoch);
           const html = String(h['content-type'] || '').startsWith('text/html') && !h['content-encoding'] && css;
           if (!html) {
             res.writeHead(upRes.statusCode || 502, h);
@@ -291,7 +344,11 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       res.writeHead(refused === 'host' ? 421 : 403, { 'content-type': 'text/plain' });
       return res.end(refused === 'host' ? 'misdirected' : 'forbidden');
     }
-    if (denied(req.url)) {
+    if (!String(req.url).startsWith('/')) {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      return res.end('origin-form request targets only');
+    }
+    if (denied(req.url, req.method)) {
       log(`kc denied ${req.method} ${pathname}`);
       res.writeHead(403, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ error: 'not available in the VS Code tab', code: 'kc_tunnel_denied' }));
@@ -304,8 +361,25 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       // Buffer the (small) body, then forward after any refresh in flight, so
       // the second request carries the rotated cookie.
       const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', () => serialRefresh(() => forward(req, res, pathname, Buffer.concat(chunks))));
+      let size = 0;
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > 16 * 1024) {
+          req.destroy();
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on('end', () => {
+        if (size > 16 * 1024) return;
+        serialRefresh(() => forward(req, res, pathname, Buffer.concat(chunks)));
+      });
+      req.on('close', () => {
+        if (size > 16 * 1024 && !res.headersSent) {
+          res.writeHead(413);
+          res.end();
+        }
+      });
       return;
     }
     forward(req, res, pathname);
@@ -318,9 +392,9 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     socket.on('close', () => sockets.delete(socket));
     const refused = gate(req);
     const pathname = normalPath(req.url) || '/';
-    if (refused || denied(req.url)) {
+    if (refused || denied(req.url, 'GET')) {
       log(`kc refused WebSocket ${pathname} (${refused || 'denied'})`);
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.end(refused === 'host' ? 'HTTP/1.1 421 Misdirected Request\r\nConnection: close\r\n\r\n' : 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
     const upstream = net.connect(gatewayPort, gatewayHost, () => {
@@ -350,18 +424,19 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
   server.headersTimeout = 60_000;
 
   /** A request from the launcher itself to the gateway, as the tunnel's own origin. */
-  function selfRequest(method, p) {
+  function selfRequest(method, p, cookies = null) {
+    const startEpoch = epoch;
     return new Promise((resolve) => {
       const pathname = normalPath(p) || '/';
       const headers = { host: upstreamHost(), origin: `http://${upstreamHost()}`, 'x-forwarded-for': '127.0.0.1', accept: 'application/json' };
-      const c = cookieHeader(pathname);
+      const c = cookies !== null ? cookies : cookieHeader(pathname);
       if (c) headers.cookie = c;
       if (method !== 'GET') headers['content-length'] = '0';
       const req = http.request({ host: gatewayHost, port: gatewayPort, method, path: p, headers }, (res) => {
         const chunks = [];
         res.on('data', (x) => chunks.push(x));
         res.on('end', () => {
-          if (captureCookies(res.headers['set-cookie'], st)) changed();
+          if (cookies === null && startEpoch === epoch && captureCookies(res.headers['set-cookie'], st, port)) changed();
           let body = null;
           try {
             body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -420,6 +495,8 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       const exp = jwtExp(st.token);
       return {
         connected: !!(st.token || st.refresh),
+        userDisconnected: !!st.userDisconnected,
+        epoch,
         accessExpiresAt: exp ? new Date(exp * 1000).toISOString() : null,
         canRefresh: !!st.refresh,
         signedInAt: st.signedInAt,
@@ -441,9 +518,15 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       const r = await selfRequest('GET', `/api/auth/me?token=${encodeURIComponent(t)}`);
       if (r.status === 200 && st.token) {
         st.signedInAt = new Date().toISOString();
+        st.userDisconnected = false;
         lastError = '';
         changed();
         log('kc signed in');
+        // The session this replaced would stay valid for up to 30 days: end it.
+        if (before.token || before.refresh) {
+          const old = [before.token ? `mc_token_${port}=${before.token}` : '', before.refresh ? `mc_refresh_${port}=${before.refresh}` : ''].filter(Boolean).join('; ');
+          selfRequest('POST', '/api/auth/logout', old).then((x) => log(`kc replaced session logged out (${x.status})`));
+        }
         return { ok: true, status: 200 };
       }
       // A refused link leaves the earlier session as it was.
@@ -460,14 +543,10 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       return serialRefresh(async () => {
         const r = await selfRequest('POST', '/api/auth/refresh');
         if (r.status !== 200) {
-          lastError = (r.body && (r.body.code || r.body.error)) || `HTTP ${r.status}`;
-          if (r.status === 401) {
-            st.token = '';
-            st.refresh = '';
-            st.signedInAt = null;
-            changed();
-          }
-          return { ok: false, error: lastError };
+          const why = (r.body && (r.body.code || r.body.error)) || `HTTP ${r.status}`;
+          if (r.status === 401) dropSession(why);
+          lastError = why;
+          return { ok: false, error: why };
         }
         return { ok: true };
       });
@@ -477,11 +556,17 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
      * auth_refresh.py:882-898), forget the session and rotate the origin, so a
      * frame still holding the old URL gets 421.
      */
-    async disconnect() {
+    disconnect() {
+      // After any refresh in flight, so it cannot write cookies back (V5 N-1).
+      return serialRefresh(() => this.disconnectNow());
+    },
+    async disconnectNow() {
       if (st.token || st.refresh) await selfRequest('POST', '/api/auth/logout');
+      epoch++;
       st.token = '';
       st.refresh = '';
       st.signedInAt = null;
+      st.userDisconnected = true;
       st.label = newLabel();
       lastError = '';
       changed();

@@ -12,7 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { createKcProxy, denied, linkToken, captureCookies, withFrameAncestors, jwtExp, DENY } from '../backend/lib/kcproxy.mjs';
+import { createKcProxy, denied, linkToken, captureCookies, withFrameAncestors, jwtExp, DENY, loadKcState } from '../backend/lib/kcproxy.mjs';
 import { chipHideCss } from '../backend/lib/chipcss.mjs';
 import { createGatewayMock } from './support/gateway-mock.mjs';
 
@@ -145,7 +145,7 @@ test('pages through the tunnel: frame headers rewritten, chip stylesheet added, 
   assert.equal(page.headers['referrer-policy'], 'no-referrer');
   assert.match(page.headers['content-security-policy'], /frame-ancestors http:\/\/localhost:5476 http:\/\/127\.0\.0\.1:4100 http:\/\/\*\.localhost:4100$/);
   assert.match(page.headers['content-security-policy'], /default-src 'self'/, 'the rest of the CSP is kept');
-  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]:has\(svg\.lucide-package\)/);
+  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)/);
   assert.equal(page.headers['content-length'], String(Buffer.byteLength(page.body)));
   assert.ok(mock.rec.dash.xff > x0, 'X-Forwarded-For reached the gateway');
   assert.equal(mock.rec.dash.badOrigin, 0, 'Host and Origin rewritten to the same-origin loopback form');
@@ -214,4 +214,97 @@ test('a restarted launcher keeps the origin, port and session; Disconnect signs 
   assert.equal(saved.token, '');
   assert.equal(saved.refresh, '');
   assert.ok(!lines.some((l) => /token=|mc_token|mc_refresh/.test(l)), 'no credential in the log');
+});
+
+// ---------------------------------------------------------------- V5 review
+
+test('V5 S-4: only origin-form targets; an absolute-form target never reaches the gateway', async (t) => {
+  const { kc, mock, H, origin, host } = await setup(t);
+  await kc.signIn(mock.mintLink());
+  const before = mock.rec.dash.forbiddenHits.length;
+  const n0 = mock.rec.requests.length;
+  for (const target of ['http://127.0.0.1/api/auth/mobile-link', `http://${host}/api/token/local`, '*', 'api/auth/me']) {
+    const r = await req(kc.port, { method: 'POST', path: target, headers: H({ origin }) });
+    assert.equal(r.status, 400, target);
+  }
+  assert.equal(mock.rec.dash.forbiddenHits.length, before);
+  assert.equal(mock.rec.requests.length, n0, 'nothing forwarded');
+  assert.equal(denied('http://127.0.0.1/api/auth/mobile-link'), true);
+  assert.match(await wsOpen(kc.port, host, origin, 'http://127.0.0.1/api/ws'), /403/);
+});
+
+test('V5 S-5: setup and credential routes for others are refused; reading them is not', () => {
+  for (const [m, p] of [['POST', '/api/shared-crew/ssm/invites'], ['POST', '/api/shared-crew/tailscale/invites/x/resend'], ['DELETE', '/api/shared-crew/tailscale/credential'],
+    ['PUT', '/api/security/credential-redaction'], ['POST', '/api/kas-login/device'], ['POST', '/api/kas-login/loopback'], ['POST', '/api/kas-login/logout'],
+    ['POST', '/api/connections/mint'], ['GET', '/api/connections/mint'], ['POST', '/api/connections/premint'], ['GET', '/api/connections/oauth-clients'], ['POST', '/api/mcp/oauth/relay'],
+    ['PUT', '/api/crons/job-1/secrets'], ['POST', '/api/channels/whatsapp/qr/start'], ['POST', '/api/channels/weixin/qr/start'], ['POST', '/api/reveal'], ['PUT', '/api/config/kirocrew'], ['PATCH', '/api/config/kirocrew']]) {
+    assert.equal(denied(p, m), true, `${m} ${p}`);
+  }
+  for (const [m, p] of [['GET', '/api/security/credential-redaction'], ['GET', '/api/shared-crew/sessions'], ['GET', '/api/config/kirocrew'], ['POST', '/api/chat'], ['POST', '/api/chat/slots/x/approve'], ['GET', '/api/kas-login']]) {
+    assert.equal(denied(p, m), false, `${m} ${p}`);
+  }
+});
+
+test('V5 S-2: a 401 from the session checks ends the stored session, so sign-in can run again', async (t) => {
+  const { kc, mock, H, origin, stateFile } = await setup(t);
+  await kc.signIn(mock.mintLink());
+  const e0 = kc.status().epoch;
+  assert.equal(kc.status().connected, true);
+  mock.rec.dash.sessions.clear(); // kirocrew logout, 30 idle days: the gateway forgets it
+  for (const k of mock.rec.dash.refresh.keys()) mock.rec.dash.refresh.get(k).used = true;
+  assert.equal((await req(kc.port, { path: '/api/auth/me', headers: H() })).status, 401);
+  assert.equal(kc.status().connected, false, 'no longer reported as connected');
+  assert.equal(kc.status().epoch, e0 + 1);
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.equal(saved.token, '');
+  assert.equal(saved.refresh, '');
+  assert.equal(kc.status().userDisconnected, false, 'not a user Disconnect: automatic sign-in may run');
+  assert.equal((await kc.signIn(mock.mintLink())).ok, true);
+  // A refresh 401 through the launcher does the same.
+  mock.rec.dash.sessions.clear();
+  for (const k of mock.rec.dash.refresh.keys()) mock.rec.dash.refresh.get(k).used = true;
+  assert.equal((await kc.refresh()).ok, false);
+  assert.equal(kc.status().connected, false);
+  assert.ok(origin);
+});
+
+test('V5 S-3: Disconnect is persisted until a non-automatic sign-in', async (t) => {
+  const { kc, mock, stateFile } = await setup(t);
+  await kc.signIn(mock.mintLink());
+  await kc.disconnect();
+  assert.equal(kc.status().userDisconnected, true);
+  assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).userDisconnected, true, 'survives a launcher restart');
+  assert.equal(loadKcState(stateFile).userDisconnected, true);
+  assert.equal((await kc.signIn(mock.mintLink())).ok, true);
+  assert.equal(kc.status().userDisconnected, false);
+  assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).userDisconnected, false);
+});
+
+test('V5 N-1, N-3, N-4, N-7, N-8: refresh vs disconnect, foreign-port cookies, WS host, body cap, replaced chain', async (t) => {
+  const { kc, mock, H, origin, host } = await setup(t);
+  await kc.signIn(mock.mintLink());
+  // N-1: a refresh in flight when Disconnect is pressed does not write cookies back.
+  const inflight = req(kc.port, { method: 'POST', path: '/api/auth/refresh', headers: H({ origin, 'content-length': '0' }) });
+  await new Promise((r) => setTimeout(r, 20));
+  await kc.disconnect();
+  await inflight;
+  assert.equal(kc.status().connected, false);
+  // N-3: an expiry for another port's cookie does not touch ours.
+  const s = { token: 'A', refresh: 'R' };
+  assert.equal(captureCookies(['mc_token_1=; Max-Age=0', 'mc_refresh_1=; Max-Age=0'], s, 4000), false);
+  assert.deepEqual(s, { token: 'A', refresh: 'R' });
+  // N-4: a WebSocket to the wrong host is 421, like HTTP.
+  assert.match(await wsOpen(kc.port, `127.0.0.1:${kc.port}`, origin), /^HTTP\/1\.1 421/);
+  // N-7: an oversized refresh body is refused.
+  const newHost = new URL(kc.origin).host;
+  const big = await req(kc.port, { method: 'POST', path: '/api/auth/refresh', headers: { host: newHost, origin: kc.origin, 'content-length': String(20 * 1024) }, body: 'x'.repeat(20 * 1024) }).catch(() => ({ status: 0 }));
+  assert.ok(big.status === 413 || big.status === 0, String(big.status));
+  // N-8: signing in again over a live session logs the old chain out.
+  await kc.signIn(mock.mintLink());
+  const logouts = mock.rec.dash.logouts;
+  await kc.signIn(mock.mintLink());
+  for (let i = 0; i < 40 && mock.rec.dash.logouts === logouts; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(mock.rec.dash.logouts, logouts + 1);
+  assert.equal((await req(kc.port, { path: '/api/auth/me', headers: { host: newHost } })).status, 200, 'the new session still works');
+  assert.ok(host);
 });

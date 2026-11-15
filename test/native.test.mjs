@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
+import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -427,6 +428,34 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     for (let i = 0; i < 200 && !fs.existsSync(path.join(serverDir, 'bridge.json')); i++) await sleep(50);
     br = JSON.parse(fs.readFileSync(path.join(serverDir, 'bridge.json'), 'utf8'));
     assert.ok(br.secret && br.url, 'the stand-in server got the bridge address and secret');
+
+    // V5 M-1: a webview origin (<uuid>.localhost on the frame port) gets only the
+    // webview host files; the workbench, /vscode-remote-resource (any file) and
+    // POSTs are 403, though the same paths work for the workbench's own host.
+    let sess = null;
+    for (let i = 0; i < 200 && !(sess && sess.url); i++) {
+      sess = (await proxy('GET', '/api/session')).json;
+      if (!(sess && sess.url)) await sleep(50);
+    }
+    const wb = new URL(sess.url);
+    const key = wb.pathname.replace(/\/$/, '');
+    const raw = (host, method, p) => new Promise((resolve) => {
+      const r = http.request({ host: '127.0.0.1', port: Number(wb.port), method, path: p, headers: { host, ...(method === 'POST' ? { 'content-length': '0' } : {}) } }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      r.on('error', () => resolve(0));
+      r.end();
+    });
+    const webview = `0a1b2c3d4e.localhost:${wb.port}`;
+    const pre = `${key}/stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=1`;
+    assert.equal(await raw(webview, 'GET', pre), 200, 'webview host files load');
+    for (const [m, p] of [['GET', `${key}/vscode-remote-resource?path=/C:/Users/x/secret.txt`], ['GET', `${key}/`], ['POST', pre],
+      ['GET', `${key}/stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/../../../../../../../../vscode-remote-resource?path=/x`],
+      ['GET', `${key}/stable-abc/static/out/vs/code/browser/workbench/workbench.js`]]) {
+      assert.equal(await raw(webview, m, p), 403, `${m} ${p.replace(key, '/vsc-<key>')}`);
+    }
+    assert.equal(await raw(`127.0.0.1:${wb.port}`, 'GET', `${key}/vscode-remote-resource?path=/x`), 200, 'the workbench itself still reaches it');
     // the extension says hello with this window's folder
     assert.equal((await bridgeCall('POST', '/api/bridge/events', { type: 'hello', host: 'h1', workspaceFolders: [workspace] })).status, 204);
 
@@ -482,6 +511,17 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal((await bridgeCall('POST', '/api/bridge/kc/connect', {}, 'h1')).json.connectRequests, 1);
     assert.equal((await proxy('GET', '/api/session')).json.kc.connectRequests, 1);
     assert.equal((await proxy('POST', '/api/kc/disconnect', {})).json.kc.connected, false);
+    // V5 S-3: after Disconnect an automatic sign-in is refused (it would undo it
+    // on the next dashboard reload); Connect or a paste still works.
+    const st3 = (await proxy('GET', '/api/session')).json.kc;
+    assert.equal(st3.userDisconnected, true);
+    const autoAgain = await proxy('POST', '/api/kc/sign-in', { url: mock.mintLink(), via: 'auto' });
+    assert.equal(autoAgain.status, 409);
+    assert.equal(autoAgain.json.code, 'user_disconnected');
+    assert.equal((await proxy('GET', '/api/session')).json.kc.connected, false);
+    // V5 S-1: the page's reason for a refused mint is kept with its code for the setup note.
+    const noUrl = (await proxy('POST', '/api/kc/sign-in', { error: 'no dashboard URL', code: 'external_origin_unavailable', via: 'connect' })).json;
+    assert.equal(noUrl.kc.lastCode, 'external_origin_unavailable');
     const k2 = (await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1')).json;
     assert.notEqual(k2.origin, k.json.origin, 'Disconnect rotates the origin');
     assert.equal((await bridgeCall('POST', '/api/bridge/kc/sign-in', { url: mock.mintLink() }, 'h1')).json.ok, true, 'a pasted link signs in');

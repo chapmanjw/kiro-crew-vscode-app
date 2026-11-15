@@ -79,7 +79,10 @@ async function refreshKc(opened) {
 
 function renderCrewView() {
   if (!crewView) return;
-  const key = JSON.stringify([kcInfo && kcInfo.available, kcInfo && kcInfo.connected, kcInfo && kcInfo.origin, kcInfo && kcInfo.slot, kcInfo && kcInfo.lastError, kcInfo && kcInfo.reason]);
+  // lastError only matters to the sign-in panel; while the frame shows, a new
+  // error must not reload it and drop what the user typed (V5 N-5).
+  const connectedNow = !!(kcInfo && kcInfo.connected);
+  const key = JSON.stringify([kcInfo && kcInfo.available, connectedNow, kcInfo && kcInfo.origin, kcInfo && kcInfo.slot, connectedNow ? null : kcInfo && kcInfo.lastError, kcInfo && kcInfo.reason]);
   if (key === kcRendered) return;
   kcRendered = key;
   const nonce = require('crypto').randomBytes(16).toString('base64');
@@ -100,7 +103,13 @@ const crewViewProvider = {
       reportCrewView();
       if (view.visible) refreshKc(true);
     });
+    // Every window looks again now and then while its tab shows, because the
+    // launcher's kcChanged reaches only the newest window (V5 N-2).
+    const poll = setInterval(() => {
+      if (view.visible) refreshKc(false);
+    }, 30_000);
     view.onDidDispose(() => {
+      clearInterval(poll);
       if (crewView === view) crewView = null;
       reportCrewView();
     });

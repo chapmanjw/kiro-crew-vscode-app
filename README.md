@@ -439,12 +439,14 @@ the bridge sends commands only to the extension host that said hello last.
   conversationOnly, expandSteps}`; `/embed/chat` renders the same composer.
   The fallback is a stylesheet the tunnel adds only to the dashboard HTML it
   serves to the tab (`chipHideCss` in `backend/lib/chipcss.mjs`): it hides
-  `button[data-session-control-chip]` whose icon `<svg>` has the class
-  `lucide-package` (the chip's `Package` icon, rendered by lucide-react with
-  that class in both versions), and the chip row's wrapper when that was its
-  only chip. It never matches by text, and the real dashboard never gets it. Limit: another app's chip that also uses the `Package` icon
-  (or an unknown icon, which falls back to `Package`) is hidden in the tab too. A Kiro Crew change that adds a per-surface visibility rule to
-  session controls would replace this.
+  `button[data-session-control-chip][aria-label="VS Code"]` whose icon `<svg>`
+  has the class `lucide-package`, and the chip row's wrapper when that was its
+  only chip. The real dashboard never gets it. The host puts no app identity on
+  the chip, so its label (the aria-label is the label alone, since this app
+  declares no `statusPath`, `ContextShelf.tsx:117-148`) plus its icon is the
+  narrowest stable match; another app's `Package` chip keeps showing. A Kiro
+  Crew change that adds a per-surface visibility rule to session controls would
+  replace this.
 - Theme. On mount, on every dashboard theme change and after each server
   restart the page POSTs to `/apps/vscode-pane/api/theme`. The body always has
   `kind` (`"dark"` or `"light"`), taken in this order: the palette name on
@@ -492,12 +494,24 @@ R5).
     the webview origins `http://*.localhost:<frame port>`), and
     `Referrer-Policy` is `no-referrer` because the host name is the
     capability.
-  - Refused before the gateway: `/api/token/local`, `/api/logout`,
-    `/api/auth/mobile-link`, `/api/tailnet/*`, the instance connect,
-    refresh-token and embed-token routes, `/api/apps/*/token`,
-    `/api/webhooks/tokens`, `/api/relay-viewer/token` and `/api/secrets*`
-    (after decoding and collapsing the path). `/sw.js` is 404, so the shell's
-    service worker does not claim the origin.
+  - Only origin-form request targets (`/path`) pass; anything else is 400, so
+    an absolute-form `http://host/path` cannot slip past the path rules.
+  - Refused before the gateway, any method (after decoding and collapsing the
+    path): `/api/token/local`, `/api/logout`, `/api/auth/mobile-link`,
+    `/api/tailnet/*`, the instance connect, refresh-token and embed-token
+    routes, `/api/apps/*/token`, `/api/webhooks/tokens`,
+    `/api/relay-viewer/token`, `/api/secrets*`, `/api/reveal`,
+    `/api/connections/{mint,premint,oauth-clients}`, `/api/mcp/oauth/relay`,
+    the `/api/kas-login` device, loopback, poll, cancel and logout steps, and
+    the WhatsApp and Weixin QR pairing and unlink routes.
+  - Readable but never changed from the tab (any method but GET, HEAD and
+    OPTIONS is refused): `/api/shared-crew/*` (guest invites and their
+    credentials), `/api/security/*` (credential redaction),
+    `/api/crons/*/secrets`, `/api/whatsapp/config`, `/api/weixin/config` and
+    `/api/config/*`. This is a deny list, not an allow list: the chat UI calls
+    dozens of routes, and a new Kiro Crew release would add more, so an allow
+    list would break the tab on the first update. `/sw.js` is 404, so the
+    shell's service worker does not claim the origin.
   - Refreshes (`POST /api/auth/refresh`) run one at a time, so two tabs never
     replay a refresh token and revoke the chain.
   - The launcher log gets one line per request: method, path and status, never
@@ -510,6 +524,13 @@ R5).
   a public origin reaching loopback. As a side effect every webview (Markdown
   preview, extension pages, Claude Code's tab) works offline. The smoke test
   checks the Markdown preview and that no webview loads from vscode-cdn.net.
+  Webview URLs carry the frame key in their path, so the frame listener treats
+  any `*.localhost` Host as a webview and serves it only GET or HEAD of the
+  webview host files under `.../out/vs/workbench/contrib/webview/browser/pre/`;
+  everything else is 403, `/vscode-remote-resource` (any file your account can
+  read) and the workbench included, and webview origins never get a WebSocket.
+  A webview's own resources load through its service worker and the workbench,
+  not this listener.
 - Signing the tab in. The tab needs a Kiro Crew session of its own; the
   launcher keeps it and the browser never sees it. Approval is by possession of
   a sign-in link, as for any other device (`docs/guides/remote-and-mobile.md`).
@@ -521,7 +542,10 @@ R5).
      it. It hands the link to the launcher (`POST /api/kc/sign-in`), which
      trades it for a session the way the dashboard's sign-in banner does
      (`GET /api/auth/me?token=…` through the tunnel). Nobody has to do anything.
-     It runs once per page load, so a Disconnect is not undone behind your back.
+     It runs at most once per page load, and again only after the session
+     ended on its own (a 401: 30 idle days, `kirocrew logout`). A Disconnect is
+     kept in `kc-session.json`, so no reload signs the tab in again until you
+     press Connect or paste a link.
   2. Connect. The tab's Connect button asks the page (through the launcher) to
      do the same again.
   3. Paste. The tab has a field for a sign-in link from `kirocrew token` or the
@@ -531,10 +555,27 @@ R5).
   The gateway mints a mobile link only when Settings has a dashboard URL
   (`dashboard.url`), otherwise it answers 409 `external_origin_unavailable`
   (`handlers/auth_mobile.py:105-111`), and it refuses app tokens
-  (`auth_mobile.py:83-88`). Without a dashboard URL, ways 1 and 2 report that
-  in the tab and the page's toolbar, and the paste field is the way in. Only
-  the link's `token` parameter is used, so a link minted for any origin of the
-  same gateway works.
+  (`auth_mobile.py:83-88`). Only the link's `token` parameter is used, so a
+  link minted for any origin of the same gateway works.
+
+  A fresh Kiro Crew desktop install has no dashboard URL, and nothing else a
+  signed-in dashboard page can call mints a sign-in link or a session: the
+  mobile link takes no origin parameter (it reads only `app["dashboard_url"]`,
+  set at boot, `server.py:920`), the tailnet QR needs Tailscale, the Remote Crew
+  connect and embed-token routes mint from another machine's gateway over SSH,
+  the desktop window gets its token from the local owner secret in Electron's
+  main process, and the preload exposes no token API (`website/electron/preload.js`).
+  The dashboard cannot set the URL either: the config PATCH refuses URL-valued
+  keys (`handlers/config_all_settings.py`, `TEXT_EDIT_PATHS`), and the value
+  takes effect only after a restart (`config/sections_dashboard.py`,
+  `restart=True`). So when the mint answers 409, the page shows the one-time fix
+  with a Copy button, `kirocrew config set dashboard.url <this dashboard's
+  origin>` (`cli_parser_gateway.py:443`), and says to restart Kiro Crew; after
+  that the tab signs in by itself every time. The tab's sign-in panel says the
+  same and keeps the paste field. The app never changes your config. Setting
+  `dashboard.url` to the loopback origin you already use keeps the gateway's
+  port and adds no new CSRF origin; Kiro Crew also uses it in links it posts to
+  Slack and other channels.
 - What the session can do. It is a full owner dashboard session, the same user
   as the desktop window, because the chat UI needs dozens of routes and the full
   event stream; no narrower token runs it (R5 section 6.3). The gateway itself
@@ -548,23 +589,29 @@ R5).
   the session and refresh cookie values. The access cookie lasts up to 1 hour
   and is refreshed by the dashboard code in the tab; the refresh cookie lasts 30
   days and slides. The tab therefore stays signed in across launcher, gateway
-  and VS Code restarts for up to 30 idle days. As with the secret-storage key,
-  Kiro Crew agents run as your user and can read that file.
+  and VS Code restarts for up to 30 idle days. When the gateway answers 401 on
+  its session checks (`/api/auth/me`, `/api/auth/refresh`), the tunnel forgets
+  the session, so the page's automatic sign-in or Connect can run again.
+  Reading that file gives more than the tab has: a client that sends those
+  cookies straight to the gateway, without the tunnel's X-Forwarded-For, counts
+  as direct local and regains secret reveal and config writes. Any process
+  running as you, Kiro Crew agents included, can read it; on a single-user
+  machine a second key on disk would not change that.
 - Disconnect. "Kiro Crew: Disconnect the Kiro Crew Tab" (the view's title
   action, or the command palette) and the page toolbar's Disconnect button
   call `POST /api/auth/logout` through the tunnel (that session only), delete
   the stored cookies and rotate the host name, so a frame still holding the
-  old URL gets 421. `kirocrew logout` still ends every session everywhere.
+  old URL gets 421. The choice is kept until you press Connect or paste a link.
+  `kirocrew logout` still ends every session everywhere. Pasting a new link
+  while signed in logs the old session out.
   Signing out inside the tab works too: the tunnel applies the cookie deletion.
 - The chip. Inside the tab the app's own "VS Code" composer chip is hidden: you
   are already in VS Code. No supported way exists (see the VS Code chip in "The
   page in the dashboard"), so the tunnel adds a stylesheet to the dashboard HTML
   it serves (`backend/lib/chipcss.mjs`). That copy exists only inside VS Code;
-  the real dashboard is untouched. It hides `button[data-session-control-chip]`
-  whose icon `<svg>` has the class `lucide-package`, and the chip row's wrapper
-  when that was its only chip. It never matches by text. Limit: another app's
-  chip that also uses the `Package` icon (or an unknown icon, which falls back
-  to `Package`) is hidden in the tab too.
+  the real dashboard is untouched. It hides the chip labelled "VS Code" whose
+  icon `<svg>` has the class `lucide-package`, and the chip row's wrapper when
+  that was its only chip. Another app's `Package` chip keeps showing.
 - Folders. The tab follows the window's first folder; a folder change reloads
   the frame on that folder's slot. Session tabs, "+" and the all-tabs menu are
   the embed route's own (`EmbedTabStrip`).
@@ -894,10 +941,15 @@ own machine; swap it for original art before any public release of this app.
 
 1. Install into the live Kiro Crew 0.13.0-rc.1 desktop app from the staged
    copy and check, live:
-   - Opening the VS Code page signs the Kiro Crew tab in with no step from
-     you. If the toolbar says `external_origin_unavailable`, either set a
-     dashboard URL in Settings and press Connect, or paste a `kirocrew token`
-     link into the tab.
+   - With no dashboard URL the page shows the setup note. Run its command
+     (`kirocrew config set dashboard.url http://localhost:5476`, or whatever
+     origin the note shows), restart Kiro Crew, and the tab should then sign
+     in by itself with no paste. Check whether `kirocrew` runs on this Windows
+     install; if it does not, add `"url": "http://localhost:5476"` under
+     `dashboard` in `~/.kiro/crew/config.json` by hand, or paste a
+     `kirocrew token` link.
+   - Security Posture may report the session pin as shared (the tunnel's
+     requests are proxied); that is expected.
    - The tab shows the real chat for the folder's "VS Code: <folder>" session,
      a turn streams, an approval can be answered there, and the session tabs,
      pickers and side panels work in a side-bar-wide view.

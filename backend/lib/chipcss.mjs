@@ -12,12 +12,21 @@
 
 /** app.json contributes.sessionControls[0].icon; AppIcon renders it as <svg class="lucide lucide-package"> */
 export const CHIP_ICON = 'Package';
+/**
+ * app.json contributes.sessionControls[0].label. The chip's aria-label is the
+ * label alone while the control has no status (ContextShelf.tsx:117-148; this
+ * app declares no statusPath). The host renders no app-identity attribute on
+ * the chip, so label plus icon is the narrowest stable match: another app's
+ * Package-icon chip (Package is AppIcon's fallback) keeps showing (V5 S-6).
+ */
+export const CHIP_LABEL = 'VS Code';
 
-export function chipHideCss(icon = CHIP_ICON) {
+export function chipHideCss(icon = CHIP_ICON, label = CHIP_LABEL) {
   const cls = `lucide-${String(icon).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()}`;
   if (!/^lucide-[a-z0-9-]+$/.test(cls)) throw new Error('bad icon name');
-  const chip = `button[data-session-control-chip]:has(svg.${cls})`;
-  const other = `button[data-session-control-chip]:not(:has(svg.${cls}))`;
+  if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) throw new Error('bad label');
+  const chip = `button[data-session-control-chip][aria-label="${label}"]:has(svg.${cls})`;
+  const other = `button[data-session-control-chip]:not([aria-label="${label}"]:has(svg.${cls}))`;
   // The chip, and the chip row's wrapper when ours was its only chip.
   return `${chip}{display:none !important}\ndiv:has(> ${chip}):not(:has(> ${other})){display:none !important}`;
 }
