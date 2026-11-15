@@ -103,39 +103,71 @@ export function luminance({ r, g, b }) {
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-/**
- * dark or light, from the background colour; the palette name (`dracula-dark`,
- * `kiro-light`, a custom theme) only breaks a tie when no background is known.
- */
-export function themeKind(bgHex, themeName = '') {
+/** 'light' or 'dark' when a palette name says so (`dracula-dark`, `kiro-light`, `light`), else ''. */
+export function kindFromName(name) {
+  const m = /(?:^|[^a-z])(light|dark)(?:$|[^a-z])/i.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/** dark or light from a background colour; '' when it cannot be parsed. */
+export function kindFromBackground(bgHex) {
   const bg = parseColor(bgHex);
+  if (!bg) return '';
   // 0.179 is where black and white text have equal contrast on the background.
-  if (bg) return luminance(bg) < 0.179 ? 'dark' : 'light';
-  return /light/i.test(String(themeName)) ? 'light' : 'dark';
+  return luminance(bg) < 0.179 ? 'dark' : 'light';
+}
+
+/**
+ * The dashboard's light/dark kind, always one of the two. In order: the
+ * palette name on `data-theme`, the SDK's useTheme mode (pass it only when the
+ * root really carries `data-theme`: with no attribute the SDK reports a
+ * hard-coded 'dark', website/src/app-sdk/index.ts useTheme), the luminance of
+ * `--bg`, the OS colour scheme, then dark.
+ */
+export function resolveKind({ themeName = '', sdkMode = '', bg = '', prefersDark } = {}) {
+  return (
+    kindFromName(themeName) ||
+    kindFromName(sdkMode) ||
+    kindFromBackground(bg) ||
+    (prefersDark === true ? 'dark' : prefersDark === false ? 'light' : '') ||
+    'dark'
+  );
+}
+
+/** Back-compatible wrapper: kind from a background, the name breaking a tie. */
+export function themeKind(bgHex, themeName = '') {
+  return kindFromBackground(bgHex) || kindFromName(themeName) || 'dark';
 }
 
 /**
  * Build the POST /api/theme body from raw colour strings (already resolved by
- * the browser). Translucent values are composited over `--bg` so every value
- * the backend gets is an opaque `#rrggbb`.
+ * the browser). `kind` is always present. `vars` holds only the tokens that
+ * resolved to a colour, each as an opaque `#rrggbb` (translucent values are
+ * composited over `--bg`); when none could be read the body is `{kind}` alone,
+ * which tells the backend to use the stock VS Code Default Dark/Light theme.
  *
  * @param {Record<string,string>} raw  token name -> computed colour string
  * @param {string} themeName  `data-theme` of the dashboard root
+ * @param {{sdkMode?: string, prefersDark?: boolean}} [hints]
  */
-export function buildThemePayload(raw, themeName = '') {
-  const bgParsed = parseColor(raw['--bg']);
-  // A translucent background is put over white or black by the theme's name.
-  const base = /light/i.test(themeName) ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+export function buildThemePayload(raw, themeName = '', hints = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const bgParsed = parseColor(src['--bg']);
+  const nameKind = kindFromName(themeName) || kindFromName(hints.sdkMode);
+  // A translucent background is put over white or black by the palette's kind.
+  const base = nameKind === 'light' ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
   const bg = bgParsed ? blend(bgParsed, base) : null;
   const vars = {};
   for (const name of THEME_VARS) {
-    const c = parseColor(raw[name]);
+    const c = parseColor(src[name]);
     if (!c) continue;
     // --bg itself goes over the base, everything else over the composited --bg.
     const under = name === '--bg' ? base : bg || base;
-    vars[name] = rgbToHex(c.a < 1 ? blend(c, under) : c);
+    const hex = rgbToHex(c.a < 1 ? blend(c, under) : c);
+    if (/^#[0-9a-f]{6}$/.test(hex)) vars[name] = hex;
   }
-  return { kind: themeKind(vars['--bg'], themeName), vars };
+  const kind = resolveKind({ themeName, sdkMode: hints.sdkMode, bg: vars['--bg'], prefersDark: hints.prefersDark });
+  return Object.keys(vars).length ? { kind, vars } : { kind };
 }
 
 /** The folder a page URL asks for (`?folder=`), or '' when none. */

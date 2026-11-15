@@ -8,7 +8,9 @@
 //  - 'react' from esm.sh and '@kirocrew/app-sdk' as a small shim (useAppApi,
 //    useTheme, useNavigate, useNotify)
 //  - two palettes with the dashboard's token names (design-tokens.css):
-//    `dracula-dark` (default) and `light`; window.__standin.setTheme(name) flips
+//    `dracula-dark` (default) and `light`; window.__standin.setTheme(name) flips.
+//    Any other name (e.g. `plain-light`) defines no tokens at all, for the
+//    fallback path where the page cannot read the palette
 //  - forwards /apps/vscode-pane/api/* to the launcher's /api/*, signing each
 //    request with X-KiroCrew-Proxy exactly like kiro_crew/apps/routes_proxy.py,
 //    and strips cookies on the way, as the real proxy does
@@ -62,7 +64,7 @@ export function useTheme() {
 // Token names from website/src/styles/design-tokens.css; values: a Dracula-style
 // dark palette (John's live theme) and the dashboard's default light palette.
 const PALETTES = `
-:root,[data-theme="dracula-dark"]{
+[data-theme="dracula-dark"]{
   --bg:#21222c;--bg-accent:#232530;--bg-elevated:#282a36;--bg-hover:#343746;
   --card:#262833;--card-fg:#f8f8f2;--panel:#21222c;--panel-strong:#282a36;
   --text:#f8f8f2;--text-strong:#ffffff;--muted:#a3a6c4;--muted-strong:#6272a4;
@@ -83,7 +85,7 @@ const PALETTES = `
   --diff-add:rgba(46,160,67,.15);--diff-add-text:#116329;--diff-del:rgba(248,81,73,.15);--diff-del-text:#82071e;
   --radius-sm:6px;--radius-md:8px;--radius-lg:12px;--radius-xl:16px;--shadow-sm:0 1px 2px rgba(0,0,0,.06);
 }
-html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:13px system-ui}
+html,body{margin:0;height:100%;background:var(--bg,#808080);color:var(--text,#000);font:13px system-ui}
 #shell{display:grid;grid-template-columns:64px 1fr;height:100vh}
 #rail{margin:8px 0 8px 8px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;gap:6px;padding:8px 0;align-items:center}
 #rail button{width:44px;height:36px;border-radius:10px;border:0;background:transparent;color:var(--muted);cursor:pointer;font:11px system-ui}

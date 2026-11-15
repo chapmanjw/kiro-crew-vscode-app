@@ -16,6 +16,7 @@ import {
   API,
   THEME_VARS,
   buildThemePayload,
+  resolveKind,
   folderFromSearch,
   frameKey,
   framePlacement,
@@ -56,29 +57,44 @@ function errText(e) {
 // ---------------------------------------------------------------------------
 
 const STYLE_ID = 'vscode-pane-style-0-3-0';
+// Each colour is the dashboard's variable when it is set. When it is not, the
+// fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
+// Default Dark / Default Light colours, the same base the backend falls back to
+// when it gets {kind} without vars.
 const CSS = `
+.vscp-themed{--vscp-bg:var(--bg,#1f1f1f);--vscp-elev:var(--bg-elevated,#181818);--vscp-hover:var(--bg-hover,#2b2b2b);
+  --vscp-text:var(--text,#cccccc);--vscp-muted:var(--muted,#9d9d9d);--vscp-border:var(--border,#2b2b2b);
+  --vscp-border-strong:var(--border-strong,#3c3c3c);--vscp-accent:var(--accent,#0078d4);--vscp-accent-fg:var(--accent-fg,#ffffff);
+  --vscp-accent-hover:var(--accent-hover,#026ec1);--vscp-ring:var(--ring,#0078d4);--vscp-ok:var(--ok,#89d185);
+  --vscp-warn:var(--warn,#cca700);--vscp-danger:var(--danger,#f85149);--vscp-shadow:var(--shadow-sm,none)}
+.vscp-themed[data-vscp-kind="light"]{--vscp-bg:var(--bg,#ffffff);--vscp-elev:var(--bg-elevated,#f8f8f8);--vscp-hover:var(--bg-hover,#e8e8e8);
+  --vscp-text:var(--text,#3b3b3b);--vscp-muted:var(--muted,#6e6e6e);--vscp-border:var(--border,#e5e5e5);
+  --vscp-border-strong:var(--border-strong,#cecece);--vscp-accent:var(--accent,#005fb8);--vscp-accent-fg:var(--accent-fg,#ffffff);
+  --vscp-accent-hover:var(--accent-hover,#0258a8);--vscp-ring:var(--ring,#005fb8);--vscp-ok:var(--ok,#388a34);
+  --vscp-warn:var(--warn,#bf8803);--vscp-danger:var(--danger,#e51400)}
 .vscp-card{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;box-sizing:border-box;
-  margin:${INSET}px;background:var(--bg-elevated,#1a1d25);color:var(--text,#e4e4e7);
-  border:1px solid var(--border,#27272a);border-radius:var(--radius-xl,${RADIUS_FALLBACK}px);box-shadow:var(--shadow-sm,none);
+  margin:${INSET}px;background:var(--vscp-elev);color:var(--vscp-text);
+  border:1px solid var(--vscp-border);border-radius:var(--radius-xl,${RADIUS_FALLBACK}px);box-shadow:var(--vscp-shadow);
   font-family:var(--font-body,system-ui,sans-serif)}
 .vscp-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:6px;height:34px;min-height:34px;padding:0 8px 0 12px;
-  box-sizing:border-box;border-bottom:1px solid var(--border,#27272a);font-size:12px;overflow:hidden;white-space:nowrap}
+  box-sizing:border-box;border-bottom:1px solid var(--vscp-border);font-size:12px;overflow:hidden;white-space:nowrap}
 .vscp-group{display:flex;align-items:center;gap:4px;min-width:0}
-.vscp-muted{color:var(--muted,#909098)}
+.vscp-muted{color:var(--vscp-muted)}
 .vscp-input{font:inherit;font-size:12px;height:24px;box-sizing:border-box;padding:0 6px;border-radius:var(--radius-sm,6px);min-width:0;
-  border:1px solid var(--border,#27272a);background:var(--bg,#12141a);color:var(--text,#e4e4e7);outline:none}
-.vscp-input:focus{border-color:var(--accent,#00d492);box-shadow:0 0 0 1px var(--ring,var(--accent,#00d492))}
+  border:1px solid var(--vscp-border);background:var(--vscp-bg);color:var(--vscp-text);outline:none}
+.vscp-input:focus{border-color:var(--vscp-accent);box-shadow:0 0 0 1px var(--vscp-ring)}
 .vscp-btn{font:inherit;font-size:12px;height:24px;box-sizing:border-box;padding:0 8px;border-radius:var(--radius-sm,6px);cursor:pointer;
-  border:1px solid var(--border,#27272a);background:transparent;color:var(--text,#e4e4e7);white-space:nowrap}
-.vscp-btn:hover{background:var(--bg-hover,#262a35);border-color:var(--border-strong,#3f3f46)}
-.vscp-btn:focus-visible{outline:2px solid var(--ring,var(--accent,#00d492));outline-offset:1px}
-.vscp-btn-primary{background:var(--accent,#00d492);color:var(--accent-fg,#000);border-color:transparent}
-.vscp-btn-primary:hover{background:var(--accent-hover,var(--accent,#00d492));border-color:transparent}
+  border:1px solid var(--vscp-border);background:transparent;color:var(--vscp-text);white-space:nowrap}
+.vscp-btn:hover{background:var(--vscp-hover);border-color:var(--vscp-border-strong)}
+.vscp-btn:focus-visible{outline:2px solid var(--vscp-ring);outline-offset:1px}
+.vscp-btn-primary{background:var(--vscp-accent);color:var(--vscp-accent-fg);border-color:transparent}
+.vscp-btn-primary:hover{background:var(--vscp-accent-hover);border-color:transparent}
 .vscp-dot{width:8px;height:8px;border-radius:4px;display:inline-block;flex:none}
-.vscp-sep{width:1px;height:16px;background:var(--border,#27272a);flex:none}
+.vscp-sep{width:1px;height:16px;background:var(--vscp-border);flex:none}
 .vscp-truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.vscp-body{position:relative;flex:1 1 auto;min-height:0;background:var(--bg,#12141a)}
+.vscp-body{position:relative;flex:1 1 auto;min-height:0;background:var(--vscp-bg)}
 .vscp-overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:13px}
+.vscp-frame-host{background:var(--vscp-bg)}
 `;
 
 function ensureStyle() {
@@ -90,12 +106,12 @@ function ensureStyle() {
 }
 
 const STATUS_VAR = {
-  ready: 'var(--ok,#22c55e)',
-  starting: 'var(--warn,#eab308)',
-  provisioning: 'var(--warn,#eab308)',
-  error: 'var(--danger,#ef4444)',
-  stopped: 'var(--muted,#909098)',
-  idle: 'var(--muted,#909098)',
+  ready: 'var(--vscp-ok)',
+  starting: 'var(--vscp-warn)',
+  provisioning: 'var(--vscp-warn)',
+  error: 'var(--vscp-danger)',
+  stopped: 'var(--vscp-muted)',
+  idle: 'var(--vscp-muted)',
 };
 
 // ---------------------------------------------------------------------------
@@ -110,17 +126,20 @@ const holder = {
   loads: 0,
   session: null, // last session seen, so a remount shows the live frame at once
   owner: null, // the mounted page's token, or null while unmounted
+  kind: '', // last resolved dashboard kind, so a remount styles itself at once
 };
 
 function ensureFrame() {
   if (holder.wrap && holder.wrap.isConnected) return holder;
   const wrap = document.createElement('div');
   wrap.setAttribute('data-vscode-pane-frame-host', '');
+  wrap.className = 'vscp-themed vscp-frame-host';
+  wrap.setAttribute('data-vscp-kind', holder.kind || 'dark');
   // Fixed on <body>, above the dashboard's <main> content but under its
   // popovers and dialogs (z-50 and up), and invisible until a page claims it.
   Object.assign(wrap.style, {
     position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px', zIndex: '2',
-    visibility: 'hidden', pointerEvents: 'none', overflow: 'hidden', background: 'var(--bg,#12141a)',
+    visibility: 'hidden', pointerEvents: 'none', overflow: 'hidden',
   });
   const iframe = document.createElement('iframe');
   iframe.title = 'VS Code';
@@ -185,6 +204,7 @@ function readThemeRaw() {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const raw = {};
   try {
+    if (!ctx) return raw;
     const declared = getComputedStyle(probe);
     for (const name of THEME_VARS) {
       if (!declared.getPropertyValue(name).trim()) continue;
@@ -193,16 +213,12 @@ function readThemeRaw() {
       const computed = getComputedStyle(probe).color; // rgb(), rgba(), or color(srgb ...) for color-mix
       if (!computed) continue;
       // Paint it to read back sRGB bytes; this handles every syntax the browser knows.
-      if (ctx) {
-        ctx.clearRect(0, 0, 1, 1);
-        ctx.fillStyle = '#000';
-        ctx.fillStyle = computed;
-        ctx.fillRect(0, 0, 1, 1);
-        const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
-        raw[name] = `rgba(${r}, ${g}, ${b}, ${Math.round((a / 255) * 1000) / 1000})`;
-      } else {
-        raw[name] = computed;
-      }
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = '#000';
+      ctx.fillStyle = computed;
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+      raw[name] = `rgba(${r}, ${g}, ${b}, ${Math.round((a / 255) * 1000) / 1000})`;
     }
   } finally {
     probe.remove();
@@ -210,9 +226,31 @@ function readThemeRaw() {
   return raw;
 }
 
-function currentThemePayload() {
-  const name = document.documentElement.dataset.theme || '';
-  return buildThemePayload(readThemeRaw(), name);
+/**
+ * Always returns a body with `kind`. `vars` is present only when at least one
+ * token resolved to a colour; a page that cannot read them sends `{kind}`,
+ * and the backend then uses stock VS Code Default Dark or Light.
+ */
+function currentThemePayload(sdkMode) {
+  const root = document.documentElement;
+  const name = root.getAttribute('data-theme') || '';
+  // The SDK's mode is the same attribute, defaulting to 'dark' when it is
+  // absent, so it only counts when the attribute is really there.
+  const hints = {
+    sdkMode: root.hasAttribute('data-theme') ? sdkMode || '' : '',
+    prefersDark: window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : undefined,
+  };
+  let raw = {};
+  try {
+    raw = readThemeRaw();
+  } catch {
+    raw = {};
+  }
+  try {
+    return buildThemePayload(raw, name, hints);
+  } catch {
+    return { kind: resolveKind({ themeName: name, sdkMode: hints.sdkMode, prefersDark: hints.prefersDark }) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +301,7 @@ export default function VsCodePane() {
   const [openLine, setOpenLine] = useState('');
   const [openResult, setOpenResult] = useState('');
   const [editor, setEditor] = useState(null);
+  const [kind, setKind] = useState(holder.kind || 'dark');
   const rootRef = useRef(null);
   const placeholderRef = useRef(null);
 
@@ -356,13 +395,13 @@ export default function VsCodePane() {
   // Theme: send the dashboard palette on mount, on every theme change, and to
   // each new server generation (a restarted server starts from defaults).
   const lastTheme = useRef('');
+  const sdkModeRef = useRef('');
+  sdkModeRef.current = (sdkTheme && sdkTheme.mode) || '';
   const postTheme = useCallback((force) => {
-    let payload;
-    try {
-      payload = currentThemePayload();
-    } catch {
-      return;
-    }
+    const payload = currentThemePayload(sdkModeRef.current);
+    holder.kind = payload.kind;
+    setKind(payload.kind);
+    if (holder.wrap) holder.wrap.setAttribute('data-vscp-kind', payload.kind);
     const text = JSON.stringify(payload);
     if (!force && text === lastTheme.current) return;
     lastTheme.current = text;
@@ -560,7 +599,8 @@ export default function VsCodePane() {
     ref: rootRef,
     // `sidebar sidebar-inner` are the theme hooks the Sessions panel card carries
     // (listShell.ts), so theme packs that retint that card retint this one.
-    className: 'vscp-card sidebar sidebar-inner',
+    className: 'vscp-themed vscp-card sidebar sidebar-inner',
+    'data-vscp-kind': kind,
     // The height is set every frame from the space left in <main>, so the card
     // neither grows past the window nor depends on how the host wraps the page.
     style: { flex: '0 0 auto' },

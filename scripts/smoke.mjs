@@ -260,6 +260,28 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
   await page.evaluate(() => window.__standin.setTheme('dracula-dark'));
   check('switching back to the dark theme re-POSTs it', !!(await waitTheme((b) => b.kind === 'dark' && b.vars['--bg'] === '#21222c', beforeDark)));
 
+  // Fallback: a palette whose tokens cannot be read sends {kind} alone, and the
+  // card falls back to stock VS Code Default Light / Dark colours by that kind.
+  const cardBgNow = () => page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="vscode-pane-card"]')).backgroundColor);
+  const kindOnly = (k) => (b) => b.kind === k && !('vars' in b) && Object.keys(b).length === 1;
+  let since = hostServer.themePosts.length;
+  await page.evaluate(() => window.__standin.setTheme('plain-light'));
+  const bareLight = await waitTheme(kindOnly('light'), since);
+  check('unreadable palette named *-light POSTs {kind: "light"} with no vars', !!bareLight, JSON.stringify(hostServer.themePosts.slice(-1).map((p) => p.body)));
+  const bgLight = await cardBgNow();
+  check('toolbar and card fall back to Default Light colours', bgLight === 'rgb(248, 248, 248)', bgLight);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  since = hostServer.themePosts.length;
+  await page.evaluate(() => window.__standin.setTheme('plain'));
+  const bareDark = await waitTheme(kindOnly('dark'), since);
+  check('unreadable palette with no light/dark name POSTs {kind} from the OS scheme (dark)', !!bareDark, JSON.stringify(hostServer.themePosts.slice(-1).map((p) => p.body)));
+  const bgDark = await cardBgNow();
+  check('toolbar and card fall back to Default Dark colours', bgDark === 'rgb(24, 24, 24)', bgDark);
+  await page.emulateMedia({ colorScheme: null });
+  since = hostServer.themePosts.length;
+  await page.evaluate(() => window.__standin.setTheme('dracula-dark'));
+  check('the readable palette comes back with vars', !!(await waitTheme((b) => b.kind === 'dark' && b.vars && b.vars['--bg'] === '#21222c', since)));
+
   // Item 5: leaving the page and coming back keeps the same workbench.
   const stateBefore = (await api('GET', '/api/state')).json;
   const helloBefore = stateBefore && stateBefore.extension && stateBefore.extension.at;

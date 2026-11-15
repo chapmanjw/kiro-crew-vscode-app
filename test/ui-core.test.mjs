@@ -10,7 +10,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
 const coreFile = fs.readdirSync(path.join(ROOT, 'ui')).find((f) => /^vscode-pane-core-.*\.mjs$/.test(f));
 const core = await import(pathToFileURL(path.join(ROOT, 'ui', coreFile)).href);
-const { parseColor, rgbToHex, blend, themeKind, buildThemePayload, folderFromSearch, appPageUrl, frameKey, framePlacement, THEME_VARS } = core;
+const { parseColor, rgbToHex, blend, themeKind, resolveKind, kindFromName, buildThemePayload, folderFromSearch, appPageUrl, frameKey, framePlacement, THEME_VARS } = core;
 
 test('parseColor reads hex, rgb(), rgba(), space syntax and color(srgb)', () => {
   assert.deepEqual(parseColor('#abc'), { r: 0xaa, g: 0xbb, b: 0xcc, a: 1 });
@@ -61,6 +61,34 @@ test('buildThemePayload: opaque hex for every known token, translucent ones comp
   // A translucent background is put over white for a light palette, black for a dark one.
   assert.equal(buildThemePayload({ '--bg': 'rgba(0, 0, 0, 0.5)' }, 'x-light').vars['--bg'], '#808080');
   assert.equal(buildThemePayload({ '--bg': 'rgba(255, 255, 255, 0.5)' }, 'x-dark').vars['--bg'], '#808080');
+});
+
+test('kindFromName reads the -dark/-light palette suffix and bare names only', () => {
+  for (const [n, k] of [['dracula-dark', 'dark'], ['kiro-light', 'light'], ['light', 'light'], ['dark', 'dark'], ['amoled-grey-calm-light', 'light'], ['highcontrast-dark', 'dark']]) assert.equal(kindFromName(n), k, n);
+  for (const n of ['', 'my-theme', 'darkness', 'lightyear', 'default', undefined, null]) assert.equal(kindFromName(n), '', String(n));
+});
+
+test('resolveKind: data-theme, then useTheme mode, then --bg luminance, then OS scheme, then dark', () => {
+  assert.equal(resolveKind({ themeName: 'kiro-light', sdkMode: 'dark', bg: '#000000' }), 'light');
+  assert.equal(resolveKind({ themeName: 'custom', sdkMode: 'solarized-light', bg: '#000000' }), 'light');
+  assert.equal(resolveKind({ themeName: 'custom', sdkMode: 'custom', bg: '#fdf6e3' }), 'light');
+  assert.equal(resolveKind({ themeName: 'custom', bg: '#002b36', prefersDark: false }), 'dark');
+  assert.equal(resolveKind({ prefersDark: false }), 'light');
+  assert.equal(resolveKind({ prefersDark: true }), 'dark');
+  assert.equal(resolveKind({}), 'dark');
+  assert.equal(resolveKind(), 'dark');
+});
+
+test('buildThemePayload falls back to {kind} alone when no variable could be read', () => {
+  assert.deepEqual(buildThemePayload({}, 'kiro-light'), { kind: 'light' });
+  assert.deepEqual(buildThemePayload({ '--bg': '', '--text': 'garbage', '--accent': 'oklab(0.5 0 0)' }, 'dracula-dark'), { kind: 'dark' });
+  assert.deepEqual(buildThemePayload(null, '', { prefersDark: false }), { kind: 'light' });
+  assert.deepEqual(buildThemePayload(undefined, 'my-theme', { sdkMode: 'nord-light' }), { kind: 'light' });
+  assert.ok(!('vars' in buildThemePayload({}, '')));
+  // With variables, kind still comes from the palette name before the background.
+  const p = buildThemePayload({ '--bg': '#ffffff' }, 'odd-dark');
+  assert.equal(p.kind, 'dark');
+  assert.deepEqual(p.vars, { '--bg': '#ffffff' });
 });
 
 test('THEME_VARS covers the tokens VS Code theming needs', () => {

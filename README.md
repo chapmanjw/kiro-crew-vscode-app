@@ -178,13 +178,19 @@ gateways send.
   glyph comes from the host's fixed set (`Package`), because session controls
   cannot use an app image.
 - Theme. On mount, on every dashboard theme change and after each server
-  restart the page reads the dashboard's effective colours (`--bg`,
-  `--bg-elevated`, `--panel`, `--border`, `--text`, `--muted`, `--accent` and
-  the other tokens in `ui/vscode-pane-core-0.3.0.mjs` `THEME_VARS`), resolves
-  each through the browser (including `color-mix()`), composites translucent
-  ones over `--bg`, and POSTs `{kind: "dark"|"light", vars: {"--bg": "#rrggbb",
-  ...}}` to `/apps/vscode-pane/api/theme`. `kind` comes from the background's
-  luminance, not the palette name. The backend applies it in VS Code.
+  restart the page POSTs to `/apps/vscode-pane/api/theme`. The body always has
+  `kind` (`"dark"` or `"light"`), taken in this order: the palette name on
+  `data-theme` (`dracula-dark`, `kiro-light`), the SDK's `useTheme` mode (only
+  when the attribute is really there, since the SDK reports `dark` when it is
+  missing), the luminance of `--bg`, the OS colour scheme, then dark. It has
+  `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
+  each is resolved by the browser (including `color-mix()`), translucent ones
+  are composited over `--bg`, and the list is `THEME_VARS` in
+  `ui/vscode-pane-core-0.3.0.mjs`. When none can be read the body is `{kind}`
+  alone, and the backend falls back to stock VS Code Default Dark or Default
+  Light. The toolbar degrades the same way: every colour is the dashboard
+  variable when set, and otherwise a Default Dark or Default Light colour picked
+  by `kind`.
 
 ### Open in VS Code from Kiro Crew file menus
 
@@ -285,7 +291,9 @@ a chat view whose composer shelf mounts the app's session control, and a router
 that unmounts the page when you leave it. With it the smoke test checks the
 card's radius, border and inset and the frame's clip; that the palette is POSTed
 on mount and again after switching to light and back, with every value as
-`#rrggbb`; that leaving the page unmounts it while the iframe stays in the
+`#rrggbb`; that a palette with no readable tokens POSTs `{kind}` alone (light
+from a `*-light` name, dark from the OS scheme for an unnamed one) and the card
+falls back to Default Light or Dark colours; that leaving the page unmounts it while the iframe stays in the
 document, hidden, and that coming back shows the same iframe element with no
 new workbench load, no new extension-host hello and the same editor tab; and
 that the composer chip lands on `/apps/vscode-pane?folder=<chat project>` and
