@@ -229,12 +229,16 @@ async function applyTheme(payload) {
       await cfg.update('workbench.colorTheme', t.colorTheme, target);
       changed = true;
     }
+    // Tier "base" sends no customizations: the stock theme only, so an earlier
+    // palette is removed from the user settings rather than left behind.
+    const wanted = Object.keys(t.colorCustomizations).length ? t.colorCustomizations : null;
     const curCust = cfg.inspect('workbench.colorCustomizations')?.globalValue;
-    if (stable(curCust) !== stable(t.colorCustomizations)) {
-      const keys = curCust && typeof curCust === 'object' ? Object.keys(curCust) : [];
-      const diff = Object.keys(t.colorCustomizations).find((k) => !curCust || curCust[k] !== t.colorCustomizations[k]) || keys.find((k) => !(k in t.colorCustomizations));
-      why.push(`colorCustomizations ${keys.length} keys -> ${Object.keys(t.colorCustomizations).length}, first difference ${diff}`);
-      await cfg.update('workbench.colorCustomizations', t.colorCustomizations, target);
+    const current = curCust && typeof curCust === 'object' && Object.keys(curCust).length ? curCust : null;
+    if (stable(current) !== stable(wanted)) {
+      const keys = current ? Object.keys(current) : [];
+      const diff = wanted ? Object.keys(wanted).find((k) => !current || current[k] !== wanted[k]) || keys.find((k) => !(k in wanted)) : '(cleared)';
+      why.push(`colorCustomizations ${keys.length} keys -> ${wanted ? Object.keys(wanted).length : 0}, first difference ${diff}`);
+      await cfg.update('workbench.colorCustomizations', wanted ?? undefined, target);
       changed = true;
     }
     log(`theme ${changed ? 'applied' : 'unchanged'} (${t.colorTheme})${why.length ? ': ' + why.join('; ') : ''}`);

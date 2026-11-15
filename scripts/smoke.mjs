@@ -189,13 +189,16 @@ function descendants(table, rootPid) {
   const out = [];
   const root = table.find((p) => p.pid === rootPid);
   if (root) out.push(root);
-  const queue = [rootPid];
+  // Windows keeps a dead parent's PID in ParentProcessId, and that PID can be
+  // reused by a process in our tree; a real child is never older than its parent.
+  const createdMs = (p) => { const m = /Date\((\d+)/.exec(p.created); return m ? Number(m[1]) : Date.parse(p.created) || 0; };
+  const queue = root ? [root] : [];
   while (queue.length) {
-    const pid = queue.shift();
+    const parent = queue.shift();
     for (const p of table) {
-      if (p.ppid === pid && !out.includes(p)) {
+      if (p.ppid === parent.pid && !out.includes(p) && createdMs(p) >= createdMs(parent)) {
         out.push(p);
-        queue.push(p.pid);
+        queue.push(p);
       }
     }
   }
@@ -522,8 +525,8 @@ async function main() {
       th && th.applied && th.readBack && th.readBack.colorTheme === 'Dark Modern' && th.readBack.editorBackground === seededVs.colorCustomizations['editor.background'],
       JSON.stringify(th && th.readBack),
     );
-    const badTheme = await api('POST', '/api/theme', { kind: 'dark', vars: { '--bg': 'red', '--text': '#ffffff' } });
-    check('POST /api/theme refuses a non-hex colour', badTheme.status === 400, `${badTheme.status} ${badTheme.json && badTheme.json.error}`);
+    const badTheme = await api('POST', '/api/theme', { kind: 'sepia' });
+    check('POST /api/theme refuses a body without a valid kind', badTheme.status === 400, `${badTheme.status} ${badTheme.json && badTheme.json.error}`);
     const unsignedTheme = await rawRequest({ port: PORT, method: 'POST', path: '/api/theme', headers: { 'content-type': 'application/json' }, body: JSON.stringify(POSTED_THEME) });
     check('POST /api/theme refuses an unsigned request', unsignedTheme.status === 401, String(unsignedTheme.status));
     const posted = await api('POST', '/api/theme', POSTED_THEME);
@@ -537,7 +540,7 @@ async function main() {
     const t9 = Date.now();
     while (Date.now() - t9 < 20_000) {
       th2 = (await api('GET', '/api/state')).json?.theme;
-      if (th2 && th2.readBack && th2.readBack.colorTheme === 'Light Modern') break;
+      if (th2 && th2.readBack && th2.readBack.colorTheme === 'Light Modern' && th2.readBack.count > 0) break;
       await sleep(300);
     }
     check(
@@ -558,6 +561,30 @@ async function main() {
     check('the posted theme is also seeded for the next start', machine2['workbench.colorTheme'] === 'Light Modern');
     const again = await api('POST', '/api/theme', POSTED_THEME);
     check('posting the same palette again changes nothing', again.json && again.json.changed === false);
+
+    // 7d. tier 2: a palette that fails the contrast check falls back to the
+    //     stock theme and the earlier palette is cleared from VS Code
+    const weak = await api('POST', '/api/theme', { kind: 'light', vars: { '--bg': '#fbf7ef', '--text': '#f0e8da' } });
+    check('a low-contrast palette is accepted as tier "base"', weak.status === 200 && weak.json.theme?.tier === 'base', JSON.stringify(weak.json && weak.json.theme && { tier: weak.json.theme.tier, reason: weak.json.theme.reason }));
+    let th5 = null;
+    const t9c = Date.now();
+    while (Date.now() - t9c < 20_000) {
+      th5 = (await api('GET', '/api/state')).json?.theme;
+      if (th5 && th5.readBack && th5.readBack.count === 0) break;
+      await sleep(300);
+    }
+    check('tier "base" clears the palette in VS Code (no colorCustomizations left)', th5 && th5.readBack && th5.readBack.count === 0 && th5.readBack.colorTheme === 'Light Modern', JSON.stringify(th5 && th5.readBack));
+    const sess5 = (await api('GET', '/api/session')).json;
+    check('session state reports the active theme tier', sess5 && sess5.theme && sess5.theme.tier === 'base' && sess5.theme.kind === 'light', JSON.stringify(sess5 && sess5.theme));
+    const restore = await api('POST', '/api/theme', POSTED_THEME);
+    let th6 = null;
+    const t9d = Date.now();
+    while (Date.now() - t9d < 20_000) {
+      th6 = (await api('GET', '/api/state')).json?.theme;
+      if (th6 && th6.readBack && th6.readBack.count > 0) break;
+      await sleep(300);
+    }
+    check('posting a sound palette again returns to tier "palette"', restore.json?.theme?.tier === 'palette' && th6 && th6.readBack && th6.readBack.count === Object.keys(wantVs.colorCustomizations).length, JSON.stringify(th6 && th6.readBack));
 
     // 8. Kiro Crew -> VS Code: open a file at a line
     const open = await api('POST', '/api/open', { path: target, line: 3, column: 6 });

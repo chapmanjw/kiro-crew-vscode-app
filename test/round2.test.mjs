@@ -360,3 +360,143 @@ test('router: theme and chat status are proxy-signed, bridge chat needs the brid
   assert.deepEqual(matchRoute('DELETE', '/api/theme', null), { error: 405 });
   assert.deepEqual(matchRoute('GET', '/vsc-abc/', null), { error: 404 }, 'the API port does not serve the frame');
 });
+
+// ---------------------------------------------------------------- two-tier theme (palette / base)
+
+import { resolveTheme, MIN_TEXT_CONTRAST } from '../backend/lib/theme.mjs';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
+import { fileURLToPath } from 'node:url';
+
+test('resolveTheme tier 1: a sound palette is used', () => {
+  const r = resolveTheme(DRACULA);
+  assert.equal(r.theme.tier, 'palette');
+  assert.equal(r.theme.reason, null);
+  const vs = toVsCodeTheme(r.theme);
+  assert.equal(vs.tier, 'palette');
+  assert.equal(vs.colorTheme, 'Dark Modern');
+  assert.ok(Object.keys(vs.colorCustomizations).length > 150);
+});
+
+test('resolveTheme tier 2: {kind} alone is valid and gives the stock theme', () => {
+  for (const kind of ['dark', 'light']) {
+    const r = resolveTheme({ kind });
+    assert.deepEqual(r.theme, { kind, vars: null, tier: 'base', reason: 'no palette sent' });
+    const vs = toVsCodeTheme(r.theme);
+    assert.deepEqual(vs, { colorTheme: kind === 'dark' ? 'Dark Modern' : 'Light Modern', colorCustomizations: {}, tier: 'base' });
+  }
+  assert.equal(resolveTheme({ kind: 'dark', vars: null }).theme.tier, 'base');
+});
+
+test('resolveTheme falls back to tier 2 for missing, malformed or low-contrast vars', () => {
+  const cases = [
+    [{ kind: 'dark', vars: [] }, /vars must be an object/],
+    [{ kind: 'dark', vars: 'x' }, /vars must be an object/],
+    [{ kind: 'dark', vars: { '--bg': '#000000' } }, /--text is required/],
+    [{ kind: 'dark', vars: { '--bg': '#000000', '--text': 'white' } }, /hex/],
+    [{ kind: 'dark', vars: { '--bg': '#000000', '--text': '#ffffff', '--font': '#111111' } }, /unknown variable/],
+    [{ kind: 'dark', vars: { '--bg': '#282a36', '--text': '#44475a' } }, /contrast 1\.\d\d:1 is below 4\.5:1/],
+    [{ kind: 'light', vars: { '--bg': '#ffffff', '--text': '#999999' } }, /contrast 2\.\d\d:1/],
+  ];
+  for (const [body, re] of cases) {
+    const r = resolveTheme(body);
+    assert.equal(r.error, undefined, JSON.stringify(body));
+    assert.equal(r.theme.tier, 'base', JSON.stringify(body));
+    assert.equal(r.theme.vars, null);
+    assert.equal(r.theme.kind, body.kind);
+    assert.match(r.theme.reason, re);
+  }
+  assert.equal(MIN_TEXT_CONTRAST, 4.5);
+  // Just above the bar is accepted.
+  assert.equal(resolveTheme({ kind: 'light', vars: { '--bg': '#ffffff', '--text': '#767676' } }).theme.tier, 'palette');
+});
+
+test('resolveTheme still refuses a broken envelope', () => {
+  assert.match(resolveTheme(null).error, /object/);
+  assert.match(resolveTheme({}).error, /kind/);
+  assert.match(resolveTheme({ kind: 'sepia' }).error, /kind/);
+  assert.match(resolveTheme({ kind: 'dark', extra: 1 }).error, /unknown field/);
+  assert.match(resolveTheme({ kind: 'dark' }, MAX_THEME_BYTES + 1).error, /bytes/);
+});
+
+test('switching palette -> base removes the palette from the seeded settings', () => {
+  const palette = toVsCodeTheme(resolveTheme(DRACULA).theme);
+  const seeded = seedThemeSettings('{"editor.fontSize": 14}', palette);
+  assert.ok(JSON.parse(seeded)['workbench.colorCustomizations']);
+  const base = toVsCodeTheme(resolveTheme({ kind: 'light' }).theme);
+  const after = JSON.parse(seedThemeSettings(seeded, base));
+  assert.equal(after['workbench.colorTheme'], 'Light Modern');
+  assert.equal('workbench.colorCustomizations' in after, false, 'no stale palette lingers');
+  assert.equal(after['editor.fontSize'], 14);
+  assert.notEqual(themeSignature(palette), themeSignature(base));
+});
+
+function freePort() {
+  return new Promise((ok) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => ok(p));
+    });
+  });
+}
+
+test('launcher: POST /api/theme moves between tiers, clears the palette and reports the tier', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscp-tier-'));
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(root, 'backend', 'launcher.mjs')], {
+    env: {
+      ...process.env,
+      PORT: String(port),
+      VSCODE_PANE_ALLOW_UNSIGNED: '1',
+      KIROCREW_PROXY_SECRET: '',
+      VSCODE_PANE_DATA_DIR: dataDir,
+      VSCODE_PANE_SERVER_DIR: path.join(dataDir, 'no-server'),
+      VSCODE_PANE_NO_DOWNLOAD: '1',
+    },
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const post = (body) => fetch(`${base}/api/theme`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  const machine = () => JSON.parse(fs.readFileSync(path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json'), 'utf8'));
+  try {
+    for (let i = 0; i < 100; i++) {
+      if (await fetch(`${base}/health`).then((r) => r.ok, () => false)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const p1 = await post(DRACULA);
+    assert.equal(p1.status, 200);
+    assert.equal(p1.json.theme.tier, 'palette');
+    assert.ok(machine()['workbench.colorCustomizations']);
+    let session = await fetch(`${base}/api/session`).then((r) => r.json());
+    assert.deepEqual(session.theme, { kind: 'dark', tier: 'palette' });
+
+    const p2 = await post({ kind: 'dark', vars: { '--bg': '#282a36', '--text': '#2f3140' } });
+    assert.equal(p2.status, 200);
+    assert.equal(p2.json.changed, true);
+    assert.equal(p2.json.theme.tier, 'base');
+    assert.match(p2.json.theme.reason, /contrast/);
+    assert.equal(machine()['workbench.colorTheme'], 'Dark Modern');
+    assert.equal('workbench.colorCustomizations' in machine(), false);
+    session = await fetch(`${base}/api/session`).then((r) => r.json());
+    assert.deepEqual(session.theme, { kind: 'dark', tier: 'base' });
+
+    const p3 = await post({ kind: 'light' });
+    assert.equal(p3.json.theme.tier, 'base');
+    assert.equal(machine()['workbench.colorTheme'], 'Light Modern');
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state', 'theme.json'), 'utf8'));
+    assert.equal(saved.tier, 'base');
+    assert.equal(saved.vars, null);
+
+    assert.equal((await post({ kind: 'dusk' })).status, 400);
+  } finally {
+    child.kill();
+    await new Promise((r) => setTimeout(r, 300));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

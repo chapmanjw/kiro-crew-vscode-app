@@ -60,6 +60,40 @@ export function validateTheme(body, rawSize = 0) {
   return { theme: { kind: body.kind, vars: sortKeys(out) } };
 }
 
+/** Text on background below this contrast ratio is not trusted as a palette. */
+export const MIN_TEXT_CONTRAST = 4.5;
+
+/**
+ * The two-tier theme decision for a POST /api/theme body.
+ *
+ *   tier "palette": the Kiro Crew colours as workbench.colorCustomizations on
+ *                   top of the base theme.
+ *   tier "base":    the stock base theme only (Dark Modern / Light Modern by
+ *                   kind), with any earlier customizations cleared.
+ *
+ * Only the envelope can be refused (400): not an object, unknown top-level
+ * field, a bad `kind`, or over the size cap. A body with just `{kind}` is
+ * valid. Missing or malformed vars, or vars whose text/background contrast is
+ * under MIN_TEXT_CONTRAST, fall back to tier "base" and say why in `reason`.
+ * @returns {{error:string}|{theme:{kind:'dark'|'light', vars:object|null, tier:'palette'|'base', reason:string|null}}}
+ */
+export function resolveTheme(body, rawSize = 0) {
+  if (rawSize > MAX_THEME_BYTES) return { error: `theme body over ${MAX_THEME_BYTES} bytes` };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'body must be a JSON object' };
+  const extra = Object.keys(body).filter((k) => k !== 'kind' && k !== 'vars');
+  if (extra.length) return { error: `unknown field ${JSON.stringify(extra[0])}` };
+  if (body.kind !== 'dark' && body.kind !== 'light') return { error: 'kind must be "dark" or "light"' };
+  const base = (reason) => ({ theme: { kind: body.kind, vars: null, tier: 'base', reason } });
+  if (body.vars === undefined || body.vars === null) return base('no palette sent');
+  const v = validateTheme(body);
+  if (v.error) return base(`palette rejected: ${v.error}`);
+  const ratio = contrast(v.theme.vars['--text'], v.theme.vars['--bg']);
+  if (ratio < MIN_TEXT_CONTRAST) {
+    return base(`palette rejected: --text on --bg contrast ${ratio.toFixed(2)}:1 is below ${MIN_TEXT_CONTRAST}:1`);
+  }
+  return { theme: { kind: body.kind, vars: v.theme.vars, tier: 'palette', reason: null } };
+}
+
 function sortKeys(o) {
   return Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]]));
 }
@@ -141,6 +175,11 @@ export function derivePalette({ kind, vars }) {
  * terminal background).
  */
 export function toVsCodeTheme(theme) {
+  // Tier "base": the stock theme and an empty customization set, which tells
+  // the bridge to clear whatever palette an earlier theme left behind.
+  if (theme.tier === 'base' || !theme.vars) {
+    return { colorTheme: BASE_THEMES[theme.kind], colorCustomizations: {}, tier: 'base' };
+  }
   const p = derivePalette(theme);
   const c = {
     // base
@@ -343,7 +382,7 @@ export function toVsCodeTheme(theme) {
     'inlineChatInput.border': p.border,
     // git decorations and minimap stay with the base theme
   };
-  return { colorTheme: BASE_THEMES[theme.kind], colorCustomizations: sortKeys(c) };
+  return { colorTheme: BASE_THEMES[theme.kind], colorCustomizations: sortKeys(c), tier: 'palette' };
 }
 
 /** Stable JSON for change detection. */
@@ -368,7 +407,11 @@ export function seedThemeSettings(existingText, vsTheme, extra = {}) {
   }
   if (vsTheme) {
     obj['workbench.colorTheme'] = vsTheme.colorTheme;
-    obj['workbench.colorCustomizations'] = vsTheme.colorCustomizations;
+    if (vsTheme.colorCustomizations && Object.keys(vsTheme.colorCustomizations).length) {
+      obj['workbench.colorCustomizations'] = vsTheme.colorCustomizations;
+    } else {
+      delete obj['workbench.colorCustomizations']; // tier "base": no stale palette in the seed
+    }
   }
   Object.assign(obj, extra);
   return JSON.stringify(obj, null, 2) + '\n';

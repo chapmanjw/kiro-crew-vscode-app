@@ -28,7 +28,7 @@ import { createFrameProxy, isLoopbackHost, upgradeAllowed } from './lib/framepro
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
-import { validateTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
+import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
 import { GatewayClient } from './lib/gateway.mjs';
 import { parseChatRequest, runChatTurn } from './lib/chatbridge.mjs';
 import { parseFrameState, frameStateFor, serializeFrameState } from './lib/framestate.mjs';
@@ -101,8 +101,10 @@ const chatStats = { turns: 0, lastTurn: null, active: 0 };
 
 // The Kiro Crew palette applied to VS Code (POST /api/theme), kept in data/state/theme.json.
 const THEME_FILE = path.join(DATA_DIR, 'state', 'theme.json');
-let theme = null; // {kind, vars, updatedAt}
-let vsTheme = null; // {colorTheme, colorCustomizations}
+// Two tiers: "palette" (Kiro Crew colours over the base theme) or "base"
+// (stock Dark Modern / Light Modern only); see lib/theme.mjs resolveTheme.
+let theme = null; // {kind, vars|null, tier, reason, updatedAt}
+let vsTheme = null; // {colorTheme, colorCustomizations, tier}
 {
   let saved = null;
   try {
@@ -110,9 +112,10 @@ let vsTheme = null; // {colorTheme, colorCustomizations}
   } catch {
     saved = null;
   }
-  const v = saved ? validateTheme({ kind: saved.kind, vars: saved.vars }) : null;
+  const v = saved && typeof saved === 'object' ? resolveTheme({ kind: saved.kind, vars: saved.vars ?? undefined }) : null;
   if (v && v.theme) {
-    theme = { ...v.theme, updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : null };
+    const reason = v.theme.tier === 'base' && typeof saved.reason === 'string' ? saved.reason.slice(0, 300) : v.theme.reason;
+    theme = { ...v.theme, reason, updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : null };
     vsTheme = toVsCodeTheme(v.theme);
   }
 }
@@ -523,12 +526,13 @@ function sessionBody(folderParam) {
     autoRetry: state.autoRetry,
     server: state.build ? { source: state.build.source, commit: state.build.commit, startedAt: state.startedAt } : null,
     bridge: { connected: bridge.connected, extension: bridge.extension },
+    theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
   };
 }
 
 function themeBody() {
   return {
-    theme: theme ? { kind: theme.kind, vars: theme.vars, updatedAt: theme.updatedAt } : null,
+    theme: theme ? { kind: theme.kind, tier: theme.tier, reason: theme.reason, vars: theme.vars, updatedAt: theme.updatedAt } : null,
     colorTheme: vsTheme ? vsTheme.colorTheme : null,
     signature: vsTheme ? themeSignature(vsTheme) : null,
     applied: bridge.theme,
@@ -685,17 +689,19 @@ async function handle(req, res) {
     case 'theme': {
       const parsed = parseJson(body);
       if (parsed === undefined) return sendJson(res, 400, { error: 'body is not JSON' });
-      const v = validateTheme(parsed, body.length);
+      const v = resolveTheme(parsed, body.length);
       if (v.error) return sendJson(res, v.error.includes('bytes') ? 413 : 400, { error: v.error });
       const next = toVsCodeTheme(v.theme);
-      const changed = !vsTheme || themeSignature(next) !== themeSignature(vsTheme) || theme.kind !== v.theme.kind;
+      const changed = !vsTheme || themeSignature(next) !== themeSignature(vsTheme);
       if (changed) {
         theme = { ...v.theme, updatedAt: new Date().toISOString() };
         vsTheme = next;
         fs.writeFileSync(THEME_FILE, JSON.stringify(theme, null, 2) + '\n');
         writeMachineSettings();
         bridge.enqueueLatest(themeCommand());
-        log('theme updated', theme.kind, Object.keys(theme.vars).length, 'vars');
+        log('theme updated', theme.kind, 'tier', theme.tier, theme.reason || '');
+      } else if (theme && theme.reason !== v.theme.reason) {
+        theme = { ...theme, reason: v.theme.reason };
       }
       return sendJson(res, 200, { ok: true, changed, ...themeBody() });
     }

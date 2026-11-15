@@ -144,7 +144,7 @@ gateways send.
 | `POST /api/restart` | restarts the VS Code server process |
 | `POST /api/file-menu` | target of the `Open in VS Code` row (`contributes.fileMenuItems`) |
 | `GET /api/theme` | the stored Kiro Crew palette, the VS Code base theme and what the extension last applied |
-| `POST /api/theme` `{kind, vars}` | store a Kiro Crew palette and apply it in VS Code (see Theme) |
+| `POST /api/theme` `{kind, vars?}` | apply the Kiro Crew theme in VS Code, tier "palette" or "base" (see Theme) |
 | `GET /api/chat/status[?probe=1]` | whether chat can run: gateway origin, app token, last error, the extension's chat registration, the last turn; `probe=1` also calls the gateway |
 | `POST /api/chat/ask` `{prompt}` | open VS Code's Chat view and submit a prompt to Kiro Crew there |
 | `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; header `X-Kiro-Bridge-Secret` |
@@ -196,22 +196,38 @@ agent, its tools, approvals and the history live in Kiro Crew.
 
 ### Theme
 
-`POST /api/theme` takes the Kiro Crew dashboard's resolved CSS variables,
-`{kind: "dark"|"light", vars: {"--bg": "#rrggbb", ...}}`. Only known variable
-names are accepted (`--bg --surface --panel --border --text --muted --accent`
-plus the other dashboard names such as `--card`, `--chrome`, `--bg-hover`,
-`--accent-hover`, `--ok`, `--warn`, `--danger`), only hex colours, at most 4 KB,
-and `--bg` and `--text` are required. The launcher keeps it in
-`data/state/theme.json`, picks Dark Modern or Light Modern (the 1.146 ids of
-Default Dark Modern and Default Light Modern) by `kind`, and maps the palette to
-about 180 `workbench.colorCustomizations` entries covering the editor, side
-bar, activity bar, title bar, status bar, panel, tabs, lists, inputs, buttons,
-focus borders, chat and the terminal, deriving missing shades from the
-background, text and accent. It seeds that into the server's Machine settings
-so the first paint is already themed, and the extension writes it to the user
-settings with `ConfigurationTarget.Global` only when a value differs. Every new
+The theme has two tiers. Tier "palette" is the Kiro Crew colours as
+`workbench.colorCustomizations` on top of a stock base theme. Tier "base" is
+the stock theme alone: Dark Modern or Light Modern (the 1.146 ids of Default
+Dark Modern and Default Light Modern), picked by whether the Kiro Crew theme is
+dark or light.
+
+`POST /api/theme` takes `{kind: "dark"|"light", vars?: {"--bg": "#rrggbb", ...}}`.
+Only the envelope can be refused with a 400: a body that is not an object, an
+unknown top-level field, a missing or unknown `kind`, or more than 4 KB. A body
+with only `{kind}` is valid and gives tier "base". So do vars that are missing,
+malformed (not an object, an unknown variable name, a value that is not a hex
+colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
+4.5:1; the reply's `theme.reason` says why. Known names are `--bg --surface
+--panel --border --text --muted --accent` plus other dashboard names such as
+`--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
+`--danger`.
+
+In tier "palette" the launcher maps the colours to about 180
+`workbench.colorCustomizations` entries covering the editor, side bar, activity
+bar, title bar, status bar, panel, tabs, lists, inputs, buttons, focus borders,
+chat and the terminal, deriving missing shades from the background, text and
+accent. In tier "base" it sends no customizations, and both the server's
+Machine settings and the user settings lose any earlier palette, so no stale
+colours linger.
+
+The launcher keeps the result in `data/state/theme.json` and seeds the base
+theme (and the palette, in tier "palette") into the server's Machine settings,
+so the first paint is already themed. The extension writes the user settings
+with `ConfigurationTarget.Global` only when a value differs. Every new
 extension host (a start, reload or remount) gets the theme once and reports
-back what VS Code holds.
+back what VS Code holds. `GET /api/session` carries `theme: {kind, tier}` and
+`GET /api/theme` adds the reason.
 
 ### Browser-side state across remounts and restarts
 
