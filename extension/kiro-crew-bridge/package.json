@@ -1,0 +1,29 @@
+{
+  "name": "kiro-crew-bridge",
+  "displayName": "Kiro Crew Bridge",
+  "description": "Connects this VS Code to the Kiro Crew vscode-pane app: opens files Kiro Crew asks for and reports the active editor back.",
+  "version": "0.1.0",
+  "publisher": "kiro-crew",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kiroCrewBridge.showStatus",
+        "title": "Kiro Crew: Show Bridge Status"
+      }
+    ]
+  }
+}

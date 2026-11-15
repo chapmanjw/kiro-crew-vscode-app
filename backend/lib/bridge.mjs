@@ -1,0 +1,150 @@
+// Command queue (Kiro Crew -> VS Code) and editor state (VS Code -> Kiro Crew)
+// shared between the launcher API and the extension's long poll.
+
+export class Bridge {
+  constructor({ now = () => Date.now(), connectedWindowMs = 40_000, maxQueue = 100 } = {}) {
+    this.now = now;
+    this.connectedWindowMs = connectedWindowMs;
+    this.maxQueue = maxQueue;
+    this.queue = [];
+    this.waiters = new Set(); // pending long polls
+    this.results = new Map(); // id -> resolve fn
+    this.nextId = 1;
+    this.lastSeen = 0;
+    this.activePolls = 0;
+    this.extension = null; // {version, pid, workspaceFolders}
+    this.editor = null; // {path, selection, languageId, at}
+    this.lastSaved = null; // {path, at}
+    this.events = 0;
+  }
+
+  get connected() {
+    return this.activePolls > 0 || this.now() - this.lastSeen < this.connectedWindowMs;
+  }
+
+  /** Queue a command; resolves with the extension's result or {ok:false, timeout:true}. */
+  enqueue(command, timeoutMs = 8000) {
+    const id = String(this.nextId++);
+    const entry = { id, ...command };
+    if (this.queue.length >= this.maxQueue) this.queue.shift();
+    this.queue.push(entry);
+    const done = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.results.delete(id);
+        resolve({ id, ok: false, delivered: !this.queue.includes(entry), timeout: true });
+      }, timeoutMs);
+      timer.unref?.();
+      this.results.set(id, (r) => {
+        clearTimeout(timer);
+        this.results.delete(id);
+        resolve({ id, delivered: true, ...r });
+      });
+    });
+    this.flush();
+    return { id, done };
+  }
+
+  flush() {
+    if (!this.queue.length) return;
+    for (const w of this.waiters) {
+      this.waiters.delete(w);
+      const batch = this.queue.splice(0);
+      w(batch);
+      return;
+    }
+  }
+
+  /**
+   * Long poll: returns queued commands, or waits up to waitMs for one.
+   * An aborted signal ends the wait with an empty batch and consumes nothing.
+   */
+  take(waitMs = 25_000, signal) {
+    this.lastSeen = this.now();
+    if (this.queue.length) return Promise.resolve(this.queue.splice(0));
+    if (signal?.aborted) return Promise.resolve([]);
+    this.activePolls++;
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (batch) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', onAbort);
+        this.waiters.delete(finish);
+        this.activePolls--;
+        this.lastSeen = this.now();
+        resolve(batch);
+      };
+      const onAbort = () => finish([]);
+      const timer = setTimeout(() => finish([]), waitMs);
+      timer.unref?.();
+      signal?.addEventListener?.('abort', onAbort);
+      this.waiters.add(finish);
+    });
+  }
+
+  /** Put undelivered commands back at the front of the queue. */
+  requeue(batch) {
+    if (batch && batch.length) {
+      this.queue.unshift(...batch);
+      this.flush();
+    }
+  }
+
+  /** Drop waiters (a disconnected client) without losing commands. */
+  cancelWaiters() {
+    for (const w of [...this.waiters]) w([]);
+  }
+
+  /** Apply an event posted by the extension. Returns false for unknown types. */
+  applyEvent(ev) {
+    if (!ev || typeof ev !== 'object') return false;
+    this.lastSeen = this.now();
+    this.events++;
+    const at = new Date(this.now()).toISOString();
+    switch (ev.type) {
+      case 'hello':
+        this.extension = {
+          version: str(ev.version),
+          workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
+          at,
+        };
+        return true;
+      case 'editor':
+        this.editor = ev.path
+          ? { path: str(ev.path), languageId: str(ev.languageId), selection: sel(ev.selection), at }
+          : null;
+        return true;
+      case 'saved':
+        this.lastSaved = { path: str(ev.path), at };
+        return true;
+      case 'result': {
+        const fn = this.results.get(String(ev.id));
+        if (fn) fn({ ok: !!ev.ok, error: ev.error ? str(ev.error) : undefined });
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  snapshot() {
+    return {
+      connected: this.connected,
+      extension: this.extension,
+      activeEditor: this.editor,
+      lastSaved: this.lastSaved,
+      pendingCommands: this.queue.length,
+    };
+  }
+}
+
+function str(v) {
+  return typeof v === 'string' ? v.slice(0, 4096) : v == null ? null : String(v).slice(0, 4096);
+}
+
+function sel(s) {
+  if (!s || typeof s !== 'object') return null;
+  const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+  return { startLine: n(s.startLine), startColumn: n(s.startColumn), endLine: n(s.endLine), endColumn: n(s.endColumn) };
+}

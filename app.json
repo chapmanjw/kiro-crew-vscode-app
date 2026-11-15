@@ -1,0 +1,50 @@
+{
+  "name": "vscode-pane",
+  "version": "0.1.0",
+  "displayName": "VS Code",
+  "description": "A full VS Code in a Kiro Crew pane. The app runs the official VS Code server on this machine and shows its workbench in the page, with a bridge so Kiro Crew can open files in VS Code and see which file VS Code has open.",
+  "author": "John Chapman",
+  "license": "MIT",
+  "minKiroCrewVersion": "0.13.0",
+  "tags": ["code", "editor", "vscode", "files"],
+  "defaultEnabled": false,
+  "platform": {
+    "os": ["windows", "macos", "linux"],
+    "requiresDesktopApp": true
+  },
+  "iconPath": "assets/icon.png",
+  "permissions": {
+    "api": [
+      "/apps/vscode-pane/api",
+      "/api/recent-projects"
+    ]
+  },
+  "backend": {
+    "type": "node",
+    "entryPoint": "backend/launcher.mjs",
+    "port": "auto",
+    "healthCheck": "/health"
+  },
+  "ui": {
+    "entry": "vscode-pane-0.1.0.mjs",
+    "pages": [
+      {
+        "route": "/apps/vscode-pane",
+        "label": "VS Code",
+        "iconUrl": "icon.svg"
+      }
+    ]
+  },
+  "contributes": {
+    "fileMenuItems": [
+      {
+        "id": "open-in-vscode",
+        "label": "Open in VS Code",
+        "icon": "Zap",
+        "endpoint": "/apps/vscode-pane/api/file-menu",
+        "surfaces": ["file-overflow", "tree-context", "folder-row"],
+        "when": { "kinds": ["file", "dir"] }
+      }
+    ]
+  }
+}
