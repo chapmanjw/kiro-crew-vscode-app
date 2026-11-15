@@ -20,6 +20,8 @@ Kiro Crew dashboard  (http://localhost:5476, Electron)
  |     status, folder, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
+ |   - a docked Kiro Crew chat column on the card's right (ui/vscode-pane-crew-0.3.1.mjs):
+ |     the SDK's ChatPanel, the Chat page's own ChatPage, on the folder's session
  |  composer chip: ui/vscode-pane-session-0.3.1.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder
  |
@@ -351,6 +353,61 @@ the bridge sends commands only to the extension host that said hello last.
   variable when set, and otherwise a Default Dark or Default Light colour picked
   by `kind`.
 
+### Kiro Crew chat column
+
+The card holds VS Code on the left and a Kiro Crew chat column on the right,
+docked flush against the card's right edge the way VS Code's secondary side
+bar sits in the workbench. The column renders the App SDK's `ChatPanel` with
+`conversationOnly`, which mounts the Kiro Crew Chat page's own `ChatPage`
+(`website/src/app-sdk/ChatPanel.tsx`), so the transcript, tool cards,
+approvals, queue, follow-ups, composer and the model and agent pickers are the
+ones you see in the main session pane. `conversationOnly` drops only
+ChatPage's sessions rail and its URL sync. VS Code's own Chat view stays
+enabled next to it; the page sets nothing that hides it.
+
+- Session. By default the column shows the folder's main Kiro Crew session,
+  the "VS Code: &lt;folder&gt;" one in your sidebar. The launcher names it on
+  `GET /api/session` as `crewSlot: {key, folder, title}` (`crewSlotKey` and
+  R3's `chatSlot.key` are read too). When a launcher does not send it, the
+  page opens the same slot itself: it hashes the folder the way
+  `slotNameFor` in `backend/lib/gateway.mjs` does (with `crypto.subtle`),
+  POSTs `/api/chat/slots` with that name and title and points it at the
+  folder.
+- Header. 35px, the height of a VS Code side-bar title: the Kiro Crew icon
+  (`/icon-192.png` from the dashboard, a "KC" glyph if it cannot load), the
+  session title as a session switcher, "Open in Kiro Crew" (the session on the
+  Chat page) and a collapse button.
+- Session switcher. Lists the Kiro Crew sessions whose project is this folder,
+  from `GET /api/chat/slots`, the folder's main session first and the rest by
+  last activity, so the per-chat sessions VS Code's native Chat opens show up
+  too. The pick is remembered per folder.
+- Width. A 4px sash on the column's left edge resizes it by drag or with the
+  arrow keys (Home or a double-click resets it). The default is 420px, the
+  minimum 360px, and VS Code always keeps at least 320px. The width and the
+  open state are kept in `localStorage`.
+- Open and close. The toolbar's "Kiro Crew" button toggles the column, and so
+  does VS Code: the bridge's `kiroCrew.toggleCrewChat` command (Ctrl+Alt+K,
+  the status bar item and the editor title action) bumps `crewChatToggle` on
+  `GET /api/session`, and each step up toggles the column within one session
+  poll (2 s). The first reading after the page mounts is a baseline, so coming
+  back to the page never replays old presses.
+- VS Code frame. The kept-alive frame is placed over the narrower frame slot,
+  so it follows the sash and the toggle through the same `ResizeObserver`. With
+  the column open only the card's bottom-left corner is the frame's to round.
+  The column sits above the frame host (`z-index: 3`), so a frame that lags a
+  resize by one animation frame never covers it.
+- Leaving the page. ChatPanel is host React code tied to the dashboard's store,
+  so it cannot be kept on `document.body` like the iframe. Leaving the page
+  unmounts it, and coming back mounts it again on the same session with the
+  column's open state and width as they were. The conversation lives in the
+  gateway and the dashboard's store, so nothing in it is lost.
+- Older hosts. The column imports the SDK as a namespace and reads
+  `ChatPanel` at render time. A host without it shows a note and an "Open in
+  Kiro Crew" button instead. The column never falls back to `ChatEmbed`, whose
+  composer is not the session pane's.
+- Theme. The column uses the same `--vscp-*` variables as the card, which are
+  the dashboard's own tokens.
+
 ### Open in VS Code from Kiro Crew file menus
 
 `app.json` declares one `contributes.fileMenuItems` row, "Open in VS Code", on
@@ -452,7 +509,23 @@ on Windows) and checks that every process from the run is gone and both ports
 are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
 network access. Screenshots land in `.cache/smoke/` (`workbench.png`,
-`chat.png`, `after-restart.png`).
+`chat.png`, `after-restart.png`, `crew-dark.png`).
+
+The Kiro Crew column checks live in `scripts/lib/crew-checks.mjs`. The
+stand-in's SDK shim provides a `ChatPanel` stub that records its props and
+opens a body-level picker menu, serves `/api/chat/slots`, and adds
+`crewChatToggle` and `crewSlot` to `GET /api/session` when the launcher leaves
+them out. The checks cover the column mounting on the folder's main slot with
+`conversationOnly`, its docked geometry and 35px header, the VS Code frame
+shrinking to the narrower slot and clipping only its bottom-left corner,
+nothing of the frame covering the column, a picker menu drawn whole above the
+frame, the session switcher's list and a switch, a sash drag and a keyboard
+resize with the width stored, the toolbar toggle, two `crewChatToggle` bumps
+(and two between polls cancelling out), tabbing away and back with width,
+session and frame alignment kept, a collapsed column staying collapsed, the
+"Open in Kiro Crew" fallback without ChatPanel, the page opening the slot
+itself when the launcher does not name it, and VS Code's own Chat view still
+opening in its secondary side bar.
 
 In a git worktree, which has no `.cache`, put a gitignored `dev-config.json`
 in the worktree root naming the main checkout's server build (`serverDir`) and
@@ -553,6 +626,17 @@ own machine; swap it for original art before any public release of this app.
   order.
 - macOS and Linux are declared in `app.json` and the code has the POSIX paths,
   but only Windows was tested.
+- The Kiro Crew column cannot be pre-filled with VS Code's selection or active
+  file: `ChatPanelProps` is `{slotKey, conversationOnly, expandSteps}` with no
+  draft prop. That needs a Kiro Crew SDK addition.
+- `ChatPanel` makes its session the dashboard's active one
+  (`hooks/useOwnSlotChat.ts`), so going to the Chat page afterwards lands on
+  the column's session. Only one `conversationOnly` panel may be mounted per
+  window (`docs/app-kit/api-reference.md`, Native Chat Panel).
+- The column was checked against a ChatPanel stub in the stand-in, not yet
+  against the real ChatPage. Whether ChatPage's side-panel tabs (Changes,
+  Files, Git) fit and open inline in a 420px column, and whether every one of
+  its popovers escapes the column, is still to be seen in the desktop app.
 
 ## Next steps
 
