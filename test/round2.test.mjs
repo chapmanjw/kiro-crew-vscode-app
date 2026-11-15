@@ -331,7 +331,7 @@ test('frame state persists only the port; the key is new each run; bad files fal
 test('Bridge records chat capability, theme results, and keeps only the newest theme command', () => {
   const b = new Bridge();
   b.applyEvent({ type: 'hello', version: '0.3.0', chat: { participant: true, defaultParticipant: true, error: null } });
-  assert.deepEqual(b.extension.chat, { participant: true, defaultParticipant: true, model: false, modelPublished: false, error: null });
+  assert.deepEqual(b.extension.chat, { participant: true, defaultParticipant: true, model: false, modelPublished: false, sessionType: false, sessionModelPublished: false, error: null });
   b.enqueue({ kind: 'openFile', path: '/a' }, 50);
   b.enqueueLatest({ kind: 'applyTheme', theme: { signature: '1' } }, 50);
   b.enqueueLatest({ kind: 'applyTheme', theme: { signature: '2' } }, 50);

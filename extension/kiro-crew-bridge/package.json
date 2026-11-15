@@ -1,7 +1,7 @@
 {
   "name": "kiro-crew-bridge",
   "displayName": "Kiro Crew Bridge",
-  "description": "Connects this VS Code to the Kiro Crew vscode-pane app: answers the Chat view with Kiro Crew's own agent harness, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
+  "description": "Connects this VS Code to the Kiro Crew vscode-pane app: makes Kiro Crew a native chat session type (streaming replies, tool cards, approvals and history from Kiro Crew chat sessions), keeps a default participant as the fallback, applies the Kiro Crew colour theme, opens files Kiro Crew asks for and reports the active editor back.",
   "version": "0.3.1",
   "publisher": "kiro-crew",
   "license": "MIT",
@@ -23,7 +23,11 @@
     "virtualWorkspaces": false
   },
   "enabledApiProposals": [
-    "defaultChatParticipant"
+    "defaultChatParticipant",
+    "chatSessionsProvider",
+    "chatParticipantAdditions",
+    "chatParticipantPrivate",
+    "chatProvider"
   ],
   "activationEvents": [
     "*"
@@ -56,13 +60,67 @@
       {
         "vendor": "kiro-crew",
         "displayName": "Kiro Crew"
+      },
+      {
+        "vendor": "kirocrew",
+        "displayName": "Kiro Crew (session)"
       }
     ],
     "commands": [
       {
         "command": "kiroCrewBridge.showStatus",
         "title": "Kiro Crew: Show Bridge Status"
+      },
+      {
+        "command": "kiroCrew.toggleCrewChat",
+        "title": "Kiro Crew: Toggle Crew Chat",
+        "icon": "$(comment-discussion)"
       }
-    ]
+    ],
+    "chatSessions": [
+      {
+        "type": "kirocrew",
+        "name": "kirocrew",
+        "displayName": "Kiro Crew",
+        "description": "Chat with Kiro Crew: each chat is a Kiro Crew session with its agents, tools and approvals",
+        "requiresCopilotSignIn": false,
+        "requiresCustomModels": true,
+        "supportsAutoModel": false,
+        "capabilities": {
+          "supportsFileAttachments": true,
+          "supportsPromptAttachments": true
+        },
+        "welcomeTitle": "Kiro Crew",
+        "welcomeMessage": "Each chat here is a Kiro Crew session for this folder. Its replies, tools and approvals come from Kiro Crew, and it also shows in the Kiro Crew sidebar.",
+        "inputPlaceholder": "Ask Kiro Crew",
+        "when": "workspaceFolderCount > 0"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kiroCrew.toggleCrewChat",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "kiroCrew.toggleCrewChat",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kiro Crew",
+      "properties": {
+        "kiroCrew.chat.hideCopilotAgents": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "markdownDescription": "Make Kiro Crew the default for new chats by hiding Copilot's own agents (the local Ask/Agent harness, Cloud and Copilot CLI) from the session-type picker. Turn off to bring them back; Kiro Crew sessions stay available either way."
+        }
+      }
+    }
   }
 }

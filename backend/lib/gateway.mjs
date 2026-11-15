@@ -197,6 +197,7 @@ export class GatewayClient {
     this.lastTokenAt = null;
     this.slots = new Map(); // folder -> slot key
     this.permissionDenied = null; // {path, at} after the gateway's out-of-scope 403
+    this.approvalGrant = null; // {granted, cause?, message?, at}: permissions.sessionApproval as the gateway last answered
   }
 
   /** Record the outcome of a gateway call for the permission state; returns the error to throw, if any. */
@@ -317,11 +318,22 @@ export class GatewayClient {
    * changed.
    */
   async ensureSlot(folder) {
-    const name = slotNameFor(folder);
-    const created = await this.json('POST', '/api/chat/slots', {
-      name,
+    const key = await this.ensureSlotNamed({
+      name: slotNameFor(folder),
       title: `VS Code: ${path.basename(String(folder).replace(/[\\/]+$/, '')) || folder}`,
+      folder,
     });
+    this.slots.set(folder, key);
+    return key;
+  }
+
+  /**
+   * Create (or reopen; the create is idempotent by name) a slot with this name
+   * and point it at `folder`. Used per folder by the 0.3.1 participant and per
+   * VS Code chat session by the Kiro Crew session type.
+   */
+  async ensureSlotNamed({ name, title, folder }) {
+    const created = await this.json('POST', '/api/chat/slots', { name, title });
     const key = (created && (created.key || created.slot || created.name)) || name;
     if (folder && created?.project !== folder) {
       try {
@@ -330,8 +342,77 @@ export class GatewayClient {
         this.log('gateway: could not set slot project', e.message);
       }
     }
-    this.slots.set(folder, key);
     return key;
+  }
+
+  /** GET /api/chat/slots/{slot}?limit= : {key, title, running, total, messages:[{role, content, cls, ts, meta}]}. */
+  async slotDetail(slot, limit = 200) {
+    const n = Math.max(1, Math.min(Number(limit) || 200, 1000));
+    return this.json('GET', `/api/chat/slots/${encodeURIComponent(slot)}?limit=${n}`);
+  }
+
+  /**
+   * POST /api/chat/slots/{slot}/approve. An app token needs
+   * permissions.sessionApproval and the owner's consent; without them the
+   * gateway answers 403 session_approval_not_granted (slot_approval.py
+   * deny_session_approval_caller, session_approval_refusal.py).
+   * @returns {Promise<{ok:boolean, status:number, code?:string, cause?:string, error?:string}>}
+   */
+  async approve(slot, { requestId, action, responseId }) {
+    const res = await this.request('POST', `/api/chat/slots/${encodeURIComponent(slot)}/approve`, {
+      body: { action, request_id: requestId, response_id: responseId || crypto.randomBytes(9).toString('base64url') },
+    });
+    const data = await res.json().catch(() => null);
+    const denied = this.noteResponse('POST', '/api/chat/slots/approve', res.status, data);
+    if (denied) return { ok: false, status: res.status, code: 'permission', error: denied.message };
+    this.noteApprovalGrant(res.status, data);
+    if (res.ok) return { ok: true, status: res.status };
+    return { ok: false, status: res.status, code: data?.code || '', cause: data?.cause || '', error: typeof data?.error === 'string' ? data.error.slice(0, 1000) : `HTTP ${res.status}` };
+  }
+
+  /** GET /api/chat/slots/{slot}/question: the slot's pending question cards (same grant as approvals). */
+  async questions(slot) {
+    const res = await this.request('GET', `/api/chat/slots/${encodeURIComponent(slot)}/question`);
+    const data = await res.json().catch(() => null);
+    this.noteApprovalGrant(res.status, data);
+    if (!res.ok) throw new GatewayError(`question read -> HTTP ${res.status}`, { status: res.status, code: data?.code || '' });
+    return Array.isArray(data?.pending) ? data.pending : [];
+  }
+
+  /** POST /api/chat/slots/{slot}/question/answer {ask_id, answers} or {ask_id, dismissed:true}. */
+  async answerQuestion(slot, { askId, answers, dismissed }) {
+    const body = dismissed ? { ask_id: askId, dismissed: true } : { ask_id: askId, answers };
+    const res = await this.request('POST', `/api/chat/slots/${encodeURIComponent(slot)}/question/answer`, { body });
+    const data = await res.json().catch(() => null);
+    this.noteApprovalGrant(res.status, data);
+    if (res.ok) return { ok: true, status: res.status };
+    return { ok: false, status: res.status, code: data?.code || '', error: typeof data?.error === 'string' ? data.error.slice(0, 1000) : `HTTP ${res.status}` };
+  }
+
+  /** Remember whether the gateway accepts our approvals: {granted, cause, message, at}. */
+  noteApprovalGrant(status, data) {
+    const at = new Date(this.now()).toISOString();
+    if (status === 403 && data && data.code === 'session_approval_not_granted') {
+      this.approvalGrant = { granted: false, cause: String(data.cause || ''), message: typeof data.error === 'string' ? data.error.slice(0, 1000) : '', at };
+    } else if (status >= 200 && status < 300) {
+      this.approvalGrant = { granted: true, at };
+    }
+  }
+
+  /**
+   * Whether approvals from this app are allowed, probing the question read
+   * (which needs the same grant and changes nothing) when unknown or older
+   * than `maxAgeMs`.
+   */
+  async approvalGrantFor(slot, { maxAgeMs = 60_000 } = {}) {
+    const g = this.approvalGrant;
+    if (g && this.now() - Date.parse(g.at) < maxAgeMs) return g;
+    try {
+      await this.questions(slot);
+    } catch {
+      /* noted by questions() when it was the grant */
+    }
+    return this.approvalGrant || { granted: false, cause: 'unavailable', message: '', at: new Date(this.now()).toISOString() };
   }
 
   /**
