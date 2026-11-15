@@ -6,10 +6,10 @@
 // 508-519). The dashboard runs on http://localhost:<port> and the frame on
 // http://127.0.0.1:<port>, which are different sites, so the browser neither
 // stores nor sends that cookie inside the frame and every request after the
-// first redirect fails. The proxy keeps the token server-side: the browser
-// only ever holds the path prefix, and the proxy adds the token cookie to each
-// forwarded request. It also drops every cookie the browser sends, so no
-// dashboard cookie can reach VS Code.
+// first redirect fails. The proxy adds the token cookie to each forwarded
+// request and writes the token into the workbench config (see
+// injectConnectionToken) for the WebSocket auth handshake. It also drops every
+// cookie the browser sends, so no dashboard cookie can reach VS Code.
 
 import http from 'node:http';
 import net from 'node:net';
@@ -29,6 +29,28 @@ export function upstreamHeaderPairs(rawHeaders, token, { keepHop = false } = {})
   }
   out.push(['Cookie', `${TOKEN_COOKIE}=${token}`]);
   return out;
+}
+
+const CONFIG_MARKER = 'id="vscode-workbench-web-configuration" data-settings="{';
+
+/**
+ * Put the connection token into the workbench configuration the page reads.
+ *
+ * The cookie alone is not enough: the workbench also sends the token inside
+ * the WebSocket auth handshake, reading it from
+ * `options.connectionToken || getCookieValue('vscode-tkn')`
+ * (vscode/src/vs/workbench/browser/web.main.ts:327). With no readable cookie
+ * the server logs "Unauthorized client refused: auth mismatch". The config is
+ * HTML-escaped JSON in a meta attribute (webClientServer.ts, asJSON plus the
+ * template's escaping), so the inserted member is escaped the same way.
+ * Returns null when the marker is missing.
+ */
+export function injectConnectionToken(html, token) {
+  if (!/^[A-Za-z0-9_-]+$/.test(token || '')) throw new Error('unsafe token');
+  const i = html.indexOf(CONFIG_MARKER);
+  if (i < 0) return null;
+  const at = i + CONFIG_MARKER.length;
+  return `${html.slice(0, at)}&quot;connectionToken&quot;:&quot;${token}&quot;,${html.slice(at)}`;
 }
 
 /** Drop the token cookie the server tries to set; the browser never needs it. */
@@ -65,8 +87,27 @@ export function createFrameProxy(getTarget) {
         const sc = filterSetCookie(h['set-cookie']);
         if (sc) h['set-cookie'] = sc;
         else delete h['set-cookie'];
-        res.writeHead(upRes.statusCode || 502, h);
-        upRes.pipe(res);
+        const isWorkbenchHtml =
+          upRes.statusCode === 200 &&
+          String(h['content-type'] || '').startsWith('text/html') &&
+          !h['content-encoding'];
+        if (!isWorkbenchHtml) {
+          res.writeHead(upRes.statusCode || 502, h);
+          upRes.pipe(res);
+          return;
+        }
+        const chunks = [];
+        upRes.on('data', (c) => chunks.push(c));
+        upRes.on('end', () => {
+          const html = Buffer.concat(chunks).toString('utf8');
+          const out = Buffer.from(injectConnectionToken(html, target.token) ?? html, 'utf8');
+          delete h['transfer-encoding'];
+          h['content-length'] = String(out.length);
+          h['cache-control'] = 'no-store';
+          res.writeHead(200, h);
+          res.end(out);
+        });
+        upRes.on('error', () => res.destroy());
       },
     );
     up.on('error', () => {

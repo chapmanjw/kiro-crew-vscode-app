@@ -13,7 +13,7 @@ import { verifyProxySignature, signProxyRequest, checkBridgeSecret, randomSecret
 import { matchRoute, parseOpenRequest, fileMenuToCommand, ROUTES } from '../backend/lib/router.mjs';
 import { Bridge } from '../backend/lib/bridge.mjs';
 import { upsertBridgeEntry, staleBridgeFolders, fileUriComponents, BRIDGE_ID, bridgeFolderName } from '../backend/lib/extensions.mjs';
-import { upstreamHeaderPairs, filterSetCookie } from '../backend/lib/frameproxy.mjs';
+import { upstreamHeaderPairs, filterSetCookie, injectConnectionToken } from '../backend/lib/frameproxy.mjs';
 import { downloadFile, extractArchive, locateBuildRoot, tarCommand } from '../backend/lib/provision.mjs';
 
 const COMMIT = '69047191fc427f2f92828279aae1d90d8eeda7ab';
@@ -300,6 +300,16 @@ test('upstreamHeaderPairs drops browser cookies and injects only the token', () 
   const ws = upstreamHeaderPairs(raw, 'TKN', { keepHop: true });
   assert.ok(ws.some(([k]) => k === 'Upgrade'));
   assert.ok(!ws.some(([, v]) => String(v).includes('mc_token')));
+});
+
+test('injectConnectionToken adds the token to the escaped workbench config', () => {
+  const html = '<meta id="vscode-workbench-web-configuration" data-settings="{&quot;remoteAuthority&quot;:&quot;127.0.0.1:1&quot;}">';
+  const out = injectConnectionToken(html, 'abc_-9');
+  assert.equal(out, '<meta id="vscode-workbench-web-configuration" data-settings="{&quot;connectionToken&quot;:&quot;abc_-9&quot;,&quot;remoteAuthority&quot;:&quot;127.0.0.1:1&quot;}">');
+  const decoded = JSON.parse(/data-settings="([^"]*)"/.exec(out)[1].replace(/&quot;/g, '"'));
+  assert.equal(decoded.connectionToken, 'abc_-9');
+  assert.equal(injectConnectionToken('<html></html>', 'abc'), null);
+  assert.throws(() => injectConnectionToken(html, 'a"b'), /unsafe token/);
 });
 
 test('filterSetCookie removes the token cookie only', () => {
