@@ -95,6 +95,8 @@ const CSS = `
 .vscp-body{position:relative;flex:1 1 auto;min-height:0;background:var(--vscp-bg)}
 .vscp-overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:13px}
 .vscp-frame-host{background:var(--vscp-bg)}
+.vscp-note{padding:6px 12px;font-size:12px;line-height:1.4;border-bottom:1px solid var(--vscp-border);color:var(--vscp-text);
+  background:color-mix(in srgb,var(--vscp-warn) 14%,var(--vscp-elev));white-space:normal}
 `;
 
 function ensureStyle() {
@@ -124,6 +126,7 @@ const holder = {
   key: null,
   nonce: 0,
   loads: 0,
+  placements: 0, // how often the frame was placed (the smoke checks it is not every frame)
   session: null, // last session seen, so a remount shows the live frame at once
   owner: null, // the mounted page's token, or null while unmounted
   kind: '', // last resolved dashboard kind, so a remount styles itself at once
@@ -440,9 +443,10 @@ export default function VsCodePane() {
   }, [sdkTheme && sdkTheme.mode, sdkTheme && sdkTheme.colorTheme, sdkTheme && sdkTheme.accent, postTheme]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const generation = session && session.generation;
+  const instance = session && session.instance;
   useEffect(() => {
     if (ready) postTheme(true);
-  }, [ready, generation, postTheme]);
+  }, [ready, generation, instance, postTheme]);
 
   // Load the workbench into the detached frame only when its identity changes,
   // so polling, remounts and route changes never reload it.
@@ -450,19 +454,25 @@ export default function VsCodePane() {
     if (key && session) loadFrame(key, session.url);
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Claim the frame while mounted; place it over the placeholder every frame
-  // (handles window resize, side panels opening, scroll and zoom) and size the
-  // card to the space left in the dashboard's <main>.
+  // Claim the frame while mounted; place it over the placeholder and size the
+  // card to the space left in the dashboard's <main>. Placement runs on
+  // change, not every frame: a ResizeObserver on the card, its frame slot,
+  // <main> and the document element (window resize, side panels opening, zoom,
+  // a layout shift that resizes <main>), window resize, capture-phase scroll,
+  // and a 500 ms fallback for moves nothing reports. Each trigger asks for at
+  // most one placement in the next animation frame.
   const showFrame = ready && !!key;
   const showRef = useRef(showFrame);
   showRef.current = showFrame;
+  const scheduleRef = useRef(() => {});
   useLayoutEffect(() => {
     const token = {};
     holder.owner = token;
     let raf = 0;
     let lastHeight = '';
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
+    const place = () => {
+      raf = 0;
+      holder.placements += 1;
       const root = rootRef.current;
       const ph = placeholderRef.current;
       if (!root || !ph) return;
@@ -492,15 +502,38 @@ export default function VsCodePane() {
       if (p) placeFrame(p);
       else hideFrame();
     };
-    tick();
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(place);
+    };
+    scheduleRef.current = schedule;
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
+    if (ro) {
+      for (const el of [rootRef.current, placeholderRef.current, document.documentElement]) if (el) ro.observe(el);
+      const main = rootRef.current && (rootRef.current.closest('main') || document.getElementById('main-content'));
+      if (main) ro.observe(main);
+    }
+    window.addEventListener('resize', schedule);
+    document.addEventListener('scroll', schedule, true);
+    const fallback = setInterval(schedule, 500);
+    place();
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', schedule);
+      document.removeEventListener('scroll', schedule, true);
+      clearInterval(fallback);
+      scheduleRef.current = () => {};
       if (holder.owner === token) {
         holder.owner = null;
         hideFrame();
       }
     };
   }, []);
+  // Showing or hiding the frame (ready, a new frame key, the kind changing the
+  // card's colours) is a change no observer sees.
+  useLayoutEffect(() => {
+    scheduleRef.current();
+  }, [showFrame, key, kind]);
 
   const reloadFrame = () => {
     holder.nonce += 1;
@@ -601,11 +634,16 @@ export default function VsCodePane() {
     // (listShell.ts), so theme packs that retint that card retint this one.
     className: 'vscp-themed vscp-card sidebar sidebar-inner',
     'data-vscp-kind': kind,
-    // The height is set every frame from the space left in <main>, so the card
+    // The height is set on every placement from the space left in <main>, so the card
     // neither grows past the window nor depends on how the host wraps the page.
     style: { flex: '0 0 auto' },
     'data-testid': 'vscode-pane-card',
   },
   toolbar,
+  // Chat cannot reach Kiro Crew for a reason only the user can fix (an Update
+  // left the new API permissions unapproved).
+  session && session.chat && session.chat.message
+    ? h('div', { className: 'vscp-note', role: 'alert', 'data-testid': 'vscode-pane-chat-problem' }, `VS Code Chat: ${session.chat.message}`)
+    : null,
   h('div', { ref: placeholderRef, className: 'vscp-body', 'data-testid': 'vscode-pane-frame-slot', 'data-frame-key': key || '' }, overlay));
 }

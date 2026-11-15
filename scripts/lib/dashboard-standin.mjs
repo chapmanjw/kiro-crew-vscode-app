@@ -232,5 +232,10 @@ createRoot(document.getElementById('main-content')).render(h(Root));
     res.end();
   });
   server.themePosts = themePosts;
+  // A restarted backend listens on a new port, as the gateway's proxy would
+  // follow it; the page keeps calling the same /apps/vscode-pane/api/ URLs.
+  server.setLauncherPort = (p) => {
+    launcherPort = p;
+  };
   return server;
 }

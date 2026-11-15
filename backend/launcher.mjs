@@ -29,9 +29,9 @@ import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
 import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
-import { GatewayClient } from './lib/gateway.mjs';
-import { parseChatRequest, runChatTurn } from './lib/chatbridge.mjs';
-import { parseFrameState, frameStateFor, serializeFrameState } from './lib/framestate.mjs';
+import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE } from './lib/gateway.mjs';
+import { parseChatRequest, runChatTurn, folderInRoots } from './lib/chatbridge.mjs';
+import { parseFrameState, frameStateFor, frameStateHasKey, serializeFrameState } from './lib/framestate.mjs';
 
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const env = process.env;
@@ -75,17 +75,21 @@ const fileConfig = {
 };
 const config = effectiveConfig(fileConfig, env, { homedir: os.homedir(), appRoot: APP_ROOT });
 
-// The frame's port and path key persist in data/state/frame.json so the VS
-// Code origin, and with it the browser-side state, survives launcher restarts
-// (see lib/framestate.mjs).
+// The frame's port persists in data/state/frame.json so the VS Code origin,
+// and with it the browser-side state, survives launcher restarts. The path key
+// is new each run and stays in memory (see lib/framestate.mjs).
 const FRAME_STATE_FILE = path.join(DATA_DIR, 'state', 'frame.json');
-const frameState = frameStateFor(parseFrameState(readText(FRAME_STATE_FILE)));
+const frameStateText = readText(FRAME_STATE_FILE);
+const frameState = frameStateFor(parseFrameState(frameStateText));
 const FRAME_KEY = frameState.key;
 const BASE_PATH = `/vsc-${FRAME_KEY}`;
+// Identifies this launcher run in /api/session; the page reloads its kept-alive
+// frame when it changes.
+const RUN_ID = randomSecret(9);
 const BRIDGE_SECRET = randomSecret(24);
 // One connection token per launcher run, not per server start: the workbench
 // keeps the token from its config, so a reload after a server restart must
-// not need a new one. The frame path and token stay stable across restarts.
+// not need a new one. A launcher restart gives a new frame path and token.
 const CONNECTION_TOKEN = randomSecret(24);
 const bridge = new Bridge();
 const retry = new RetryPolicy();
@@ -523,11 +527,19 @@ function sessionBody(folderParam) {
     folder,
     defaultFolder: config.workspace,
     generation: state.generation,
+    instance: RUN_ID,
     autoRetry: state.autoRetry,
     server: state.build ? { source: state.build.source, commit: state.build.commit, startedAt: state.startedAt } : null,
     bridge: { connected: bridge.connected, extension: bridge.extension },
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
+    chat: chatProblem(),
   };
+}
+
+/** What the page shows about chat: null when nothing needs the user, else {code, message}. */
+function chatProblem() {
+  if (gateway.permissionDenied) return { code: 'permission', message: PERMISSION_MESSAGE, needed: CHAT_PERMISSIONS };
+  return null;
 }
 
 function themeBody() {
@@ -541,9 +553,20 @@ function themeBody() {
 
 async function chatStatusBody(probe) {
   const reason = gateway.unavailableReason;
+  let probed = null;
+  if (probe && !reason) {
+    try {
+      const st = await gateway.status();
+      probed = { reachable: true, version: st.version };
+    } catch (e) {
+      probed = { reachable: false, lastError: e.message };
+    }
+  }
+  const denied = gateway.permissionDenied;
   const out = {
-    available: !reason,
-    reason: reason || null,
+    available: !reason && !denied,
+    reason: reason || (denied ? PERMISSION_MESSAGE : null),
+    permission: denied ? { denied: true, path: denied.path, at: denied.at, needed: CHAT_PERMISSIONS } : { denied: false },
     gateway: {
       origin: gateway.origin || null,
       token: gateway.tokenValue ? { exchangedAt: gateway.lastTokenAt, expiresAt: gateway.tokenExpiresAt() } : null,
@@ -557,15 +580,8 @@ async function chatStatusBody(probe) {
     activeTurns: chatStats.active,
     lastTurn: chatStats.lastTurn,
   };
-  if (probe && !reason) {
-    try {
-      const st = await gateway.status();
-      out.gateway.reachable = true;
-      out.gateway.version = st.version;
-    } catch (e) {
-      out.gateway.reachable = false;
-      out.gateway.lastError = e.message;
-    }
+  if (probed) {
+    Object.assign(out.gateway, probed);
     out.gateway.token = gateway.tokenValue ? { exchangedAt: gateway.lastTokenAt, expiresAt: gateway.tokenExpiresAt() } : null;
   }
   return out;
@@ -720,6 +736,10 @@ async function handle(req, res) {
         defaultFolder: bridge.extension?.workspaceFolders?.[0] || (fs.existsSync(config.workspace) ? config.workspace : null),
       });
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+      // A chat turn runs Kiro Crew with tools in the folder, so only a folder
+      // this VS Code window has open (or the default workspace when none is).
+      const roots = bridge.extension?.workspaceFolders?.length ? bridge.extension.workspaceFolders : [config.workspace];
+      if (!folderInRoots(parsed.folder, roots)) return sendJson(res, 403, { error: 'folder is not open in this VS Code window' });
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
       const ac = new AbortController();
       res.on('close', () => {
@@ -836,10 +856,15 @@ server.listen(PORT, HOST, async () => {
     setStatus('error', 'Could not open the VS Code frame port', e.message);
     return;
   }
-  if (framePort !== frameState.port || !fs.existsSync(FRAME_STATE_FILE)) {
-    fs.writeFileSync(FRAME_STATE_FILE, serializeFrameState({ key: FRAME_KEY, port: framePort }), { mode: 0o600 });
+  if (framePort !== frameState.port || !fs.existsSync(FRAME_STATE_FILE) || frameStateHasKey(frameStateText)) {
+    fs.writeFileSync(FRAME_STATE_FILE, serializeFrameState({ port: framePort }), { mode: 0o600 });
   }
   log('launcher listening', `${HOST}:${listenPort}`, 'frame', `${HOST}:${framePort}`, framePort === frameState.port ? '(saved port)' : '(new port)', 'data', DATA_DIR, 'signed', PROXY_SECRET ? 'yes' : 'no');
   console.log(JSON.stringify({ event: 'listening', port: listenPort, framePort, pid: process.pid }));
   launchServer();
+  // One early gateway call, so an Update whose new chat permissions are not
+  // approved yet shows in the page before anyone tries chat.
+  if (!gateway.unavailableReason) {
+    gateway.status().catch((e) => log('gateway probe at start:', e.message));
+  }
 });

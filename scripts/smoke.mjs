@@ -254,6 +254,32 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     card && card.hostInside && /round 0px 0px 15px 15px/.test(card.clip), card && card.clip);
   check('toolbar is one slim row inside the card', card && card.bar <= 36, card && `${card.bar}px`);
 
+  // The frame is placed on change, not every animation frame, and still
+  // follows the card through a window resize and a layout shift.
+  const placements0 = await page.evaluate(() => window.__vscodePane.placements);
+  await sleep(3000);
+  const placements1 = await page.evaluate(() => window.__vscodePane.placements);
+  check('idle for 3 s the frame is placed at most ~3 times a second (not every animation frame)', placements1 - placements0 <= 10, `${placements1 - placements0} placements in 3 s`);
+  const tracks = () => page.evaluate(() => {
+    const host = document.querySelector('div[data-vscode-pane-frame-host]').getBoundingClientRect();
+    const slot = document.querySelector('[data-testid="vscode-pane-frame-slot"]').getBoundingClientRect();
+    const d = [host.left - slot.left, host.top - slot.top, host.width - slot.width, host.height - slot.height].map((n) => Math.round(n * 10) / 10);
+    return { ok: d.every((n) => Math.abs(n) <= 1), d, slot: [slot.left, slot.top, slot.width, slot.height].map(Math.round) };
+  });
+  await page.setViewportSize({ width: 1100, height: 700 });
+  await sleep(400);
+  const afterResize = await tracks();
+  check('after a window resize the frame matches the card slot', afterResize.ok, JSON.stringify(afterResize));
+  await page.evaluate(() => { document.getElementById('shell').style.gridTemplateColumns = '200px 1fr'; });
+  await sleep(400);
+  const afterShift = await tracks();
+  check('after a layout shift (wider side rail) the frame matches the card slot', afterShift.ok && afterShift.slot[0] !== afterResize.slot[0], JSON.stringify(afterShift));
+  await page.evaluate(() => { document.getElementById('shell').style.gridTemplateColumns = ''; });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await sleep(400);
+  const restored = await tracks();
+  check('back at the first size the frame matches the card slot again', restored.ok, JSON.stringify(restored));
+
   // Item 2 (UI half): the palette is POSTed on mount and on every theme change.
   const waitTheme = async (pred, since = 0, ms = 10_000) => {
     const t = Date.now();
@@ -478,7 +504,13 @@ async function main() {
     check('session URL uses 127.0.0.1 and the frame port, not the API port', wbUrl.hostname === '127.0.0.1' && framePort > 0 && framePort !== PORT, `frame ${framePort}, api ${PORT}`);
     check('session URL carries no connection token', !wbUrl.search.includes('tkn='));
     const savedFrame = JSON.parse(fs.readFileSync(path.join(dataDir, 'state', 'frame.json'), 'utf8'));
-    check('frame port and path key are saved in the data dir', savedFrame.port === framePort && wbUrl.pathname.startsWith(`/vsc-${savedFrame.key}/`));
+    const pathKey = (/^\/vsc-([^/]+)\//.exec(wbUrl.pathname) || [])[1] || '';
+    check(
+      'frame.json keeps only the frame port; the path key is not written to disk',
+      JSON.stringify(Object.keys(savedFrame)) === '["port"]' && savedFrame.port === framePort && pathKey.length >= 24 && !fs.readFileSync(path.join(dataDir, 'state', 'frame.json'), 'utf8').includes(pathKey),
+      JSON.stringify(Object.keys(savedFrame)),
+    );
+    check('/api/session carries a run id', typeof session.instance === 'string' && session.instance.length >= 8, String(session.instance));
     const apiFrame = await rawRequest({ port: PORT, path: wbUrl.pathname });
     check('the API port does not serve the workbench', apiFrame.status === 404, String(apiFrame.status));
 
@@ -626,6 +658,7 @@ async function main() {
     }
     check('bridge extension connected and said hello', st && st.connected && st.extension, st && JSON.stringify(st.extension));
     check('server process keeps the gateway tracking var (seen from the extension host)', st && st.extension && st.extension.spawnTracked === true, st && st.extension && String(st.extension.spawnTracked));
+    check('the bridge secret is gone from the extension host environment once the bridge has read it', st && st.extension && st.extension.secretInEnv === false, st && st.extension && String(st.extension.secretInEnv));
 
     // 7b. the built-in Chat is answered by Kiro Crew (the mock gateway)
     const cs0 = (await api('GET', '/api/chat/status?probe=1')).json;
@@ -674,6 +707,58 @@ async function main() {
       await sleep(300);
     }
     check('chat status records the finished turn', cs1 && cs1.lastTurn && cs1.lastTurn.outcome === 'done' && cs1.turns >= 1, JSON.stringify(cs1 && cs1.lastTurn));
+
+    // 7b-2. an Update leaves the new chat permissions unapproved: the gateway
+    //       answers the app token with its out-of-scope 403
+    {
+      const noteSel = '[data-testid="vscode-pane-chat-problem"]';
+      gatewayMock.deny(['/api/chat', '/api/status']);
+      const denied = (await api('GET', '/api/chat/status?probe=1')).json;
+      check(
+        'GET /api/chat/status names unapproved chat permissions after a gateway 403',
+        denied && denied.available === false && denied.permission && denied.permission.denied === true && /approve the new API permissions/.test(denied.reason || '') &&
+          JSON.stringify(denied.permission.needed) === '["/api/chat","/api/chat/slots","/api/status"]',
+        JSON.stringify(denied && { available: denied.available, reason: denied.reason, permission: denied.permission }),
+      );
+      const note = await page.locator(noteSel).textContent({ timeout: 8000 }).catch(() => '');
+      check('the pane shows the unapproved-permissions note', /approve the new API permissions/.test(note || ''), (note || '').slice(0, 120));
+      gatewayMock.deny([]);
+      const ok = (await api('GET', '/api/chat/status?probe=1')).json;
+      let gone = false;
+      for (let i = 0; i < 20 && !gone; i++) {
+        gone = (await page.locator(noteSel).count()) === 0;
+        if (!gone) await sleep(500);
+      }
+      check('once approved, chat is available again and the note goes away', ok && ok.available === true && ok.permission && ok.permission.denied === false && gone, JSON.stringify(ok && ok.permission));
+    }
+
+    // 7b-3. the chat session was closed in Kiro Crew: the next turn recreates it
+    {
+      const slotKey = slotNameFor(workspace);
+      gatewayMock.closeSlot(slotKey);
+      const prompt2 = `smoke ${crypto.randomBytes(3).toString('hex')}: after close`;
+      const ask2 = await api('POST', '/api/chat/ask', { prompt: prompt2 });
+      let turn2 = null;
+      const tc = Date.now();
+      while (Date.now() - tc < 30_000) {
+        turn2 = gatewayMock.rec.turns.find((t) => String(t.message).startsWith(prompt2));
+        if (turn2) break;
+        await sleep(300);
+      }
+      check(
+        'a chat session closed in Kiro Crew is recreated for the folder on the next turn',
+        ask2.json && ask2.json.ok && turn2 && turn2.slot === slotKey && String(gatewayMock.rec.slots.get(slotKey)?.project).toLowerCase() === workspace.toLowerCase(),
+        turn2 ? `${turn2.slot} project=${gatewayMock.rec.slots.get(slotKey)?.project}` : `turns: ${gatewayMock.rec.turns.length}`,
+      );
+      let cs2b = null;
+      const td = Date.now();
+      while (Date.now() - td < 15_000) {
+        cs2b = (await api('GET', '/api/chat/status')).json;
+        if (cs2b && cs2b.turns >= 2 && cs2b.activeTurns === 0) break;
+        await sleep(300);
+      }
+      check('the turn after the recreate finishes', cs2b && cs2b.turns >= 2 && cs2b.lastTurn && cs2b.lastTurn.outcome === 'done', JSON.stringify(cs2b && cs2b.lastTurn));
+    }
     fs.mkdirSync(path.join(ROOT, '.cache', 'smoke'), { recursive: true });
     await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'chat.png') });
 
@@ -912,12 +997,62 @@ async function main() {
       await sleep(3000); // let the workbench flush its storage
     }
 
-    // 15. restart the launcher (a gateway restart): same frame origin and path,
-    //     and the workbench comes back with its editor
+    // 14b. restart the backend while the page stays open (an app disable and
+    //      enable, an Update, a gateway restart): the page sees the new run id
+    //      and frame URL and reloads the kept-alive frame with no user action
+    if (process.platform === 'win32') {
+      const s0 = (await api('GET', '/api/session')).json;
+      const url0 = new URL(s0.url);
+      const loads0 = await page.evaluate(() => window.__vscodePane.loads);
+      earlierTree.push(...descendants(processTable(), launcher.pid));
+      spawnSync('taskkill', ['/PID', String(launcher.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      await sleep(1500);
+      PORT = await freePort();
+      launcher = startLauncher(PORT);
+      hostServer.setLauncherPort(PORT);
+      const tR = Date.now();
+      let s1 = null;
+      while (Date.now() - tR < 120_000) {
+        s1 = (await api('GET', '/api/session').catch(() => ({ json: null }))).json;
+        if (s1 && (s1.ready || s1.status === 'error')) break;
+        await sleep(500);
+      }
+      const url1 = s1 && s1.url ? new URL(s1.url) : null;
+      check(
+        'a restarted backend has a new run id and frame path key on the same frame origin',
+        url1 && s1.instance && s1.instance !== s0.instance && url1.origin === url0.origin && url1.pathname !== url0.pathname,
+        url1 ? `run ${s0.instance} -> ${s1.instance}; frame ${url0.port} -> ${url1.port}` : 'not ready',
+      );
+      const logR = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');
+      const spawnedR = [...logR.matchAll(/server spawned pid (\d+) port (\d+)/g)];
+      if (spawnedR.length) serverPort = Number(spawnedR.at(-1)[2]);
+      let src1 = '';
+      let st1 = null;
+      while (Date.now() - tR < 150_000) {
+        src1 = (await page.locator('iframe[title="VS Code"]').getAttribute('src').catch(() => '')) || '';
+        st1 = (await api('GET', '/api/state')).json;
+        if (url1 && src1.startsWith(url1.origin + url1.pathname) && st1 && st1.extension && Date.parse(st1.extension.at) > tR) break;
+        await sleep(500);
+      }
+      const loads1 = await page.evaluate(() => window.__vscodePane.loads);
+      check(
+        'with the page still open, the pane reloads the frame on the new URL and the bridge reconnects, with no user action',
+        url1 && src1.startsWith(url1.origin + url1.pathname) && loads1 === loads0 + 1 && st1 && st1.extension && Date.parse(st1.extension.at) > tR,
+        `frame loads ${loads0} -> ${loads1}; hello ${st1 && st1.extension && st1.extension.at}`,
+      );
+      const dead = await frame.locator('text=/Cannot reconnect|connection token/i').count().catch(() => 0);
+      const reopenR = await api('POST', '/api/open', { path: target, line: 2 });
+      check('the reloaded workbench is live (no reconnect error, /api/open works)', dead === 0 && reopenR.json && reopenR.json.ok, JSON.stringify(reopenR.json));
+      await sleep(3000); // let the workbench flush its storage
+    }
+
+    // 15. restart the launcher with the dashboard closed (a gateway restart):
+    //     same frame origin, a new path key, and the workbench comes back with
+    //     its editor from browser storage
     if (process.platform === 'win32') {
       const urlBefore = new URL((await api('GET', '/api/session')).json.url);
       const themeBeforeRestart = (await api('GET', '/api/theme')).json?.theme;
-      earlierTree = descendants(processTable(), launcher.pid);
+      earlierTree.push(...descendants(processTable(), launcher.pid));
       await browser.close();
       browser = null;
       hostServer.close();
@@ -934,8 +1069,8 @@ async function main() {
       }
       const urlAfter = s2 && s2.url ? new URL(s2.url) : null;
       check(
-        'after a launcher restart on a new API port, the frame keeps its origin and path',
-        urlAfter && PORT !== firstLauncherPort && urlAfter.origin === urlBefore.origin && urlAfter.pathname === urlBefore.pathname,
+        'after a launcher restart on a new API port, the frame keeps its origin and gets a new path key',
+        urlAfter && PORT !== firstLauncherPort && urlAfter.origin === urlBefore.origin && urlAfter.pathname !== urlBefore.pathname,
         urlAfter ? `api ${firstLauncherPort} -> ${PORT}; frame ${urlBefore.port} -> ${urlAfter.port}` : 'not ready',
       );
       const logNow = fs.readFileSync(path.join(dataDir, 'logs', 'launcher.log'), 'utf8');

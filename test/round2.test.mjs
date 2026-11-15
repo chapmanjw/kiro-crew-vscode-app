@@ -11,7 +11,7 @@ import {
   GatewayClient, SseParser, TurnRenderer, cookieNameFor, slotNameFor, gatewayOriginAllowed, TOKEN_TTL_MS,
 } from '../backend/lib/gateway.mjs';
 import { parseChatRequest, runChatTurn, MAX_PROMPT } from '../backend/lib/chatbridge.mjs';
-import { parseFrameState, frameStateFor, serializeFrameState } from '../backend/lib/framestate.mjs';
+import { parseFrameState, frameStateFor, frameStateHasKey, serializeFrameState } from '../backend/lib/framestate.mjs';
 import { Bridge } from '../backend/lib/bridge.mjs';
 import { buildServerArgs } from '../backend/lib/args.mjs';
 import { matchRoute } from '../backend/lib/router.mjs';
@@ -309,14 +309,23 @@ test('parseChatRequest validates the bridge body', () => {
 
 // ---------------------------------------------------------------- frame state, bridge, args, routes
 
-test('frame state persists the port and key; bad files fall back', () => {
-  const s = frameStateFor(parseFrameState(serializeFrameState({ key: 'k'.repeat(24), port: 61234 })));
-  assert.deepEqual(s, { key: 'k'.repeat(24), port: 61234 });
-  assert.deepEqual(parseFrameState('{"port": 80, "key": "short"}'), {});
+test('frame state persists only the port; the key is new each run; bad files fall back', () => {
+  const text = serializeFrameState({ key: 'k'.repeat(24), port: 61234 });
+  assert.deepEqual(JSON.parse(text), { port: 61234 }, 'the key is never written');
+  assert.equal(frameStateHasKey(text), false);
+  const a = frameStateFor(parseFrameState(text));
+  const b = frameStateFor(parseFrameState(text));
+  assert.equal(a.port, 61234);
+  assert.match(a.key, /^[A-Za-z0-9_-]{24}$/);
+  assert.notEqual(a.key, b.key, 'a new key for every run');
+  // A 0.3.0-dev file with a saved key: the key is ignored and flagged for rewrite.
+  const legacy = '{"key": "' + 'k'.repeat(24) + '", "port": 61234}';
+  assert.deepEqual(parseFrameState(legacy), { port: 61234 });
+  assert.equal(frameStateHasKey(legacy), true);
+  assert.notEqual(frameStateFor(parseFrameState(legacy)).key, 'k'.repeat(24));
+  assert.deepEqual(parseFrameState('{"port": 80}'), {});
   assert.deepEqual(parseFrameState('not json'), {});
-  const fresh = frameStateFor({});
-  assert.equal(fresh.port, 0);
-  assert.match(fresh.key, /^[A-Za-z0-9_-]{24}$/);
+  assert.equal(frameStateFor({}).port, 0);
 });
 
 test('Bridge records chat capability, theme results, and keeps only the newest theme command', () => {

@@ -190,14 +190,31 @@ agent, its tools, approvals and the history live in Kiro Crew.
    `POST /api/apps/vscode-pane/token` (header `X-App-Secret`), renews it 10
    minutes before the hour is up and once more after a 401 or 403, finds or
    creates the slot `vscode-<folder>-<hash>` with `POST /api/chat/slots`, points
-   it at the folder with `POST /api/chat/slots/{slot}/project`, and sends the
-   turn with `POST /api/chat`. That answers with an SSE stream of slot rows,
+   it at the folder with `POST /api/chat/slots/{slot}/project` when its project
+   differs, and sends the turn with `POST /api/chat`. The create runs on every
+   turn rather than once per folder, because the "VS Code: <folder>" session
+   can be closed or deleted in Kiro Crew at any time; for an open slot it
+   changes nothing. If the slot disappears between the create and the send
+   (a 404 or `slot_closed`), the launcher recreates it and sends once more. That answers with an SSE stream of slot rows,
    so no WebSocket is needed. Reply text streams as markdown, tool calls show
    as italic lines, a pending approval shows a note to approve it in Kiro Crew.
    Stopping the request in VS Code stops the turn with
    `POST /api/chat/slots/{slot}/stop`.
 5. The app token is confined to `permissions.api`; chat needs `/api/chat`
-   (which covers `/api/chat/slots/...`) and `/api/status` for the probe.
+   (which covers `/api/chat/slots/...`) and `/api/status` for the probe. When
+   those are not approved, the gateway answers the app token with
+   `403 {"error": "app token not permitted for this endpoint"}`. The launcher
+   reports that as `permission: {denied: true, ...}` and an "approve the new API
+   permissions" `reason` in `GET /api/chat/status`, as `chat: {code:
+   "permission", message}` in `GET /api/session` (the page shows the message
+   above the workbench), and as the error text in the VS Code Chat view. It
+   probes `/api/status` once at start, so the note shows before anyone chats.
+6. `POST /api/bridge/chat` runs a full Kiro Crew turn, with tools, so the
+   launcher accepts only a folder that one of the window's workspace folders
+   contains (or the default workspace when none is open). The extension reads
+   `KIROCREW_VSCODE_BRIDGE_SECRET` and deletes it from the extension host's
+   environment at load (it activates on `*`), so language servers, debug
+   adapters, tasks and other extensions' child processes do not inherit it.
 
 ### Theme
 
@@ -243,11 +260,23 @@ back what VS Code holds. `GET /api/session` carries `theme: {kind, tier}` and
 VS Code in the browser keeps its layout, open editors and user settings in the
 browser, per origin, and its workspace storage key includes the remote
 authority `127.0.0.1:<port>`. The gateway gives the launcher a new `PORT` on
-every start, so the workbench is served from a second listener whose port and
-path key are kept in `data/state/frame.json`. The next start binds the same
-port again (a new one only if something else holds it) and the frame URL is
-unchanged. A reload or remount of the pane, a VS Code server restart and a
-launcher restart all bring back the open editors (checked by the smoke test).
+every start, so the workbench is served from a second listener whose port is
+kept in `data/state/frame.json`. The next start binds the same port again (a
+new one only if something else holds it), so the frame origin is unchanged.
+The `/vsc-<key>` path key is new on every launcher run and never written to
+disk: `data/` is readable by Kiro Crew agents, and the key with the port would
+open the workbench, terminals included, without any Kiro Crew approval. A file
+from an earlier 0.3.0 build that still holds a key is rewritten with the port
+only. VS Code keys its browser state by origin, not by path, so a reload or
+remount of the pane, a VS Code server restart and a launcher restart all
+bring back the open editors (checked by the smoke test).
+
+`GET /api/session` carries `instance`, a random id per launcher run, and the
+page's frame key includes it. When the backend restarts while the dashboard
+stays open (disable and enable, Update, a gateway restart), the page sees the
+new run id and frame URL on its next poll and reloads the kept-alive frame by
+itself; without that the old workbench would hold a connection token the new
+server does not know.
 After a remount the old extension host lingers until the server retires it, so
 the bridge sends commands only to the extension host that said hello last.
 
@@ -261,15 +290,20 @@ the bridge sends commands only to the extension host that said hello last.
   Sessions panel (for example `kiro-light`) retints this one too. The dashboard
   puts no header or padding around an app page (`AppPage.tsx` renders the
   bundle straight into `<main>`), so the page sizes itself to the space left in
-  `<main>` on every animation frame.
+  `<main>` whenever the layout changes.
 - VS Code keeps running when you leave the page. The dashboard unmounts an app
   page whenever you go to another route, and an iframe taken out of the
   document is destroyed, which is why 0.2.0 started over each time. The iframe
   now lives in one element on `document.body`. While the page is mounted it is
-  placed over the card's body every frame (resize, side panels, scroll and zoom
-  all just move it) and clipped to the card's rounded bottom corners; while the
-  page is not mounted it is hidden, not removed, and loses keyboard focus. It is
-  reloaded only for another folder, the Reload button or a restarted server.
+  placed over the card's body and clipped to the card's rounded bottom corners.
+  Placement runs on change, not every animation frame: a `ResizeObserver` on
+  the card, its frame slot, `<main>` and the document element (window resize,
+  side panels, zoom), window `resize`, capture-phase `scroll`, and a 500 ms
+  fallback for a move nothing reports; each trigger asks for at most one
+  placement in the next frame. While the page is not mounted the frame is
+  hidden, not removed, and loses keyboard focus. It is reloaded only for
+  another folder, the Reload button, a restarted server or a restarted
+  backend (a new run id).
 - VS Code chip in the chat composer. `contributes.sessionControls` adds a
   "VS Code" chip to the composer shelf, before the agent chip ("Ultra Mode")
   and the project chip. Kiro Crew mounts the control when the chip is clicked
@@ -325,6 +359,12 @@ After editing the source, run `node scripts/stage.mjs` again and use Update on
 the app in the App Store. Disable and enable alone re-uses the old installed
 copy.
 
+Update turns the app off until you turn it back on. When an update adds API
+permissions, turning it on asks you to approve them, and the app's token
+cannot use them until you do. 0.3.0 adds `/api/chat`, `/api/chat/slots` and
+`/api/status` to 0.2.0's list; without them VS Code Chat cannot reach Kiro
+Crew, and the page and `GET /api/chat/status` say so.
+
 ## Configuration
 
 Optional `data/config.json` in the installed app folder
@@ -372,13 +412,18 @@ its own, the bridge reconnects and `/api/open` works again. It also plays the Ki
 (`test/support/gateway-mock.mjs`): the launcher exchanges its secret for an app
 token there, a prompt sent through `/api/chat/ask` must reach the mock from the
 default Chat view with no `@` mention, and the mock's reply must show in the
-Chat view. It seeds a saved theme before the start and checks the Machine
+Chat view. A 403 from the mock with the gateway's out-of-scope text must
+show as unapproved permissions in `/api/chat/status` and in the page, and a
+chat session closed in the mock must be recreated with its project on the next
+turn. It seeds a saved theme before the start and checks the Machine
 settings, checks that the page's palette POST on mount replaces it as tier
 "palette" and that the bridge writes it, posts a second palette and reads the workbench setting back through
 the bridge and from the painted status bar, reloads the page and checks the
 open editor comes back, then restarts the launcher on a new API port and checks
 the frame keeps its origin and path and the editor is restored from the same
-browser profile. It stops the launcher with `taskkill /T /F` (what the gateway does
+browser profile. Before that it restarts the launcher with the page still
+open and checks that the page loads the new frame URL by itself and the
+bridge reconnects. It stops the launcher with `taskkill /T /F` (what the gateway does
 on Windows) and checks that every process from the run is gone and both ports
 are free. It needs a local Chrome or Edge and installs `playwright-core` under
 `.cache/smoke-deps` on first run; the page loads React from esm.sh, so it needs
@@ -406,7 +451,9 @@ card's radius, border and inset and the frame's clip; that the palette is POSTed
 on mount and again after switching to light and back, with every value as
 `#rrggbb`; that a palette with no readable tokens POSTs `{kind}` alone (light
 from a `*-light` name, dark from the OS scheme for an unnamed one) and the card
-falls back to Default Light or Dark colours; that leaving the page unmounts it while the iframe stays in the
+falls back to Default Light or Dark colours; that the frame is placed only a
+few times a second while idle and still matches its slot after a window
+resize and a layout shift; that leaving the page unmounts it while the iframe stays in the
 document, hidden, and that coming back shows the same iframe element with no
 new workbench load, no new extension-host hello and the same editor tab; and
 that the composer chip lands on `/apps/vscode-pane?folder=<chat project>` and
@@ -455,6 +502,11 @@ own machine; swap it for original art before any public release of this app.
   checked for persistence.
 - Two open VS Code windows (two frames) share one command queue; the one that
   connected last receives the commands.
+- The bridge secret leaves the extension host's environment when the bridge
+  loads. A process an extension or VS Code itself starts before that (the
+  bridge activates on `*`, early but not first) still inherits it, and the
+  VS Code server process keeps it so each new extension host gets it; VS Code
+  has no way to hand an environment variable to one extension only.
 - Chat in a folder that is in Restricted Mode does not run: VS Code disables
   all language models until the folder is trusted.
 - Chat relies on a proposed API (`defaultChatParticipant`) and on 1.146 chat

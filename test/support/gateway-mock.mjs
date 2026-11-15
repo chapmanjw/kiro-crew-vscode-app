@@ -10,6 +10,10 @@
 //   POST /api/chat                       {slot, message} -> text/event-stream of rows, then [DONE]
 //   POST /api/chat/slots/{slot}/stop
 // Every route but the token exchange needs the mc_token_<port> cookie.
+// Test controls: closeSlot(key) removes a slot as closing its session in Kiro
+// Crew does; rec.closeBeforeNextSend makes the next POST /api/chat find its slot
+// gone (404 slot_not_found); deny(prefixes) answers those paths with the
+// gateway's out-of-scope 403, as for permissions.api entries not yet approved.
 
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -20,6 +24,9 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
   const rec = { exchanges: 0, turns: [], stops: [], projects: [], slots: new Map(), aborted: [], requests: [] };
   const tokens = new Set();
   let rejectLeft = rejectFirstTokens;
+  let denied = [];
+  const SCOPE_DENIED = { error: 'app token not permitted for this endpoint', code: 'forbidden' };
+  const notFound = { error: 'not found', code: 'slot_not_found' };
   let port = 0;
 
   const json = (res, status, body) => {
@@ -61,6 +68,7 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
       return json(res, 200, { token: t });
     }
     if (!authed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (denied.some((d) => url.pathname === d || url.pathname.startsWith(d + '/'))) return json(res, 403, SCOPE_DENIED);
     if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, { version: '0.0.0-mock', owner_id_hash: 'x' });
     if (req.method === 'POST' && url.pathname === '/api/chat/slots') {
       const b = await readJson(req);
@@ -72,7 +80,7 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
     if (req.method === 'POST' && m) {
       const key = decodeURIComponent(m[1]);
       const slot = rec.slots.get(key);
-      if (!slot) return json(res, 404, { error: 'slot not found' });
+      if (!slot) return json(res, 404, notFound);
       const b = await readJson(req);
       if (m[2] === 'project') {
         slot.project = String(b?.project || '');
@@ -84,7 +92,11 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
     }
     if (req.method === 'POST' && url.pathname === '/api/chat') {
       const b = await readJson(req);
-      if (!b || !rec.slots.has(String(b.slot))) return json(res, 404, { error: 'slot not found' });
+      if (rec.closeBeforeNextSend && b) {
+        rec.closeBeforeNextSend = false;
+        rec.slots.delete(String(b.slot));
+      }
+      if (!b || !rec.slots.has(String(b.slot))) return json(res, 404, notFound);
       rec.turns.push({ slot: b.slot, message: b.message });
       if (/\bqueue me\b/.test(b.message)) return json(res, 200, { ok: true, queued: true, queue_id: 'q1' });
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
@@ -115,6 +127,12 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
   return {
     server,
     rec,
+    closeSlot(key) {
+      rec.slots.delete(key);
+    },
+    deny(prefixes = []) {
+      denied = [...prefixes];
+    },
     async listen() {
       await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
       port = server.address().port;

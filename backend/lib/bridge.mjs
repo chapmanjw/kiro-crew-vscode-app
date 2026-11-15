@@ -155,6 +155,7 @@ export class Bridge {
           version: str(ev.version),
           workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
           spawnTracked: ev.spawnTracked === true,
+          secretInEnv: ev.secretInEnv === true,
           chat: chatInfo(ev.chat),
           at,
         };

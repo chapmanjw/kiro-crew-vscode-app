@@ -28,6 +28,32 @@ export class GatewayError extends Error {
   }
 }
 
+/** The API prefixes this app's chat needs in app.json permissions.api. */
+export const CHAT_PERMISSIONS = Object.freeze(['/api/chat', '/api/chat/slots', '/api/status']);
+
+/**
+ * The text the gateway sends when an app token calls a path outside the app's
+ * approved permissions.api (token_auth_app_scope.py _enforce_app_scope ->
+ * token_auth_paths.py _deny: 403 {"error": "app token not permitted for this
+ * endpoint", "code": "forbidden"}). After an Update the new prefixes stay
+ * unapproved until the app is turned on again and they are accepted.
+ */
+const SCOPE_DENIED_RE = /not permitted for this endpoint/i;
+
+export const PERMISSION_MESSAGE =
+  `Kiro Crew has not approved this app's chat permissions (${CHAT_PERMISSIONS.join(', ')}). ` +
+  'An Update turns the app off; turn VS Code back on in Kiro Crew Apps and approve the new API permissions, then try again.';
+
+/** True for the gateway's out-of-scope 403. */
+export function isScopeDenied(status, data) {
+  return status === 403 && !!data && typeof data.error === 'string' && SCOPE_DENIED_RE.test(data.error);
+}
+
+/** Slot errors that mean the cached slot was closed or removed in Kiro Crew. */
+export function isSlotGone(err) {
+  return !!err && (err.status === 404 || err.code === 'slot_not_found' || err.code === 'slot_closed');
+}
+
 /** Cookie name the gateway reads for the origin we call (token_auth.py: mc_token_<port>). */
 export function cookieNameFor(origin) {
   const u = new URL(origin);
@@ -170,6 +196,18 @@ export class GatewayClient {
     this.lastError = null;
     this.lastTokenAt = null;
     this.slots = new Map(); // folder -> slot key
+    this.permissionDenied = null; // {path, at} after the gateway's out-of-scope 403
+  }
+
+  /** Record the outcome of a gateway call for the permission state; returns the error to throw, if any. */
+  noteResponse(method, p, status, data) {
+    if (isScopeDenied(status, data)) {
+      this.permissionDenied = { path: p.split('?')[0], at: new Date(this.now()).toISOString() };
+      this.lastError = PERMISSION_MESSAGE;
+      return new GatewayError(PERMISSION_MESSAGE, { status, code: 'permission' });
+    }
+    if (status >= 200 && status < 300) this.permissionDenied = null;
+    return null;
   }
 
   /** Why the client cannot run, or '' when it can. */
@@ -253,6 +291,8 @@ export class GatewayClient {
   async json(method, p, body) {
     const res = await this.request(method, p, { body });
     const data = await res.json().catch(() => null);
+    const denied = this.noteResponse(method, p, res.status, data);
+    if (denied) throw denied;
     if (!res.ok) {
       const msg = `${method} ${p.split('?')[0]} -> HTTP ${res.status}${data?.error ? ': ' + String(data.error).slice(0, 160) : ''}`;
       this.lastError = msg;
@@ -270,10 +310,13 @@ export class GatewayClient {
   /**
    * The Kiro Crew chat slot for a workspace folder: created (or reopened, the
    * create is idempotent by name) and pointed at the folder as its project.
+   * Run on every turn, not cached: John can close or delete the
+   * "VS Code: <folder>" session in Kiro Crew at any time, and a send to a slot
+   * that is gone would fail or open a session with no project. For a slot that
+   * is still open the create is a no-op and the project is set only if it
+   * changed.
    */
   async ensureSlot(folder) {
-    const cached = this.slots.get(folder);
-    if (cached) return cached;
     const name = slotNameFor(folder);
     const created = await this.json('POST', '/api/chat/slots', {
       name,
@@ -305,11 +348,14 @@ export class GatewayClient {
     const type = res.headers.get('content-type') || '';
     if (!res.ok || !type.includes('text/event-stream')) {
       const data = await res.json().catch(() => null);
+      const denied = this.noteResponse('POST', '/api/chat', res.status, data);
+      if (denied) throw denied;
       if (res.ok && data && data.queued) return { queued: true, done: false };
       const msg = `chat send -> HTTP ${res.status}${data?.error ? ': ' + String(data.error).slice(0, 200) : ''}`;
       this.lastError = msg;
       throw new GatewayError(msg, { status: res.status, code: data?.code || '' });
     }
+    this.noteResponse('POST', '/api/chat', res.status, null);
     const parser = new SseParser();
     const decoder = new TextDecoder();
     for await (const chunk of res.body) {

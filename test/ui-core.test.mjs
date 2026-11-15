@@ -109,8 +109,10 @@ test('folderFromSearch and appPageUrl round-trip Windows and POSIX paths', () =>
   assert.equal(folderFromSearch('?folder=%20%20'), '');
 });
 
-test('frameKey changes only with URL, reload nonce or server generation', () => {
-  const s = { ready: true, url: 'http://127.0.0.1:1/vsc-k/?folder=/a', generation: 2 };
+test('frameKey changes only with URL, reload nonce, launcher run or server generation', () => {
+  const s = { ready: true, url: 'http://127.0.0.1:1/vsc-k/?folder=/a', generation: 2, instance: 'run1' };
+  // A launcher restart with the same URL and generation still reloads the frame.
+  assert.notEqual(frameKey(s, 0), frameKey({ ...s, instance: 'run2' }, 0));
   assert.equal(frameKey(s, 0), frameKey({ ...s, status: 'ready', message: 'x' }, 0));
   assert.notEqual(frameKey(s, 0), frameKey(s, 1));
   assert.notEqual(frameKey(s, 0), frameKey({ ...s, generation: 3 }, 0));

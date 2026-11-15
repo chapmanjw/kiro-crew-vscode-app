@@ -18,6 +18,13 @@ const http = require('http');
 
 const BRIDGE_URL = process.env.KIROCREW_VSCODE_BRIDGE_URL || '';
 const BRIDGE_SECRET = process.env.KIROCREW_VSCODE_BRIDGE_SECRET || '';
+// The secret lets its holder run Kiro Crew chat turns, so it is taken out of
+// this extension host's environment as soon as we have read it: language
+// servers, debug adapters, tasks and other extensions' child processes
+// started from here inherit process.env and must not get it. The extension
+// activates on "*" so this runs before most other extensions start. A child
+// started earlier still has it (see README, Known limits).
+delete process.env.KIROCREW_VSCODE_BRIDGE_SECRET;
 const VERSION = require('./package.json').version;
 // One id per extension host, so the launcher can tell a remounted window's new
 // host from the old one that lingers until the server retires it.
@@ -181,6 +188,9 @@ function sendHello() {
     // Whether this extension host (and so the server process) still carries the
     // gateway's process-tracking variable. A boolean only, never the value.
     spawnTracked: !!process.env.KIROCREW_SPAWN_INSTANCE,
+    // Whether the bridge secret is still in this host's environment (it should
+    // not be). A boolean only.
+    secretInEnv: !!process.env.KIROCREW_VSCODE_BRIDGE_SECRET,
     chat: chatState,
   });
 }

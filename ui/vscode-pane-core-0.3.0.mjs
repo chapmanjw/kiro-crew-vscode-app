@@ -188,12 +188,14 @@ export function appPageUrl(folder) {
 
 /**
  * Identity of the workbench load. The frame is reloaded only when this
- * changes: another folder (new URL), the Reload button (nonce) or a new server
- * generation, whose server cannot resume the old workbench session.
+ * changes: another folder (new URL), the Reload button (nonce), a new server
+ * generation, whose server cannot resume the old workbench session, or a new
+ * launcher run (`instance`), whose connection token the old workbench lacks.
+ * Generations restart at 1 in each run, so the run id is needed as well.
  */
 export function frameKey(session, nonce) {
   if (!session || !session.ready || !session.url) return null;
-  return `${session.url}#${nonce || 0}#${session.generation || 0}`;
+  return `${session.url}#${nonce || 0}#${session.instance || ''}#${session.generation || 0}`;
 }
 
 /**
