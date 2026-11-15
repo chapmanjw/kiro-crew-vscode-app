@@ -412,7 +412,8 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     // crew chat toggle counter and slot for the page
     let s = (await proxy('GET', `/api/session?folder=${encodeURIComponent(workspace)}`)).json;
     assert.equal(s.crewChatToggle, 0);
-    assert.equal(s.crewSlot, slotNameFor(workspace));
+    assert.deepEqual(s.crewSlot, { key: slotNameFor(workspace), folder: workspace, title: `VS Code: ${path.basename(workspace)}` });
+    assert.ok(Number.isInteger(s.crewChatToggle));
     await bridgeCall('POST', '/api/bridge/events', { type: 'toggleCrewChat' });
     s = (await proxy('GET', '/api/session')).json;
     assert.equal(s.crewChatToggle, 1);
@@ -425,6 +426,14 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(mock.rec.slots.get(a.slot).project, workspace);
     assert.equal((await bridgeCall('POST', '/api/bridge/sessions', { folder: path.join(dataDir, 'elsewhere'), title: 'x' })).status, 403);
     assert.deepEqual((await bridgeCall('GET', '/api/bridge/sessions')).json.sessions.map((x) => x.slot).sort(), [a.slot, b.slot].sort());
+    // The crew column lists them from GET /api/chat/slots under the app token: the app's own slots, project set.
+    const listed = await new GatewayClient({ origin, appName: 'vscode-pane', secret }).json('GET', '/api/chat/slots');
+    for (const x of [a, b]) {
+      const row = listed.slots.find((r) => r.key === x.slot);
+      assert.ok(row, `${x.slot} listed`);
+      assert.equal(row.project, workspace);
+      assert.match(row.title, /^VS Code: /);
+    }
 
     // a native turn streams structured parts
     const t = await bridgeCall('POST', '/api/bridge/chat', { prompt: 'hello there', folder: workspace, slot: a.slot });

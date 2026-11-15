@@ -7,6 +7,8 @@
 //   POST /api/apps/{name}/token          X-App-Secret -> {token}
 //   GET  /api/status                     {version}
 //   POST /api/chat/slots                 {name, title} -> slot row {key, project}
+//   GET  /api/chat/slots                 {slots:[{key, title, project, workspace, running}]}; an app token sees
+//                                        only the slots it created (ws_event_scope.filter_slots_for_app)
 //   GET  /api/chat/slots/{slot}?limit=   {key, title, running, total, messages:[{role, content, cls, ts, meta}]}
 //   POST /api/chat/slots/{slot}/project  {project}
 //   POST /api/chat                       {slot, message} -> text/event-stream of rows, then [DONE]
@@ -98,6 +100,10 @@ export function createGatewayMock({ appName = 'vscode-pane', secret, rejectFirst
     if (!authed(req)) return json(res, 401, { error: 'unauthorized' });
     if (denied.some((d) => url.pathname === d || url.pathname.startsWith(d + '/'))) return json(res, 403, SCOPE_DENIED);
     if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, { version: '0.0.0-mock', owner_id_hash: 'x' });
+    if (req.method === 'GET' && url.pathname === '/api/chat/slots') {
+      const slots = [...rec.slots.values()].map((s) => ({ key: s.key, title: s.title, project: s.project, workspace: s.project, running: s.running }));
+      return json(res, 200, { slots });
+    }
     if (req.method === 'POST' && url.pathname === '/api/chat/slots') {
       const b = await readJson(req);
       const key = String(b?.name || `slot-${rec.slots.size + 1}`);

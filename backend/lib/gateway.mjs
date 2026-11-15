@@ -85,6 +85,11 @@ export function slotNameFor(folder) {
   return `vscode-${base || 'workspace'}-${hash}`;
 }
 
+/** The title of a folder's own slot, as created by ensureSlot. */
+export function folderSlotTitle(folder) {
+  return `VS Code: ${path.basename(String(folder).replace(/[\\/]+$/, '')) || folder}`;
+}
+
 /** Split an SSE byte stream into `data:` payloads. Comments and other fields are skipped. */
 export class SseParser {
   constructor() {
@@ -318,11 +323,7 @@ export class GatewayClient {
    * changed.
    */
   async ensureSlot(folder) {
-    const key = await this.ensureSlotNamed({
-      name: slotNameFor(folder),
-      title: `VS Code: ${path.basename(String(folder).replace(/[\\/]+$/, '')) || folder}`,
-      folder,
-    });
+    const key = await this.ensureSlotNamed({ name: slotNameFor(folder), title: folderSlotTitle(folder), folder });
     this.slots.set(folder, key);
     return key;
   }

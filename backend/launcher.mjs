@@ -29,7 +29,7 @@ import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
 import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
-import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE, slotNameFor } from './lib/gateway.mjs';
+import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE, slotNameFor, folderSlotTitle } from './lib/gateway.mjs';
 import { parseChatRequest, parseNativeChatRequest, runChatTurn, runNativeTurn, folderInRoots } from './lib/chatbridge.mjs';
 import { SessionRegistry, newSessionSlotName, sessionTitle, historyTurns, APPROVE_IN_KIRO_CREW } from './lib/nativechat.mjs';
 import { chatSettings, parseChatPrefs, DEFAULT_CHAT_PREFS } from './lib/chatprefs.mjs';
@@ -522,9 +522,11 @@ function sessionBody(folderParam) {
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
     chat: chatProblem(),
     // For the docked Kiro Crew chat column (ui/, round 3): the page toggles the
-    // column whenever crewChatToggle changes, and crewSlot is the folder's slot.
+    // column whenever crewChatToggle (an integer) changes, and crewSlot is the
+    // folder's own slot {key, folder, title}. The column lists the per-session
+    // slots itself from GET /api/chat/slots (the app's own slots, with project).
     crewChatToggle: bridge.crewChatToggle,
-    crewSlot: folder ? slotNameFor(folder) : null,
+    crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,
   };
 }
 

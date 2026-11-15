@@ -172,8 +172,9 @@ export async function nativeChatChecks({ page, frame, api, check, gatewayMock, w
   const sess = (await api('GET', '/api/session')).json;
   check(
     'kiroCrew.toggleCrewChat (Ctrl+Alt+K, status bar) increments crewChatToggle in GET /api/session, which also names the crew slot',
-    c0 >= 0 && c1 === c0 + 1 && c2 === c0 + 2 && sess.crewSlot === slotNameFor(sess.folder),
-    `${c0} -> ${c1} -> ${c2}; crewSlot ${sess.crewSlot}`,
+    Number.isInteger(c0) && c0 >= 0 && c1 === c0 + 1 && c2 === c0 + 2 &&
+      !!sess.crewSlot && sess.crewSlot.key === slotNameFor(sess.folder) && sess.crewSlot.folder === sess.folder && /^VS Code: /.test(sess.crewSlot.title),
+    `${c0} -> ${c1} -> ${c2}; crewSlot ${JSON.stringify(sess.crewSlot)}`,
   );
 
   return { s1, s2 };
