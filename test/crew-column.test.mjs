@@ -5,9 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { slotNameFor } from '../backend/lib/gateway.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
@@ -20,7 +18,7 @@ const pageSrc = fs.readFileSync(path.join(UI, manifest.ui.entry), 'utf8');
 const crewSrc = fs.readFileSync(path.join(UI, crewFile), 'utf8');
 const {
   CREW_WIDTH, CREW_HEADER_HEIGHT, STORE_KEYS, clampCrewWidth, parseStoredWidth, parseStoredOpen, normFolder, folderBase, mainSlotTitle,
-  crewSlotFromSession, toggleCounter, counterStep, crewSessionsForFolder, slotBaseName, slotKeyText, slotNameFromHash, chatPageHref, frameRadii,
+  crewSlotFromSession, toggleCounter, counterStep, crewSessionsForFolder, chatPageHref, frameRadii,
 } = core;
 
 test('column files carry the same version as the page entry', () => {
@@ -128,16 +126,6 @@ test('crewSessionsForFolder lists the main slot before the gateway reports it', 
   assert.deepEqual(crewSessionsForFolder(undefined, '', ''), []);
   // The main slot is kept even when its project differs (the user re-pointed it).
   assert.deepEqual(crewSessionsForFolder([{ key: 'm', project: 'D:\\x' }], 'C:\\Work\\App', 'm').map((s) => s.key), ['m']);
-});
-
-test('slotNameFromHash matches the launcher\'s slotNameFor for the same folder', () => {
-  const folders = ['C:\\Users\\chapm\\Projects\\Kiro\\kiro-crew-vscode-app', 'C:\\Work\\My App!\\', 'C:\\', 'D:\\a\\b\\' + 'x'.repeat(50), 'C:/mixed\\Slashes/Here'];
-  for (const f of folders) {
-    const platform = process.platform === 'win32' ? 'win32' : 'linux';
-    const hex = crypto.createHash('sha256').update(slotKeyText(f, platform)).digest('hex');
-    assert.equal(slotNameFromHash(f, hex), slotNameFor(f), f);
-  }
-  assert.equal(slotBaseName(''), 'workspace');
 });
 
 test('chatPageHref and frameRadii', () => {

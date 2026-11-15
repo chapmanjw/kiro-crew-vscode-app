@@ -121,27 +121,6 @@ export function crewSessionsForFolder(slots, folder, mainKey, platform = 'win32'
   return out;
 }
 
-/**
- * The slot name the launcher's gateway client gives a folder
- * (backend/lib/gateway.mjs slotNameFor), from the folder and the hex SHA-256
- * of its normalised key. The page hashes with crypto.subtle; see slotKeyText.
- */
-export function slotBaseName(folder) {
-  const norm = String(folder || '').replace(/\\/g, '/').replace(/\/+$/, '');
-  const base = (norm.split('/').pop() || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
-  return base || 'workspace';
-}
-
-/** The text slotNameFor hashes. */
-export function slotKeyText(folder, platform = 'win32') {
-  const norm = String(folder || '').replace(/\\/g, '/').replace(/\/+$/, '');
-  return platform === 'win32' ? norm.toLowerCase() : norm;
-}
-
-export function slotNameFromHash(folder, hexDigest) {
-  return `vscode-${slotBaseName(folder)}-${String(hexDigest).slice(0, 10)}`;
-}
-
 /** The Kiro Crew Chat page for a session (App.tsx `/chat/:slug?`). */
 export function chatPageHref(slotKey) {
   return slotKey ? `/chat/${encodeURIComponent(slotKey)}` : '/chat';

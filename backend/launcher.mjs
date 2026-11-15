@@ -503,8 +503,24 @@ function parseJson(buf) {
 }
 
 
+// The folder's crew slot that GET /api/session names must exist and point at
+// the folder before the page's ChatPanel opens it, even when no VS Code chat
+// turn has run yet. ensureSlot is idempotent (create by name, project only if it
+// changed); it is re-run at most every CREW_SLOT_RECHECK_MS per folder, which
+// also reopens a slot the user closed in Kiro Crew and retries after a failure.
+const CREW_SLOT_RECHECK_MS = 30_000;
+const crewSlotChecked = new Map(); // folder -> last attempt (ms)
+function ensureCrewSlot(folder) {
+  if (!folder) return;
+  const last = crewSlotChecked.get(folder);
+  if (last !== undefined && Date.now() - last < CREW_SLOT_RECHECK_MS) return;
+  crewSlotChecked.set(folder, Date.now());
+  gateway.ensureSlot(folder).catch((e) => log('crew slot: could not ensure for', folder, '-', e.message));
+}
+
 function sessionBody(folderParam) {
   const folder = folderParam || (fs.existsSync(config.workspace) ? config.workspace : null);
+  ensureCrewSlot(folder);
   const ready = state.status === 'ready' && !!state.serverPort;
   return {
     status: state.status,
@@ -523,7 +539,8 @@ function sessionBody(folderParam) {
     chat: chatProblem(),
     // For the docked Kiro Crew chat column (ui/, round 3): the page toggles the
     // column whenever crewChatToggle (an integer) changes, and crewSlot is the
-    // folder's own slot {key, folder, title}. The column lists the per-session
+    // folder's own slot {key, folder, title}, always present when there is a
+    // folder (ensureCrewSlot above creates it). The column lists the per-session
     // slots itself from GET /api/chat/slots (the app's own slots, with project).
     crewChatToggle: bridge.crewChatToggle,
     crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,

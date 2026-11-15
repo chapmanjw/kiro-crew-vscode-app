@@ -137,7 +137,7 @@ test('framePlacement positions over the slot and clips to bounds with rounded bo
 });
 
 test('manifest: version, bundle names, permissions, icons and the composer control', () => {
-  assert.equal(manifest.version, '0.3.1');
+  assert.equal(manifest.version, '0.4.0');
   assert.equal(manifest.ui.entry, `vscode-pane-${manifest.version}.mjs`);
   assert.ok(fs.existsSync(path.join(ROOT, 'ui', manifest.ui.entry)));
   assert.equal(coreFile, `vscode-pane-core-${manifest.version}.mjs`);

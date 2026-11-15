@@ -66,7 +66,7 @@ function hitAt(page, x, y) {
   }, [x, y]);
 }
 
-export async function crewChecks({ page, frame, hostServer, workspace, shotDir, check }) {
+export async function crewChecks({ page, frame, hostServer, gatewayMock, workspace, shotDir, check }) {
   const mainKey = slotNameFor(workspace);
   // Two more sessions for the switcher: a per-chat slot on this folder (like
   // the native-chat sessions the bridge opens) and one on another project.
@@ -221,24 +221,20 @@ export async function crewChecks({ page, frame, hostServer, workspace, shotDir, 
   check('"Open in Kiro Crew" goes to the session on the Chat page', landed === `/chat/${encodeURIComponent(mainKey)}`, landed);
   await page.evaluate(() => window.__standinSdk.setChatPanel(true));
 
-  // 8. A launcher that does not name the slot yet: the page opens the same slot itself.
-  hostServer.stubCrewSlot = false;
+  // 8. The launcher names the folder's slot and creates it in Kiro Crew pointed
+  //    at the folder, so the page opens it without creating a slot itself.
   const posts0 = hostServer.slotPosts.length;
   await page.click('#nav-vscode');
   await page.locator('[data-testid="crew-chatpanel-stub"]').waitFor({ timeout: 10_000 }).catch(() => {});
   await sleep(800);
   g = await geometry(page);
-  const posts = hostServer.slotPosts.slice(posts0);
-  const create = posts.find((p) => p.path === '/api/chat/slots');
+  const create = hostServer.slotPosts.slice(posts0).find((p) => p.path === '/api/chat/slots');
   const raw = await page.evaluate((f) => fetch(`/apps/vscode-pane/api/session?folder=${encodeURIComponent(f)}`).then((r) => r.json()), workspace);
-  if (raw && (raw.crewSlot || raw.crewSlotKey || (raw.chatSlot && raw.chatSlot.key))) {
-    // The launcher names the slot itself, so the page has nothing to create.
-    check('the launcher reports the folder\'s crew slot and the column uses it', g.stubSlot === mainKey && !create, JSON.stringify({ crewSlot: raw.crewSlot, stub: g.stubSlot }));
-  } else {
-    check('with no crewSlot from the launcher the page creates the launcher\'s slot name itself (crypto.subtle hash matches slotNameFor)',
-      create && create.body && create.body.name === mainKey && g.stubSlot === mainKey, JSON.stringify({ posts, stub: g.stubSlot }));
-  }
-  hostServer.stubCrewSlot = true;
+  const made = gatewayMock && gatewayMock.rec.slots.get(mainKey);
+  check("the launcher reports the folder's crew slot, has created it in Kiro Crew pointed at the folder, and the column opens it without creating a slot",
+    !!raw && !!raw.crewSlot && raw.crewSlot.key === mainKey && raw.crewSlot.folder === workspace && g.stubSlot === mainKey && !create &&
+      !!made && String(made.project).toLowerCase() === workspace.toLowerCase(),
+    JSON.stringify({ crewSlot: raw && raw.crewSlot, stub: g.stubSlot, pageCreate: !!create, gateway: made ? { project: made.project } : null }));
 
   // 9. VS Code's own Chat view is still there beside the column.
   let chatVisible = await frame.locator('.interactive-input-editor').first().isVisible().catch(() => false);

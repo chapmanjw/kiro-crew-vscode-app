@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.3.1). Tested standalone on Windows 11 with Node
+Status: prototype (0.4.0). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,14 +15,14 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.3.1.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.4.0.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     status, folder, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
- |   - a docked Kiro Crew chat column on the card's right (ui/vscode-pane-crew-0.3.1.mjs):
+ |   - a docked Kiro Crew chat column on the card's right (ui/vscode-pane-crew-0.4.0.mjs):
  |     the SDK's ChatPanel, the Chat page's own ChatPage, on the folder's session
- |  composer chip: ui/vscode-pane-session-0.3.1.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.4.0.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
@@ -156,7 +156,61 @@ gateways send.
 | `POST /api/chat/ask` `{prompt}` | open VS Code's Chat view and submit a prompt to Kiro Crew there |
 | `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; header `X-Kiro-Bridge-Secret` |
 | `POST /api/bridge/events` | extension events; same header |
-| `POST /api/bridge/chat` `{prompt, folder?}` | one chat turn; streams newline-delimited JSON parts back; same header |
+| `POST /api/bridge/chat` `{prompt, folder?, slot?}` | one chat turn; streams newline-delimited JSON parts back; with `slot`, a turn of a Kiro Crew session type session; same header |
+| `GET /api/chat/prefs` | the app's chat preferences (`hideCopilotAgents`), what VS Code last reported and the Machine settings they produce |
+| `POST /api/chat/prefs` `{hideCopilotAgents}` | change the VS Code setting through the extension; the setting's change comes back as an event and is applied |
+| `POST /api/chat/open-session` `{slot}` | open one of the app's Kiro Crew sessions in VS Code's Chat |
+| `GET /api/bridge/sessions` | the Kiro Crew sessions this app opened for VS Code chats (kept in `data/state/chat-sessions.json`); bridge header |
+| `POST /api/bridge/sessions` `{folder, title}` | create a session's slot, named `vscode-<folder>-<hash>-<id>` and pointed at the folder; bridge header |
+| `GET /api/bridge/sessions/history?slot=` | a session's history as request and response turns, rebuilt from the slot; bridge header |
+| `POST /api/bridge/approve` | relay an approval answered in VS Code to `POST /api/chat/slots/{slot}/approve`; bridge header |
+| `POST /api/bridge/question` | relay a question's answer to the slot's question route; bridge header |
+
+`GET /api/session` also carries `crewChatToggle` (an integer the bridge's
+toggle command bumps) and `crewSlot: {key, folder, title}`, the folder's own
+Kiro Crew session, for the docked column. The launcher creates that slot,
+pointed at the folder, whenever it names it (at most every 30 s per folder),
+so it exists before any chat turn.
+
+### Kiro Crew as a native VS Code chat session type (0.4.0)
+
+0.4.0 gives VS Code's own Chat a "Kiro Crew" session type, the way the
+Copilot CLI and ACP extensions add their own. Each VS Code chat of that type
+is one Kiro Crew slot, named `vscode-<folder>-<hash>-<id>` and pointed at the
+folder, so it also shows in the Kiro Crew sidebar with its transcript, agents
+and approval policy.
+
+- Rendering. Replies stream as markdown and thinking; Kiro Crew tool rows
+  become native VS Code tool cards, completed at turn end from the persisted
+  rows (`GET /api/chat/slots/{slot}`), because the turn's SSE stream carries a
+  tool row's title only. Reopening a session or reloading the window rebuilds
+  its history from the slot. The launcher side is `backend/lib/nativechat.mjs`,
+  the extension side `extension/kiro-crew-bridge/sessions.js`.
+- Approvals and questions. A pending approval opens VS Code's own confirmation
+  card (the workbench tool `vscode_get_confirmation_with_options`); the answer
+  goes to `POST /api/chat/slots/{slot}/approve` through
+  `POST /api/bridge/approve`. A decision made in Kiro Crew instead clears the
+  VS Code card, and questions work the same way. The session shows "needs
+  input" while it waits.
+- The approval grant. Answering for a session needs
+  `permissions.sessionApproval: true` in `app.json` and your consent: after
+  updating the app, re-enable it and choose "Enable and allow chat control".
+  Without the grant the gateway answers 403 `session_approval_not_granted`,
+  and VS Code shows a note to approve in Kiro Crew instead.
+- Default for new chats. `kiroCrew.chat.hideCopilotAgents` (default on, an
+  application setting) hides Copilot's own agents (the local Ask/Agent
+  harness, Cloud and Copilot CLI) from the session-type picker, so a new chat
+  and a first plain message go to Kiro Crew. Turn it off to bring them back;
+  the launcher applies the change to the Machine settings live, and
+  `POST /api/chat/prefs` changes it from the app side.
+- Toggle. `kiroCrew.toggleCrewChat` (Ctrl+Alt+K, a status bar item and an
+  editor title action) bumps `crewChatToggle` on `GET /api/session`, which
+  shows or hides the docked Kiro Crew column (see below).
+- Proposals. It runs on the 1.146 proposed APIs `chatSessionsProvider`,
+  `chatParticipantAdditions`, `chatParticipantPrivate` and `chatProvider`,
+  enabled for the bridge by `--enable-proposed-api`. The 0.3.1 default
+  participant and the "Kiro Crew" language model described next stay as the
+  fallback and still answer `@kirocrew` in other session types.
 
 ### VS Code Chat answered by Kiro Crew
 
@@ -248,7 +302,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.3.1.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.4.0.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -347,7 +401,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.3.1.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.4.0.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -368,11 +422,9 @@ enabled next to it; the page sets nothing that hides it.
 - Session. By default the column shows the folder's main Kiro Crew session,
   the "VS Code: &lt;folder&gt;" one in your sidebar. The launcher names it on
   `GET /api/session` as `crewSlot: {key, folder, title}` (`crewSlotKey` and
-  R3's `chatSlot.key` are read too). When a launcher does not send it, the
-  page opens the same slot itself: it hashes the folder the way
-  `slotNameFor` in `backend/lib/gateway.mjs` does (with `crypto.subtle`),
-  POSTs `/api/chat/slots` with that name and title and points it at the
-  folder.
+  R3's `chatSlot.key` are read too) and creates it in Kiro Crew, pointed at
+  the folder, so the page never creates a slot itself. With no folder the
+  column asks you to open one.
 - Header. 35px, the height of a VS Code side-bar title: the Kiro Crew icon
   (`/icon-192.png` from the dashboard, a "KC" glyph if it cannot load), the
   session title as a session switcher, "Open in Kiro Crew" (the session on the
@@ -633,6 +685,16 @@ own machine; swap it for original art before any public release of this app.
   (`hooks/useOwnSlotChat.ts`), so going to the Chat page afterwards lands on
   the column's session. Only one `conversationOnly` panel may be mounted per
   window (`docs/app-kit/api-reference.md`, Native Chat Panel).
+- Edit tool rows from Kiro Crew carry no absolute path, so the native
+  session's tool cards cannot open or diff the edited file in VS Code yet.
+  A follow-up has to resolve them against the slot's project.
+- The approval card uses VS Code's internal confirmation tool, which the
+  workbench registers late (the Eventually lifecycle phase). An approval that
+  arrives before then is retried for a while and then falls back to a quick
+  pick.
+- The session type, its pickers and the approval card depend on the 1.146
+  proposed APIs listed above. Proposals change between VS Code releases, so a
+  newer server build may need code changes.
 - The column was checked against a ChatPanel stub in the stand-in, not yet
   against the real ChatPage. Whether ChatPage's side-panel tabs (Changes,
   Files, Git) fit and open inline in a 420px column, and whether every one of

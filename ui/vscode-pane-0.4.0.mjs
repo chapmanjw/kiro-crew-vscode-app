@@ -21,9 +21,9 @@ import {
   frameKey,
   framePlacement,
   CARD_MARGIN,
-} from './vscode-pane-core-0.3.1.mjs';
-import { STORE_KEYS, parseStoredOpen, toggleCounter, counterStep, frameRadii } from './vscode-pane-crew-core-0.3.1.mjs';
-import { CrewColumn } from './vscode-pane-crew-0.3.1.mjs';
+} from './vscode-pane-core-0.4.0.mjs';
+import { STORE_KEYS, parseStoredOpen, toggleCounter, counterStep, frameRadii } from './vscode-pane-crew-core-0.4.0.mjs';
+import { CrewColumn } from './vscode-pane-crew-0.4.0.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
@@ -57,7 +57,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-3-1';
+const STYLE_ID = 'vscode-pane-style-0-4-0';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to

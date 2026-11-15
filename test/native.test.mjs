@@ -414,6 +414,9 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(s.crewChatToggle, 0);
     assert.deepEqual(s.crewSlot, { key: slotNameFor(workspace), folder: workspace, title: `VS Code: ${path.basename(workspace)}` });
     assert.ok(Number.isInteger(s.crewChatToggle));
+    // ...and the slot it names exists in Kiro Crew, pointed at the folder, before any chat turn
+    for (let i = 0; i < 100 && !mock.rec.slots.has(slotNameFor(workspace)); i++) await sleep(50);
+    assert.equal(mock.rec.slots.get(slotNameFor(workspace))?.project, workspace, 'GET /api/session creates the crew slot it names');
     await bridgeCall('POST', '/api/bridge/events', { type: 'toggleCrewChat' });
     s = (await proxy('GET', '/api/session')).json;
     assert.equal(s.crewChatToggle, 1);

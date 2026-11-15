@@ -29,14 +29,12 @@ import {
   mainSlotTitle,
   crewSlotFromSession,
   crewSessionsForFolder,
-  slotKeyText,
-  slotNameFromHash,
   chatPageHref,
-} from './vscode-pane-crew-core-0.3.1.mjs';
+} from './vscode-pane-crew-core-0.4.0.mjs';
 
 const h = React.createElement;
 
-const STYLE_ID = 'vscode-pane-crew-style-0-3-1';
+const STYLE_ID = 'vscode-pane-crew-style-0-4-0';
 const CSS = `
 .vscp-sash{flex:none;width:${CREW_WIDTH.sash}px;cursor:col-resize;background:transparent;position:relative;z-index:3;touch-action:none;outline:none}
 .vscp-sash::after{content:"";position:absolute;inset:0 1px;background:transparent;transition:background-color .1s ease-out}
@@ -125,15 +123,8 @@ function writeChosen(folder, key) {
   writeStore(STORE_KEYS.slot, JSON.stringify(all));
 }
 
-async function sha256Hex(text) {
-  const bytes = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 // Module state that outlives a remount of the page.
 const crewState = {
-  ensured: new Map(), // normalised folder -> slot key the page created (fallback path only)
   mounts: 0,
 };
 if (typeof window !== 'undefined') window.__vscodePaneCrew = crewState;
@@ -146,56 +137,22 @@ function slotRows(r) {
 }
 
 /**
- * The folder's main crew slot. The launcher names it on GET /api/session
- * (crewSlot). An older launcher does not, and then the page opens the same
- * slot itself: the gateway client's name for the folder, created (the create
- * is idempotent by name) and pointed at the folder.
+ * The folder's main crew slot, as the launcher names it on GET /api/session
+ * (crewSlot {key, folder, title}). The launcher sends it whenever there is a
+ * folder, and creates the slot in Kiro Crew pointed at the folder
+ * (backend/launcher.mjs ensureCrewSlot), so the page never creates one.
  */
-function useMainSlot(api, session, folder) {
+function mainSlot(session, folder) {
   const reported = crewSlotFromSession(session);
   const target = (session && session.folder) || folder || '';
-  const [own, setOwn] = useState(() => crewState.ensured.get(normFolder(target)) || '');
-  const [error, setError] = useState('');
-  const needOwn = !reported && !!target && !!session;
-  useEffect(() => {
-    if (!needOwn) return undefined;
-    const f = normFolder(target);
-    const known = crewState.ensured.get(f);
-    if (known) {
-      setOwn(known);
-      return undefined;
-    }
-    let alive = true;
-    setOwn('');
-    (async () => {
-      try {
-        const name = slotNameFromHash(target, await sha256Hex(slotKeyText(target)));
-        const created = await api.post('/api/chat/slots', { name, title: mainSlotTitle(target) });
-        const key = (created && (created.key || created.slot || created.name)) || name;
-        if (created && created.project !== target) {
-          await Promise.resolve(api.post(`/api/chat/slots/${encodeURIComponent(key)}/project`, { project: target })).catch(() => {});
-        }
-        crewState.ensured.set(f, key);
-        if (alive) {
-          setOwn(key);
-          setError('');
-        }
-      } catch (e) {
-        if (alive) setError((e && e.message) || String(e));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [needOwn, target]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (reported) return { key: reported.key, title: reported.title, folder: reported.folder || target, error: '' };
-  return { key: own, title: '', folder: target, error };
+  if (reported) return { key: reported.key, title: reported.title, folder: reported.folder || target };
+  return { key: '', title: '', folder: target };
 }
 
 export function CrewColumn({ api, session, folder, onCollapse, kind }) {
   ensureStyle();
   const navigate = typeof sdk.useNavigate === 'function' ? sdk.useNavigate() : null; // eslint-disable-line react-hooks/rules-of-hooks
-  const main = useMainSlot(api, session, folder);
+  const main = mainSlot(session, folder);
   const folderKey = main.folder;
   const [chosen, setChosen] = useState(() => readChosen()[normFolder(folderKey)] || '');
   const [width, setWidth] = useState(() => parseStoredWidth(readStore(STORE_KEYS.width)));
@@ -373,7 +330,7 @@ export function CrewColumn({ api, session, folder, onCollapse, kind }) {
         h('button', { type: 'button', className: 'vscp-btn vscp-btn-primary', onClick: openInCrew, disabled: !slotKey }, 'Open in Kiro Crew')));
   } else if (!slotKey) {
     body = h('div', { className: 'vscp-crew-empty', 'data-testid': 'vscode-pane-crew-waiting' },
-      main.error ? `Could not open the folder's Kiro Crew session: ${main.error}` : "Opening the folder's Kiro Crew session...");
+      main.folder ? "Opening the folder's Kiro Crew session..." : 'Open a folder in VS Code to chat with Kiro Crew about it.');
   } else {
     body = h(Panel, { key: slotKey, slotKey, conversationOnly: true });
   }

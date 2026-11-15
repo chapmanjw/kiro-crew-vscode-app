@@ -1022,7 +1022,7 @@ async function main() {
     }
 
     // 12b. the docked Kiro Crew chat column (ui/vscode-pane-crew-*.mjs)
-    await crewChecks({ page, frame, hostServer, workspace, shotDir, check });
+    await crewChecks({ page, frame, hostServer, gatewayMock, workspace, shotDir, check });
 
     // 13. the launcher restarts a VS Code server that dies
     if (process.platform === 'win32') {

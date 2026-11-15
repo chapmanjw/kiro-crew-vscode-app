@@ -24,15 +24,15 @@
 //    window.__standinSdk.setChatPanel(false) removes to show the page's
 //    fallback; GET/POST /api/chat/slots and /api/chat/slots/<key>/project
 //    (`crewSlots`, `slotPosts`); /icon-192.png from the installed Kiro Crew
-//  - adds the two GET /api/session fields the bridge's toggle command feeds
-//    (`crewChatToggle`, `crewSlot`) when the launcher does not send them yet:
-//    `server.crewToggle` adds stand-in presses to the counter, and `server.stubCrewSlot = false`
-//    leaves `crewSlot` out so the page opens the slot itself
+//  - adds simulated presses of VS Code's crew chat toggle to GET /api/session:
+//    `server.crewToggle` is added to the launcher's own `crewChatToggle`, so the
+//    page sees one counter (the stand-in never forwards its presses to the
+//    launcher, so nothing is counted twice); `crewSlot` passes through as the
+//    launcher sends it
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { signProxyRequest } from '../../backend/lib/auth.mjs';
-import { slotNameFor } from '../../backend/lib/gateway.mjs';
 
 const KIROCREW_ICON = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'KiroCrew', 'resources', 'backend-dist', 'kirocrew-backend',
   'Lib', 'site-packages', 'kiro_crew', 'static', 'dist', 'icon-192.png');
@@ -333,8 +333,7 @@ createRoot(document.getElementById('main-content')).render(h(Root));
           });
         }
         if (url.pathname === '/apps/vscode-pane/api/session' && req.method === 'GET') {
-          // The bridge's toggle counter and the folder's crew slot (the
-          // launcher's fields), filled in only when the launcher leaves them out.
+          // The bridge's toggle counter plus the stand-in's simulated presses.
           return forward(req, res, url, body, (upRes) => {
             if (upRes.statusCode !== 200) return false;
             const parts = [];
@@ -347,12 +346,8 @@ createRoot(document.getElementById('main-content')).render(h(Root));
                 /* passed through below */
               }
               if (s && typeof s === 'object') {
-                // Stand-in presses add to the launcher's own count, so the smoke can press
-                // before and after the launcher reports the field.
+                // Stand-in presses add to the launcher's own count.
                 s.crewChatToggle = (Number.isInteger(s.crewChatToggle) ? s.crewChatToggle : 0) + server.crewToggle;
-                if (server.stubCrewSlot && s.crewSlot === undefined && s.folder) {
-                  s.crewSlot = { key: slotNameFor(s.folder), folder: s.folder, title: `VS Code: ${path.basename(String(s.folder).replace(/[\\/]+$/, ''))}` };
-                }
               }
               res.writeHead(200, { 'content-type': 'application/json' });
               res.end(s ? JSON.stringify(s) : Buffer.concat(parts));
@@ -371,7 +366,6 @@ createRoot(document.getElementById('main-content')).render(h(Root));
   server.slotPosts = slotPosts;
   server.crewSlots = crewSlots;
   server.crewToggle = 0;
-  server.stubCrewSlot = true;
   // A restarted backend listens on a new port, as the gateway's proxy would
   // follow it; the page keeps calling the same /apps/vscode-pane/api/ URLs.
   server.setLauncherPort = (p) => {
