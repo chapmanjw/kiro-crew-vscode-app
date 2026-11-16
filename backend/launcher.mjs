@@ -28,7 +28,7 @@ import { createFrameProxy, isLoopbackHost, isWebviewHost, webviewRequestAllowed,
 import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { createKcProxy } from './lib/kcproxy.mjs';
-import { chipHideCss } from './lib/chipcss.mjs';
+import { tunnelCss } from './lib/chipcss.mjs';
 import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
@@ -701,7 +701,7 @@ const kc = gatewayUrl
     gatewayHost: '127.0.0.1',
     gatewayPort: Number(gatewayUrl.port || 80),
     stateFile: KC_STATE_FILE,
-    css: chipHideCss(),
+    css: tunnelCss(),
     // The frame chain: the dashboard, the workbench, the self-hosted webview origins.
     frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`],
     log,

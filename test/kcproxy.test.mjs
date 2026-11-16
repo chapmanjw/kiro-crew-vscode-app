@@ -13,7 +13,7 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { createKcProxy, denied, linkToken, captureCookies, withFrameAncestors, jwtExp, DENY, loadKcState } from '../backend/lib/kcproxy.mjs';
-import { chipHideCss } from '../backend/lib/chipcss.mjs';
+import { tunnelCss } from '../backend/lib/chipcss.mjs';
 import { createGatewayMock } from './support/gateway-mock.mjs';
 
 function req(port, { method = 'GET', path: p = '/', headers = {}, body } = {}) {
@@ -54,7 +54,7 @@ async function setup(t, opts = {}) {
   const stateFile = opts.stateFile || path.join(dir, 'kc-session.json');
   const lines = [];
   const kc = createKcProxy({
-    gatewayPort: Number(gw.port), stateFile, css: chipHideCss(), log: (l) => lines.push(l),
+    gatewayPort: Number(gw.port), stateFile, css: tunnelCss(), log: (l) => lines.push(l),
     frameAncestors: () => ['http://localhost:5476', 'http://127.0.0.1:4100', 'http://*.localhost:4100'],
     restrict: opts.restrict,
   });
@@ -146,6 +146,7 @@ test('pages through the tunnel: frame headers rewritten, chip stylesheet added, 
   assert.match(page.headers['content-security-policy'], /frame-ancestors http:\/\/localhost:5476 http:\/\/127\.0\.0\.1:4100 http:\/\/\*\.localhost:4100$/);
   assert.match(page.headers['content-security-policy'], /default-src 'self'/, 'the rest of the CSP is kept');
   assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)/);
+  assert.ok(page.body.includes(`<style id="kc-vscode-pane">${tunnelCss()}</style></head>`), 'the chip rule and the embed flush rules are injected whole, before </head>');
   assert.equal(page.headers['content-length'], String(Buffer.byteLength(page.body)));
   assert.ok(mock.rec.dash.xff > x0, 'X-Forwarded-For reached the gateway');
   assert.equal(mock.rec.dash.badOrigin, 0, 'Host and Origin rewritten to the same-origin loopback form');

@@ -14,7 +14,8 @@
 //     same-origin loopback fallback, origin.py:470-505), else 403 bad_origin.
 //   - HTML carries X-Frame-Options: SAMEORIGIN and frame-ancestors 'self'
 //     (security_headers.py:220-267), which the tunnel must rewrite.
-//   - The embed page draws the composer chips the way ContextShelf.tsx does.
+//   - The embed page draws the composer chips the way ContextShelf.tsx does,
+//     inside the real embed shell's box chain (see PAGE).
 // Routes the tunnel must never forward (/api/token/local, /api/auth/mobile-link,
 // ...) answer 200 here and are recorded in rec.dash.forbiddenHits.
 import crypto from 'node:crypto';
@@ -48,17 +49,45 @@ export function attachDashboard(rec) {
     });
   };
 
+  // The embed page's box chain mirrors the real /embed/chat (0.14 source; the
+  // 0.13.0-rc.1 bundle renders the same classes): Tailwind preflight's body
+  // margin 0 and `html,body,#root{height:100%}` (index.css:84); the embed
+  // shell `h-screen w-screen overflow-hidden bg-bg flex flex-col` with
+  // EmbedTabStrip's `shrink-0 border-b` row and a `flex-1 min-h-0` route box
+  // (App.tsx:680-692); ChatPageFrame `flex flex-1 min-h-0 h-full
+  // overflow-hidden relative` (ChatPageFrame.tsx:74); the chat pane root
+  // `[data-chat-scope]` with its inline `margin-left:-8px` while the sessions
+  // sidebar is closed (ChatPage.tsx:112, 1140); the composer dock
+  // `absolute left-0 bottom-0` (ComposerDockView.tsx:414) holding
+  // `.input-area px-4 pb-1 pt-1` (ChatInput.tsx:970), the 16px-radius glass
+  // pane `[data-testid=composer-dock]` (ChatInput.tsx:1087-1096) and, below
+  // it, the context shelf `glass-shelf pt-1 flex` (ChatInput.tsx:1824).
   const PAGE = (slot) => `<!doctype html><html><head><meta charset="utf-8"><title>Kiro Crew</title>
-<style>body{margin:0;font:13px system-ui;background:#21222c;color:#f8f8f2}.bar{display:flex;gap:8px;padding:8px;border-top:1px solid #3a3d4e;position:fixed;bottom:0;left:0;right:0}
+<style>html,body,#root{height:100%}body{margin:0;font:13px system-ui;background:#21222c;color:#f8f8f2}
+.h-screen{height:100vh}.w-screen{width:100vw}.overflow-hidden{overflow:hidden}.bg-bg{background:#21222c}.flex{display:flex}.flex-col{flex-direction:column}
+.shrink-0{flex-shrink:0}.border-b{border-bottom:1px solid #3a3d4e}.flex-1{flex:1 1 0%}.min-h-0{min-height:0}.min-w-0{min-width:0}.h-full{height:100%}.relative{position:relative}
+.tabs{display:flex;align-items:center;padding:6px}.tab{padding:6px 8px;border-radius:6px;font-size:12px}
+.transcript{padding:12px 16px 120px;overflow:auto;height:100%;box-sizing:border-box}
+.dock{position:absolute;left:0;bottom:0;right:0}
+.input-area{padding:4px 16px 4px;margin:0 auto;width:100%;max-width:900px;display:flex;flex-direction:column;box-sizing:border-box}
+.glass{border:1px solid #3a3d4e;border-radius:16px;min-height:44px;background:#282a36;padding:10px 14px;box-sizing:border-box;color:#a3a6c4}
+.glass-shelf{padding-top:4px;display:flex;align-items:center;gap:8px;min-width:0}
 .chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;border:0;background:transparent;color:#a3a6c4}
-main{padding:12px}.card{background:#282a36;border:1px solid #3a3d4e;border-radius:12px;padding:8px 10px;margin:8px 0}</style></head>
-<body><main><div id="state">Loading</div><div class="card">Kiro Crew mock dashboard: /embed/chat/<span id="slot">${slot.replace(/[^A-Za-z0-9_.:-]/g, '')}</span></div><div id="ws">ws: closed</div>
-<div id="signin" hidden><p>SIGN IN REQUIRED</p><input id="link" aria-label="Sign-in link"><button id="go" type="button">Sign in</button></div></main>
-<div class="bar" data-testid="mock-composer"><div class="chip-row" data-testid="chip-row">
+.chip-row{display:flex;gap:8px}.card{background:#282a36;border:1px solid #3a3d4e;border-radius:12px;padding:8px 10px;margin:8px 0}</style></head>
+<body><div id="root"><div class="h-screen w-screen overflow-hidden bg-bg flex flex-col" data-mock="embed-shell">
+<div class="shrink-0 border-b"><div class="tabs"><span class="tab">Session</span></div></div>
+<div class="flex-1 min-h-0"><div class="flex flex-1 min-h-0 h-full overflow-hidden relative">
+<div data-chat-scope="" class="relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden flex-1" style="margin-left:-8px">
+<div class="transcript"><div id="state">Loading</div><div class="card">Kiro Crew mock dashboard: /embed/chat/<span id="slot">${slot.replace(/[^A-Za-z0-9_.:-]/g, '')}</span></div><div id="ws">ws: closed</div>
+<div id="signin" hidden><p>SIGN IN REQUIRED</p><input id="link" aria-label="Sign-in link"><button id="go" type="button">Sign in</button></div></div>
+<div class="dock" data-testid="composer-dock-root"><div class="input-area" data-testid="mock-composer">
+<div class="glass" data-testid="composer-dock">Message Kiro Crew</div>
+<div class="glass-shelf" data-testid="composer-context-shelf"><div class="chip-row" data-testid="chip-row">
 <button type="button" class="chip" data-session-control-chip="" title="VS Code" aria-label="VS Code" data-chip-id="vscode-pane:open-in-vscode"><svg class="lucide lucide-package" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>VS Code</span></button>
 <button type="button" class="chip" data-session-control-chip="" title="Package app" aria-label="Package app" data-chip-id="package-app:control"><svg class="lucide lucide-package" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>Package app</span></button>
 <button type="button" class="chip" data-session-control-chip="" title="Other app" aria-label="Other app" data-chip-id="other-app:control"><svg class="lucide lucide-zap" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>Other app</span></button>
-</div><span class="chip">Ultra Mode</span></div>
+</div><span class="chip">Ultra Mode</span></div></div></div>
+</div></div></div></div></div>
 <script>
 async function boot() {
   const r = await fetch('/api/auth/me');

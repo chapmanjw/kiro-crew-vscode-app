@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.5.0). Tested standalone on Windows 11 with Node
+Status: prototype (0.5.1). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,14 +15,14 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.5.0.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.5.1.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     status, folder, Kiro Crew, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
  |   - signs VS Code's "Kiro Crew" tab in: mints a sign-in link with the
  |     dashboard's own session and hands it to the launcher
- |  composer chip: ui/vscode-pane-session-0.5.0.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.5.1.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder; hidden inside the tab's chat
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
@@ -338,7 +338,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.5.0.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.5.1.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -468,7 +468,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.5.0.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.5.1.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -624,6 +624,16 @@ R5).
   the real dashboard is untouched. It hides the chip labelled "VS Code" whose
   icon `<svg>` has the class `lucide-package`, and the chip row's wrapper when
   that was its only chip. Another app's `Package` chip keeps showing.
+- Edges (0.5.1). The same stylesheet (`embedFlushCss`) pins the embed page to
+  the webview: `html`, `body` and `#root`, the embed shell (`#root`'s child
+  that holds `[data-chat-scope]`), every box down to the outermost chat pane,
+  and that pane get no margin, border, radius or shadow, and the shell is sized
+  to 100% rather than `100vw`/`100vh`. It also cancels the pane's inline
+  `margin-left: -8px`, which the dashboard sets while the sessions sidebar is
+  closed (`ChatPage.tsx:1140`) although the embed chat has no sidebar. The
+  composer, its glass card, the context shelf and split-view panes keep their
+  own styling, and every rule is scoped away from the full dashboard's
+  `data-testid="app-frame"` shell. The smoke measures all four edges at 0 px.
 - Folders. The tab follows the window's first folder; a folder change reloads
   the frame on that folder's slot. Session tabs, "+" and the all-tabs menu are
   the embed route's own (`EmbedTabStrip`).

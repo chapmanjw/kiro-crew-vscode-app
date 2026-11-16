@@ -107,6 +107,54 @@ const signedIn = async (page) => {
   return s && /Signed in to Kiro Crew mock/.test(s.state) && /hello from the mock gateway/.test(s.ws) ? s : null;
 };
 
+/**
+ * Geometry of the tunnelled /embed/chat inside its frame (run in that frame):
+ * the embed shell (the #root child holding [data-chat-scope]) against the
+ * viewport, every box from <html> down to the outermost chat pane (margin,
+ * padding, border, radius, shadow), the pane's left, right and bottom edges,
+ * overflow, and the composer's glass pane, which keeps its own card.
+ */
+export function embedEdges() {
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const pane = document.querySelector('[data-chat-scope]');
+  const shell = pane && Array.from(document.querySelectorAll('#root > div')).find((d) => d.contains(pane));
+  if (!pane || !shell) return { error: 'no embed shell or chat pane' };
+  const px = (v) => Math.round(parseFloat(v) * 100) / 100 || 0;
+  const bad = [];
+  for (let el = pane; el; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    const name = el.id ? `#${el.id}` : el.tagName.toLowerCase() + (el.hasAttribute('data-chat-scope') ? '[data-chat-scope]' : el === shell ? '(shell)' : '');
+    const sides = ['Top', 'Right', 'Bottom', 'Left'];
+    const vals = {
+      margin: sides.map((k) => px(cs[`margin${k}`])),
+      padding: el === pane ? [0, 0, 0, 0] : sides.map((k) => px(cs[`padding${k}`])),
+      border: sides.map((k) => (cs[`border${k}Style`] === 'none' ? 0 : px(cs[`border${k}Width`]))),
+      radius: ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((k) => px(cs[`border${k}Radius`])),
+    };
+    for (const [k, v] of Object.entries(vals)) if (v.some((n) => n !== 0)) bad.push(`${name} ${k} ${v.join(' ')}`);
+    if (cs.boxShadow !== 'none') bad.push(`${name} shadow ${cs.boxShadow}`);
+  }
+  const r = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
+  const s = r(shell);
+  const p = r(pane);
+  const glass = document.querySelector('[data-testid="composer-dock"]');
+  const gs = glass && getComputedStyle(glass);
+  return {
+    vw, vh, shell: s, pane: p, bad,
+    gaps: { top: s.t, left: s.l, right: vw - s.r, bottom: vh - s.b, paneLeft: p.l, paneRight: vw - p.r, paneBottom: vh - p.b },
+    overflow: { x: document.documentElement.scrollWidth - vw, y: document.documentElement.scrollHeight - vh },
+    composer: gs ? { radius: px(gs.borderTopLeftRadius), border: px(gs.borderTopWidth) } : null,
+  };
+}
+
+/** True when embedEdges() reports a flush page: 0 px at every edge, no box styling on the chain, no overflow, the composer card kept. */
+export function embedFlush(e) {
+  if (!e || e.error) return false;
+  return Object.values(e.gaps).every((g) => g === 0) && e.bad.length === 0 && e.overflow.x <= 0 && e.overflow.y <= 0 &&
+    !!e.composer && e.composer.radius > 0 && e.composer.border > 0;
+}
+
 let exchangesAfterChecks = null;
 
 export async function tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort, dataDir, rawRequest, cdnRequests }) {
@@ -152,6 +200,29 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   const chips = await ef.evaluate(() => Array.from(document.querySelectorAll('[data-session-control-chip]')).map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
   check('inside the tunnelled chat the app\'s "VS Code" chip is hidden while other apps\' chips show, one with the same Package icon included',
     chips.length === 3 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none' && chips.find((c) => c.id.startsWith('package-app:'))?.display !== 'none', JSON.stringify(chips));
+
+  // 4b. The tunnelled chat fills the webview flush (F8): its embed shell
+  //     touches all four edges at 0 px, nothing from <html> to the chat pane
+  //     keeps a margin, padding, border, radius or shadow, the pane reaches
+  //     the left, right and bottom edges, nothing scrolls, and the composer's
+  //     own card keeps its border and radius. The webview's own document
+  //     (crewview.js) frames it with no margin, border or scrollbar.
+  const edges = await ef.evaluate(embedEdges);
+  check('the tunnelled chat fills the Kiro Crew webview flush: its outermost card touches all four edges at 0 px with no border, radius or shadow, no gap at the bottom, and the composer keeps its own card',
+    embedFlush(edges), JSON.stringify(edges));
+  const vfr = await viewFrame(page, framePort);
+  const host = vfr && await vfr.frame.evaluate(() => {
+    const f = document.getElementById('kc');
+    const b = f.getBoundingClientRect();
+    const bs = getComputedStyle(document.body);
+    const fs = getComputedStyle(f);
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    return { gaps: [b.top, vw - b.right, vh - b.bottom, b.left], bodyMargin: bs.margin, bodyPadding: bs.padding, frameBorder: fs.borderTopWidth + ' ' + fs.borderTopStyle, overflowY: document.documentElement.scrollHeight - vh, overflowX: document.documentElement.scrollWidth - vw };
+  }).catch((e) => ({ error: e.message }));
+  check('the Kiro Crew webview frames the chat at 0 px from every edge: body margin and padding 0, frame border 0, no scrollbar',
+    !!host && !host.error && host.gaps.every((g) => g === 0) && host.bodyMargin === '0px' && host.bodyPadding === '0px' && /^0px/.test(host.frameBorder) && host.overflowY <= 0 && host.overflowX <= 0,
+    JSON.stringify(host));
 
   // 5. The session stays in the launcher.
   const jar = await page.context().cookies();
