@@ -134,5 +134,5 @@ test('launcher Machine settings default new chats to the Kiro Crew model', async
   assert.equal(chatSettings()['chat.defaultModel'], 'kiro-crew');
   assert.equal(chatSettings({ hideCopilotAgents: false })['chat.defaultModel'], 'kiro-crew');
   const src = fs.readFileSync(path.join(ROOT, 'backend', 'launcher.mjs'), 'utf8');
-  assert.match(src, /seedThemeSettings\(withTerminal, vsTheme, chatSettings\(chatPrefs\)\)/, 'the launcher seeds chatSettings into Machine settings');
+  assert.match(src, /seedThemeSettings\(withTerminal, vsTheme, \{ \.\.\.chatSettings\(chatPrefs\), \.\.\.layoutSettings\(\) \}\)/, 'the launcher seeds chatSettings (with the layout density) into Machine settings');
 });

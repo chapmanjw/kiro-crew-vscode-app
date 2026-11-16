@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { slotNameFor } from '../../backend/lib/gateway.mjs';
+import { edgeChecks } from './edge-checks.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -391,6 +392,15 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   const shot = path.join(shotDir, 'crew-tab-dark.png');
   await page.screenshot({ path: shot });
   check('dark screenshot of the Kiro Crew tab (the mock dashboard through the tunnel) saved', fs.existsSync(shot), shot);
+
+  // 13. Where the workbench meets the pane card, with the Kiro Crew tab open
+  //     in the secondary side bar: 0 px gaps on every outer edge and to the
+  //     status bar, no second line inside the card's border, and
+  //     .cache/smoke/edges-bottom.png of the tab's bottom.
+  const machineNow = JSON.parse(fs.readFileSync(path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json'), 'utf8'));
+  check('the Machine settings carry the compact Modern UI density (window.density.layout), the supported switch that drops the outer gutter of the parts',
+    machineNow['window.density.layout'] === 'compact', JSON.stringify({ 'window.density.layout': machineNow['window.density.layout'] }));
+  await edgeChecks({ page, frame, shotDir, check });
   exchangesAfterChecks = dash.exchanges;
 }
 

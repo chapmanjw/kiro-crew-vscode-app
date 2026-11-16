@@ -30,7 +30,7 @@ import {
   framePlacement,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.5.1.mjs';
+} from './vscode-pane-core-0.5.2.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';

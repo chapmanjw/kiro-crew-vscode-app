@@ -29,6 +29,7 @@ import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from 
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { createKcProxy } from './lib/kcproxy.mjs';
 import { tunnelCss } from './lib/chipcss.mjs';
+import { layoutSettings } from './lib/layoutprefs.mjs';
 import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
@@ -252,7 +253,8 @@ function serverUserEnv() {
 /**
  * The server's Machine settings.json: terminals unset the gateway tracking and
  * bridge variables, the Kiro Crew theme is seeded so the first paint is
- * already themed, and Copilot's sign-in prompts are turned down.
+ * already themed, Copilot's sign-in prompts are turned down, and the Modern UI
+ * density is compact so the parts meet the pane card flush (lib/layoutprefs.mjs).
  */
 function writeMachineSettings() {
   const dir = path.join(DATA_DIR, 'server-data', 'data', 'Machine');
@@ -260,7 +262,7 @@ function writeMachineSettings() {
   fs.mkdirSync(dir, { recursive: true });
   const existing = readText(file);
   const withTerminal = terminalEnvSettings(existing);
-  const next = withTerminal === null ? null : seedThemeSettings(withTerminal, vsTheme, chatSettings(chatPrefs));
+  const next = withTerminal === null ? null : seedThemeSettings(withTerminal, vsTheme, { ...chatSettings(chatPrefs), ...layoutSettings() });
   if (next === null) log('Machine settings.json is not plain JSON; left unchanged');
   else if (next !== existing) fs.writeFileSync(file, next);
 }

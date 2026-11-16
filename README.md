@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.5.1). Tested standalone on Windows 11 with Node
+Status: prototype (0.5.2). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,14 +15,14 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.5.1.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.5.2.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     status, folder, Kiro Crew, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
  |   - signs VS Code's "Kiro Crew" tab in: mints a sign-in link with the
  |     dashboard's own session and hands it to the launcher
- |  composer chip: ui/vscode-pane-session-0.5.1.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.5.2.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder; hidden inside the tab's chat
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
@@ -338,7 +338,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.5.1.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.5.2.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -403,6 +403,25 @@ the bridge sends commands only to the extension host that said hello last.
   to the sidebar: both are one `<nav>` with `mx-2 mt-0 mb-2 rounded-xl`
   (`shell/nav/navRail.tsx:457`) in a 74px or 236px grid track
   (`hooks/useRailWidth.ts:20-21`), the same in the 0.13.0-rc.1 bundle.
+- Workbench edges (0.5.2). VS Code 1.146 turns its Modern UI on by default
+  (`workbench.experimental.modernUI`), which draws the side bars and the bottom
+  panel as floating cards with a 1px border, 8px corners and a 4px gutter on
+  every edge facing window chrome, the status bar included
+  (`browser/media/floatingPanels.css`). Inside this card that put a strip and
+  a second rounded corner above the status bar. The gutter is also part of the
+  layout code (`FLOATING_PANEL_MARGIN` and `getFloatingPanelOuterMargin`,
+  `services/layout/browser/layoutService.ts`), so a stylesheet cannot take it
+  away without the parts' content sizes going out of step. The launcher sets
+  the supported switch instead, `window.density.layout: "compact"`, in the
+  server's Machine settings (`backend/lib/layoutprefs.mjs`). Compact removes
+  the gaps and corners between the parts as well as at the edges, so the parts
+  meet with hairlines. A user setting still overrides it. The workbench fills
+  the card body right inside the card's 1px border and is clipped to its 15px
+  inner radius, so the card keeps the Sessions card's border and corners and
+  VS Code's edges sit flush under them. The smoke measures 0 px from the
+  secondary side bar to the status bar and from every outer part to the frame
+  edges, checks the pixels for a second line inside the card's border, and
+  saves `.cache/smoke/edges-bottom.png`.
 - Toolbar. The strip is 45px tall including its 1px bottom border
   (`BAR_HEIGHT` in the core module). Kiro Crew centres panel headers 23px
   below the panel's outer top (`components/listShell.ts` `LIST_HEADER_CLS`),
@@ -468,7 +487,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.5.1.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.5.2.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
