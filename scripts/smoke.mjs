@@ -24,6 +24,7 @@ import { manifestIconFiles, svgProblems, isPng } from './lib/icon-checks.mjs';
 import { extensionIconChecks } from './lib/ext-icon-checks.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
+import { startLoadWatch, loadChecks } from './lib/load-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
@@ -601,6 +602,12 @@ async function main() {
     const wb = await rawRequest({ port: framePort, path: wbUrl.pathname + wbUrl.search, headers: { cookie: 'mc_token_5476=dashboard-secret' } });
     const csp = String(wb.headers['content-security-policy'] || '');
     check('workbench GET returns 200', wb.status === 200, `${wb.status}, ${wb.body.length} bytes`);
+    {
+      const first = wb.body.indexOf('<style id="vscp-boot">');
+      const seededBg = String(seeded.colorCustomizations['editor.background']).slice(0, 7);
+      check('the workbench page carries the Kiro Crew first-paint rule first in <head> (before the page\'s own stylesheet), with the theme\'s colour and scheme',
+        first > 0 && first < wb.body.indexOf('<meta charset') && wb.body.includes(`:where(html){background:${seededBg};`) && /color-scheme:dark\}/.test(wb.body.slice(first, first + 300)), wb.body.slice(first, first + 160));
+    }
     check('workbench has no X-Frame-Options', !wb.headers['x-frame-options']);
     check('workbench CSP has no frame-ancestors', !/frame-ancestors/i.test(csp));
     check('workbench does not hand the token cookie to the browser', !String(wb.headers['set-cookie'] || '').includes('vscode-tkn'));
@@ -677,6 +684,7 @@ async function main() {
     page.on('response', (r) => {
       if (r.url().startsWith(`http://127.0.0.1:${framePort}/`) && r.status() >= 400) frameErrors.push(`${r.status()} ${r.url().replace(/vsc-[^/]+/, 'vsc-<key>').slice(0, 120)}`);
     });
+    const loadWatch = await startLoadWatch({ page, framePort });
     await page.goto(`http://localhost:${hostPort}/`);
     let uiUp = false;
     try {
@@ -697,6 +705,15 @@ async function main() {
       /* reported below */
     }
     check('workbench renders inside a cross-site iframe (localhost page -> 127.0.0.1 frame)', workbenchUp, frameErrors.slice(0, 3).join('; '));
+    {
+      const loadResult = await loadWatch.stop();
+      const loadShots = path.join(ROOT, '.cache', 'smoke');
+      fs.mkdirSync(loadShots, { recursive: true });
+      // The stand-in's dark palette: --bg #21222c (scripts/lib/dashboard-standin.mjs).
+      loadChecks({ result: loadResult, expectBg: [33, 34, 44], shotDir: loadShots, check });
+      const rdy = await page.locator('iframe[title="VS Code"]').evaluate((f) => ({ ready: f.getAttribute('data-ready'), opacity: getComputedStyle(f).opacity }));
+      check('once the workbench page has loaded the iframe is revealed (data-ready true, opacity 1)', rdy.ready === 'true' && rdy.opacity === '1', JSON.stringify(rdy));
+    }
 
     // 6a. the first chat message in this fresh browser profile is a plain one
     //     (no @mention), typed into the Chat view as soon as the workbench is

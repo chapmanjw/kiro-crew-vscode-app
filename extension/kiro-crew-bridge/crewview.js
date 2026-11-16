@@ -23,7 +23,9 @@ function viewMode(kc) {
 }
 
 const STYLE = `html,body{height:100%;margin:0;padding:0;overflow:hidden;background:var(--vscode-sideBar-background)}
-iframe{display:block;border:0;width:100%;height:100%}
+iframe{display:block;border:0;width:100%;height:100%;background:var(--vscode-sideBar-background)}
+/* Hidden until the framed page has loaded, so its own white canvas never shows. */
+iframe:not([data-loaded]){opacity:0}
 .panel{box-sizing:border-box;height:100%;overflow:auto;padding:16px;font:13px var(--vscode-font-family);color:var(--vscode-foreground);line-height:1.45}
 .panel h2{font-size:13px;margin:0 0 8px}
 .muted{color:var(--vscode-descriptionForeground)}
@@ -49,7 +51,13 @@ function crewViewHtml(kc, nonce) {
   const head = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${STYLE}</style></head>`;
   if (mode === 'frame') {
     const src = `${origin}/embed/chat/${encodeURIComponent(kc.slot)}`;
-    return `${head}<body data-mode="frame"><iframe id="kc" title="Kiro Crew" src="${esc(src)}" allow="clipboard-read; clipboard-write"></iframe></body></html>`;
+    return `${head}<body data-mode="frame"><iframe id="kc" title="Kiro Crew" src="${esc(src)}" allow="clipboard-read; clipboard-write"></iframe>
+<script nonce="${nonce}">
+const f = document.getElementById('kc');
+const show = () => f.setAttribute('data-loaded', '1');
+f.addEventListener('load', show);
+setTimeout(show, 10000); // a page that never fires load must not stay invisible
+</script></body></html>`;
   }
   let body;
   if (mode === 'unavailable') {

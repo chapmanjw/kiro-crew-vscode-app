@@ -145,7 +145,7 @@ test('pages through the tunnel: frame headers rewritten, chip stylesheet added, 
   assert.equal(page.headers['referrer-policy'], 'no-referrer');
   assert.match(page.headers['content-security-policy'], /frame-ancestors http:\/\/localhost:5476 http:\/\/127\.0\.0\.1:4100 http:\/\/\*\.localhost:4100$/);
   assert.match(page.headers['content-security-policy'], /default-src 'self'/, 'the rest of the CSP is kept');
-  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)/);
+  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-tag\)/);
   assert.ok(page.body.includes(`<style id="kc-vscode-pane">${tunnelCss()}</style></head>`), 'the chip rule and the embed flush rules are injected whole, before </head>');
   assert.equal(page.headers['content-length'], String(Buffer.byteLength(page.body)));
   assert.ok(mock.rec.dash.xff > x0, 'X-Forwarded-For reached the gateway');

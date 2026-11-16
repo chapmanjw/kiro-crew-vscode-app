@@ -189,7 +189,7 @@ export function saveKcState(file, st, { restrict = restrictToUser } = {}) {
  * @param {number} o.gatewayPort  upstream port
  * @param {string} o.stateFile    data/state/kc-session.json
  * @param {() => string[]} o.frameAncestors  the frame chain, read per response
- * @param {string} [o.css]        stylesheet added to every HTML page the tunnel serves
+ * @param {string|(() => string)} [o.css]  stylesheet added to every HTML page the tunnel serves
  * @param {(line: string) => void} [o.log]
  * @param {() => void} [o.onChange]  the session or the origin changed
  */
@@ -276,9 +276,13 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     return out;
   }
 
+  // css is a string or a function giving one (the theme's boot rule changes at run time).
+  const cssNow = () => (typeof css === 'function' ? css() : css);
+
   function injectCss(html) {
-    if (!css) return html;
-    const tag = `<style id="kc-vscode-pane">${css}</style>`;
+    const sheet = cssNow();
+    if (!sheet) return html;
+    const tag = `<style id="kc-vscode-pane">${sheet}</style>`;
     const i = html.search(/<\/head>/i);
     return i < 0 ? tag + html : html.slice(0, i) + tag + html.slice(i);
   }
@@ -297,7 +301,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
           const sessionCheck = /^\/api\/auth\/(refresh|me)$/i.test(pathname) && !/[?&]token=/.test(req.url);
           if (upRes.statusCode === 401 && sessionCheck && startEpoch === epoch) dropSession(`${pathname} answered 401`);
           const h = rewriteHeaders(upRes.headers, startEpoch);
-          const html = String(h['content-type'] || '').startsWith('text/html') && !h['content-encoding'] && css;
+          const html = String(h['content-type'] || '').startsWith('text/html') && !h['content-encoding'] && cssNow();
           if (!html) {
             res.writeHead(upRes.statusCode || 502, h);
             upRes.pipe(res);

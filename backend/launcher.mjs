@@ -34,7 +34,7 @@ import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer } from './lib/provision.mjs';
-import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings } from './lib/theme.mjs';
+import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings, bootCss, bootColors } from './lib/theme.mjs';
 import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE, slotNameFor, folderSlotTitle } from './lib/gateway.mjs';
 import { parseChatRequest, parseNativeChatRequest, runChatTurn, runNativeTurn, folderInRoots } from './lib/chatbridge.mjs';
 import { SessionRegistry, newSessionSlotName, sessionTitle, historyTurns, APPROVE_IN_KIRO_CREW } from './lib/nativechat.mjs';
@@ -680,7 +680,12 @@ async function nativeChat(raw, res, host) {
 
 const frameProxy = createFrameProxy(
   () => (state.status === 'ready' && state.serverPort ? { port: state.serverPort, token: state.token } : null),
-  { webviewPort: () => framePort, secretKey: true },
+  {
+    webviewPort: () => framePort,
+    secretKey: true,
+    // The Kiro Crew palette on the workbench page's first paint, before VS Code loads its own theme.
+    boot: () => ({ css: bootCss(theme, vsTheme), colors: bootColors(theme, vsTheme) }),
+  },
 );
 
 // ------------------------------------------------------------ the Kiro Crew tunnel
@@ -703,7 +708,7 @@ const kc = gatewayUrl
     gatewayHost: '127.0.0.1',
     gatewayPort: Number(gatewayUrl.port || 80),
     stateFile: KC_STATE_FILE,
-    css: tunnelCss(),
+    css: () => tunnelCss(bootCss(theme, vsTheme, { scheme: false })),
     // The frame chain: the dashboard, the workbench, the self-hosted webview origins.
     frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`],
     log,
