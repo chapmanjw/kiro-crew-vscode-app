@@ -423,3 +423,48 @@ export function seedThemeSettings(existingText, vsTheme, extra = {}) {
   Object.assign(obj, extra);
   return JSON.stringify(obj, null, 2) + '\n';
 }
+
+// ------------------------------------------------------------ first-paint colours
+
+/** VS Code's stock Dark Modern / Light Modern editor colours, for a theme that has none yet. */
+const BOOT_FALLBACK = Object.freeze({ dark: { bg: '#1f1f1f', fg: '#cccccc' }, light: { bg: '#ffffff', fg: '#3b3b3b' } });
+
+/**
+ * The colours a page shows before VS Code or Kiro Crew has painted: the
+ * workbench's own editor background when the saved theme sets one (tier
+ * "palette"), else Kiro Crew's --bg/--text, else the stock base theme's.
+ * Always #rrggbb, so it is safe inside a style rule.
+ * @param {{kind?:string, vars?:object|null}|null} theme saved theme (resolveTheme output)
+ * @param {{colorCustomizations?:object}|null} [vsTheme] toVsCodeTheme(theme)
+ * @returns {{kind:'dark'|'light', bg:string, fg:string}}
+ */
+export function bootColors(theme, vsTheme = null) {
+  const kind = theme && theme.kind === 'light' ? 'light' : 'dark';
+  const pick = (...candidates) => {
+    for (const c of candidates) {
+      const hex = normalizeHex(c);
+      if (hex) return hex.slice(0, 7);
+    }
+    return null;
+  };
+  const cc = (vsTheme && vsTheme.colorCustomizations) || {};
+  const vars = (theme && theme.vars) || {};
+  return {
+    kind,
+    bg: pick(cc['editor.background'], vars['--bg']) || BOOT_FALLBACK[kind].bg,
+    fg: pick(cc['editor.foreground'], vars['--text']) || BOOT_FALLBACK[kind].fg,
+  };
+}
+
+/**
+ * One rule that paints the root and body, and tells the browser the page's
+ * colour scheme, before any other stylesheet has loaded. `:where()` gives it
+ * zero specificity so the page's own rules win once they arrive. Without the
+ * scheme (`scheme: true`, the workbench) a framed page whose scheme differs from
+ * its parent's gets an opaque white canvas; the tunnelled dashboard sets its
+ * own scheme, so it passes `scheme: false` and only gets the colours.
+ */
+export function bootCss(theme, vsTheme = null, { scheme = true } = {}) {
+  const c = bootColors(theme, vsTheme);
+  return `:where(html){background:${c.bg};color:${c.fg};${scheme ? `color-scheme:${c.kind}` : ''}}:where(body){background:${c.bg}}`.replace(';}', '}');
+}

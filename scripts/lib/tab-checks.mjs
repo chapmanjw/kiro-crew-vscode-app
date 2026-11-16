@@ -199,8 +199,22 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   // 4. The chip: hidden inside the tunnelled chat, another app's kept.
   const ef = embedFrame(page);
   const chips = await ef.evaluate(() => Array.from(document.querySelectorAll('[data-session-control-chip]')).map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
-  check('inside the tunnelled chat the app\'s "VS Code" chip is hidden while other apps\' chips show, one with the same Package icon included',
+  check('inside the tunnelled chat the app\'s "VS Code" chip (Tag icon) is hidden while other apps\' chips show, one with the Package icon included',
     chips.length === 3 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none' && chips.find((c) => c.id.startsWith('package-app:'))?.display !== 'none', JSON.stringify(chips));
+
+  // 4a. First paint (0.5.3): the tunnelled page carries the theme's boot rule,
+  //     and the webview's frame was hidden until the page loaded, then shown.
+  const bootRule = await ef.evaluate(() => {
+    const s = document.getElementById('kc-vscode-pane');
+    return { has: !!s && /:where\(html\)\{background:#[0-9a-f]{6};color:#[0-9a-f]{6}\}:where\(body\)\{background:#[0-9a-f]{6}\}/.test(s.textContent), scheme: /color-scheme/.test(s ? s.textContent : '') };
+  });
+  const kcLoaded = vf ? await vf.frame.evaluate(() => {
+    const f = document.getElementById('kc');
+    return f ? { loaded: f.hasAttribute('data-loaded'), opacity: getComputedStyle(f).opacity, bg: getComputedStyle(f).backgroundColor } : null;
+  }).catch(() => null) : null;
+  check('the tunnelled chat page carries the theme\'s first-paint colours (and leaves its own colour scheme alone)', bootRule.has && !bootRule.scheme, JSON.stringify(bootRule));
+  check('the Kiro Crew tab\'s frame is on the side bar colour and revealed once its page has loaded (data-loaded, opacity 1)',
+    !!kcLoaded && kcLoaded.loaded && kcLoaded.opacity === '1' && kcLoaded.bg !== 'rgba(0, 0, 0, 0)', JSON.stringify(kcLoaded));
 
   // 4b. The tunnelled chat fills the webview flush (F8): its embed shell
   //     touches all four edges at 0 px, nothing from <html> to the chat pane

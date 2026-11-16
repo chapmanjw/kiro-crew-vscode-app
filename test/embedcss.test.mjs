@@ -34,7 +34,7 @@ function selectors(list) {
 test('the tunnel injects the chip rule and the embed flush rules, and the launcher passes them', () => {
   assert.equal(tunnelCss(), `${chipHideCss()}\n${embedFlushCss()}`);
   const launcher = fs.readFileSync(path.join(ROOT, 'backend', 'launcher.mjs'), 'utf8');
-  assert.match(launcher, /css: tunnelCss\(\),/);
+  assert.match(launcher, /css: \(\) => tunnelCss\(bootCss\(theme, vsTheme, \{ scheme: false \}\)\),/);
   assert.doesNotMatch(launcher, /css: chipHideCss\(\)/);
 });
 

@@ -6,7 +6,7 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.5.2). Tested standalone on Windows 11 with Node
+Status: prototype (0.5.3). Tested standalone on Windows 11 with Node
 24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
 installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
@@ -15,14 +15,14 @@ installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.5.2.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.5.3.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     status, folder, Kiro Crew, Reload, Restart server, "Open file", active-file readout
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
  |     document.body and placed over the card, so it survives leaving the page
  |   - signs VS Code's "Kiro Crew" tab in: mints a sign-in link with the
  |     dashboard's own session and hands it to the launcher
- |  composer chip: ui/vscode-pane-session-0.5.2.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.5.3.mjs (contributes.sessionControls)
  |   - opens the page on the chat's project folder; hidden inside the tab's chat
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
@@ -338,7 +338,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.5.2.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.5.3.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -449,7 +449,7 @@ the bridge sends commands only to the extension host that said hello last.
   and hands it the chat's project folder (`session.cwd`); the control navigates
   to `/apps/vscode-pane?folder=<that folder>` and the page opens it. A chat with
   no project shows a short note and an "Open VS Code" button instead. The chip's
-  glyph comes from the host's fixed set (`Package`), because session controls
+  glyph comes from the host's fixed set (`Tag`, the closest to a code or markup glyph; see below), because session controls
   cannot use an app image: the chip renders `<AppIcon icon={sc.icon} size={13} />`
   with no `iconUrl` (`components/chat-input/ContextShelf.tsx` in 0.14, the same
   call in the shipped 0.13.0-rc.1 bundle), `AppIcon` maps names to eleven
@@ -471,7 +471,7 @@ the bridge sends commands only to the extension host that said hello last.
   The fallback is a stylesheet the tunnel adds only to the dashboard HTML it
   serves to the tab (`chipHideCss` in `backend/lib/chipcss.mjs`): it hides
   `button[data-session-control-chip][aria-label="VS Code"]` whose icon `<svg>`
-  has the class `lucide-package`, and the chip row's wrapper when that was its
+  has the class `lucide-tag`, and the chip row's wrapper when that was its
   only chip. The real dashboard never gets it. The host puts no app identity on
   the chip, so its label (the aria-label is the label alone, since this app
   declares no `statusPath`, `ContextShelf.tsx:117-148`) plus its icon is the
@@ -487,7 +487,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.5.2.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.5.3.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -641,7 +641,7 @@ R5).
   page in the dashboard"), so the tunnel adds a stylesheet to the dashboard HTML
   it serves (`backend/lib/chipcss.mjs`). That copy exists only inside VS Code;
   the real dashboard is untouched. It hides the chip labelled "VS Code" whose
-  icon `<svg>` has the class `lucide-package`, and the chip row's wrapper when
+  icon `<svg>` has the class `lucide-tag`, and the chip row's wrapper when
   that was its only chip. Another app's `Package` chip keeps showing.
 - Edges (0.5.1). The same stylesheet (`embedFlushCss`) pins the embed page to
   the webview: `html`, `body` and `#root`, the embed shell (`#root`'s child
@@ -944,10 +944,15 @@ VS Code tints it like its own icons. These are Kiro Crew's marks. The Kiro
 Crew source is Apache-2.0, which grants no trademark rights (section 6), so
 check their use before any public release of this app.
 
-The composer chip keeps the `Package` glyph: it accepts only a name from
-`AppIcon`'s eleven lucide icons, none of which depicts code, and the tunnel's
-chip-hiding CSS matches it by that glyph. The Kiro Crew change that would let
-both surfaces use the theme's own colours is written up in
+The composer chip uses the `Tag` glyph (0.5.3): it accepts only a name from
+`AppIcon`'s eleven lucide icons, matched case-sensitively with `Package` as the
+fallback (checked in the installed 0.13.0-rc.1 bundle, `AppIcon-*.js`, which has
+no alias or case-insensitive lookup), and none of them depicts code. `Tag` is
+the closest, as the angle-bracket tag of markup. A real code glyph needs a Kiro
+Crew change (`Code` is already in the panel-tab icon set, and `iconUrl` on
+session controls is written up in `research/R7-icon-paths.md`). The tunnel's
+chip-hiding CSS matches the chip by its label and this glyph. The Kiro Crew
+change that would let both surfaces use the theme's own colours is written up in
 `research/kirocrew-icon-proposal.md`.
 
 ## Known limits

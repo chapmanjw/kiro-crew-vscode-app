@@ -97,13 +97,33 @@ export function filterSetCookie(values) {
   return kept.length ? kept : undefined;
 }
 
-const NOT_READY_HTML = `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2">
-<title>VS Code is starting</title><body style="font:14px system-ui;background:#1e1e1e;color:#ccc;display:grid;place-items:center;height:100vh;margin:0">
+/**
+ * The page served while the server is not up. `boot` is `{kind, bg, fg}`
+ * (theme.mjs bootColors) so even this page is the Kiro Crew colour.
+ */
+export function notReadyHtml(boot = { kind: 'dark', bg: '#1f1f1f', fg: '#cccccc' }) {
+  return `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><meta name="color-scheme" content="${boot.kind}">
+<title>VS Code is starting</title><body style="font:14px system-ui;background:${boot.bg};color:${boot.fg};color-scheme:${boot.kind};display:grid;place-items:center;height:100vh;margin:0">
 <div>VS Code is starting&hellip;</div></body>`;
+}
+
+/**
+ * Put a `<style id="vscp-boot">` first in the workbench page's <head>, so the
+ * page is the Kiro Crew colour from its first paint, before workbench.css or
+ * VS Code's own scripts run. `css` comes from theme.mjs bootCss (hex colours
+ * only). Returns null when the page has no <head>.
+ */
+export function injectBootStyle(html, css) {
+  if (/[<>]/.test(css)) throw new Error('unsafe css');
+  const m = /<head(\s[^>]*)?>/i.exec(html);
+  if (!m) return null;
+  const at = m.index + m[0].length;
+  return `${html.slice(0, at)}<style id="vscp-boot">${css}</style>${html.slice(at)}`;
+}
 
 /**
  * @param {() => ({port:number, token:string}|null)} getTarget
- * @param {{webviewPort?: () => number, secretKey?: boolean}} [opts]
+ * @param {{webviewPort?: () => number, secretKey?: boolean, boot?: () => ({css:string, colors:object})}} [opts]
  *   webviewPort: serve webviews from http://<uuid>.localhost:<port> (see
  *   injectWebviewEndpoint); secretKey: set the secret-storage cookies on the
  *   workbench page (lib/secretkey.mjs).
@@ -113,7 +133,7 @@ export function createFrameProxy(getTarget, opts = {}) {
     const target = getTarget();
     if (!target) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '2' });
-      return res.end(NOT_READY_HTML);
+      return res.end(notReadyHtml(opts.boot ? opts.boot().colors : undefined));
     }
     const headers = {};
     for (const [k, v] of upstreamHeaderPairs(req.rawHeaders, target.token)) {
@@ -155,6 +175,8 @@ export function createFrameProxy(getTarget, opts = {}) {
           if (withToken !== null && opts.secretKey) {
             h['set-cookie'] = [...(h['set-cookie'] || []), ...secretCookies(clientHalfFrom(req.headers.cookie))];
           }
+          // The theme's first paint (see injectBootStyle); only the workbench page itself.
+          if (withToken !== null && opts.boot) page = injectBootStyle(page, opts.boot().css) ?? page;
           const out = Buffer.from(page, 'utf8');
           delete h['transfer-encoding'];
           h['content-length'] = String(out.length);

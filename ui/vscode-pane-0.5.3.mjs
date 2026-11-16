@@ -30,7 +30,7 @@ import {
   framePlacement,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.5.2.mjs';
+} from './vscode-pane-core-0.5.3.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
@@ -64,7 +64,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-5-0';
+const STYLE_ID = 'vscode-pane-style-0-5-3';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to
@@ -103,7 +103,12 @@ const CSS = `
 .vscp-truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .vscp-body{position:relative;flex:1 1 auto;min-height:0;min-width:0;background:var(--vscp-bg)}
 .vscp-overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:13px}
-.vscp-frame-host{background:var(--vscp-bg)}
+.vscp-frame-host{background:var(--vscp-bg);color-scheme:dark}
+.vscp-frame-host[data-vscp-kind="light"]{color-scheme:light}
+/* The workbench is invisible until its page has loaded: the frame's own canvas is opaque white in a cross-origin
+   frame whose colour scheme differs from the dashboard's, and the themed host shows through instead. */
+.vscp-frame-host iframe{background:var(--vscp-bg)}
+.vscp-frame-host iframe[data-ready="false"]{opacity:0}
 .vscp-note{padding:6px 12px;font-size:12px;line-height:1.4;border-bottom:1px solid var(--vscp-border);color:var(--vscp-text);
   background:color-mix(in srgb,var(--vscp-warn) 14%,var(--vscp-elev));white-space:normal}
 `;
@@ -162,7 +167,12 @@ function ensureFrame() {
   const iframe = document.createElement('iframe');
   iframe.title = 'VS Code';
   iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+  iframe.setAttribute('data-ready', 'false');
   Object.assign(iframe.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', border: '0', display: 'block' });
+  // Reveal on the page's load event, but not for the initial about:blank (no key yet).
+  iframe.addEventListener('load', () => {
+    if (holder.key !== null) iframe.setAttribute('data-ready', 'true');
+  });
   wrap.appendChild(iframe);
   document.body.appendChild(wrap);
   holder.wrap = wrap;
@@ -177,6 +187,7 @@ function loadFrame(key, url) {
   holder.key = key;
   holder.loads += 1;
   holder.wrap.setAttribute('data-loads', String(holder.loads));
+  holder.iframe.setAttribute('data-ready', 'false');
   holder.iframe.src = url;
 }
 
