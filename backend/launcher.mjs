@@ -28,6 +28,7 @@ import { createFrameProxy, isLoopbackHost, isWebviewHost, webviewRequestAllowed,
 import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { createKcProxy } from './lib/kcproxy.mjs';
+import { signInWithLocalToken } from './lib/localtoken.mjs';
 import { tunnelCss } from './lib/chipcss.mjs';
 import { layoutSettings } from './lib/layoutprefs.mjs';
 import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
@@ -712,13 +713,63 @@ const kc = gatewayUrl
     // The frame chain: the dashboard, the workbench, the self-hosted webview origins.
     frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`],
     log,
-    onChange: () => bridge.enqueueLatest({ kind: 'kcChanged' }),
+    onChange: () => {
+      bridge.enqueueLatest({ kind: 'kcChanged' });
+      kcAutoLocalSignIn();
+    },
   })
   : null;
 
 function kcBody() {
   if (!kc) return { available: false, connected: false, reason: 'no Kiro Crew gateway address (KIROCREW_GATEWAY_ORIGIN)' };
-  return { available: !!kc.port, ...kc.status(), ...kcSignIn };
+  return { available: !!kc.port, ...kc.status(), ...kcSignIn, local: { ...kcLocal } };
+}
+
+// The launcher's own way in, for a gateway that will not mint the page a
+// sign-in link (lib/localtoken.mjs): the gateway's local-owner bootstrap.
+const kcLocal = { attempts: 0, lastOkAt: 0, lastError: null, lastCode: null };
+let kcLocalInFlight = null;
+let kcLocalEpochTried = -1;
+
+/** One local sign-in at a time; concurrent callers share the running one. `keepPageError`: leave the page's own report (and its fix hint) as the tab's message when this fails. */
+function kcLocalSignIn(via, keepPageError = false) {
+  if (!kc || !kc.port || !gatewayUrl) return Promise.resolve({ ok: false, code: 'no_tunnel', error: 'the Kiro Crew tunnel is not running' });
+  if (kcLocalInFlight) return kcLocalInFlight;
+  kcLocalInFlight = (async () => {
+    kcLocal.attempts++;
+    const r = await signInWithLocalToken({
+      env,
+      homedir: os.homedir(),
+      port: Number(gatewayUrl.port || 80),
+      signIn: (token) => kcDoSignIn(token, via),
+    });
+    kcLocal.lastError = r.ok ? null : r.error || null;
+    kcLocal.lastCode = r.ok ? null : r.code || null;
+    if (r.ok) {
+      kcLocal.lastOkAt = Date.now();
+    } else if (!keepPageError) {
+      kcSignIn.lastError = `local sign-in: ${r.error}`;
+      kcSignIn.lastCode = r.code || null;
+    }
+    log('kc local sign-in via', via, r.ok ? 'ok' : `failed (${r.code}: ${r.error})`);
+    return r;
+  })().finally(() => {
+    kcLocalInFlight = null;
+  });
+  return kcLocalInFlight;
+}
+
+/**
+ * When the tab has no session and the user did not disconnect it, try the
+ * local sign-in once per tunnel epoch (the epoch moves when a session ends),
+ * so a refused or unreadable secret is not retried in a loop.
+ */
+function kcAutoLocalSignIn() {
+  if (!kc || !kc.port) return;
+  const s = kc.status();
+  if (s.connected || s.userDisconnected || s.epoch === kcLocalEpochTried || kcLocalInFlight) return;
+  kcLocalEpochTried = s.epoch;
+  kcLocalSignIn('local').catch((e) => log('kc local sign-in crashed:', e && e.message));
 }
 
 /** For the bridge only: the tunnel origin (a capability) and the embed URL for the folder's slot. */
@@ -915,12 +966,24 @@ async function handle(req, res) {
       if (!kc || !kc.port) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
       const parsed = parseJson(body);
       if (parsed && typeof parsed.error === 'string' && !parsed.url) {
-        kcSignIn.attempts++;
-        kcSignIn.lastAttempt = new Date().toISOString();
-        kcSignIn.via = parsed.via === 'connect' ? 'connect' : 'auto';
-        kcSignIn.lastError = parsed.error.slice(0, 400);
-        kcSignIn.lastCode = typeof parsed.code === 'string' && /^[A-Za-z0-9_ -]{1,60}$/.test(parsed.code) ? parsed.code : null;
-        log('kc sign-in from the page failed:', kcSignIn.lastError);
+        const via = parsed.via === 'connect' ? 'connect' : 'auto';
+        // A local sign-in just worked (the launcher's own, or the one this
+        // report is about to start): the page's refusal is not news.
+        const justSignedIn = kc.status().connected && Date.now() - kcLocal.lastOkAt < 10_000;
+        if (!justSignedIn) {
+          kcSignIn.attempts++;
+          kcSignIn.lastAttempt = new Date().toISOString();
+          kcSignIn.via = via;
+          kcSignIn.lastError = parsed.error.slice(0, 400);
+          kcSignIn.lastCode = typeof parsed.code === 'string' && /^[A-Za-z0-9_ -]{1,60}$/.test(parsed.code) ? parsed.code : null;
+          log('kc sign-in from the page failed:', kcSignIn.lastError);
+          // The page could not mint a link (a gateway can refuse it, or have no
+          // dashboard URL): the launcher signs in with the gateway's local token.
+          // A Connect press goes ahead of a Disconnect and of a live session
+          // (which may be dead), an automatic attempt does not.
+          const s = kc.status();
+          if (via === 'connect' || (!s.connected && !s.userDisconnected)) await kcLocalSignIn(via === 'connect' ? 'connect' : 'local', true);
+        }
         return sendJson(res, 200, { ok: false, kc: kcBody() });
       }
       if (!parsed || typeof parsed.url !== 'string') return sendJson(res, 400, { error: 'body must be {url} or {error}' });
@@ -952,11 +1015,16 @@ async function handle(req, res) {
       const r = await kcDoSignIn(parsed.url, 'paste');
       return sendJson(res, r.status === 400 ? 400 : 200, { ok: r.ok, error: r.error || null, kc: kcBody() });
     }
-    case 'bridgeKcConnect':
-      // The tab's Connect button: the page (inside the signed-in dashboard)
-      // sees the request on its next session poll and mints the link.
+    case 'bridgeKcConnect': {
+      // The tab's Connect button. The page (inside the signed-in dashboard)
+      // sees the request on its next session poll and mints a link; the
+      // launcher also tries the gateway's local token now, so Connect works
+      // when the gateway will not mint that link or the page is not open.
       kcSignIn.connectRequests++;
-      return sendJson(res, 200, { ok: true, connectRequests: kcSignIn.connectRequests });
+      let local = null;
+      if (kc && kc.port) local = await kcLocalSignIn('connect');
+      return sendJson(res, 200, { ok: true, connectRequests: kcSignIn.connectRequests, signedIn: !!(local && local.ok) });
+    }
     case 'bridgeKcDisconnect':
       if (!kc) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
       await kc.disconnect();
@@ -1197,6 +1265,7 @@ server.listen(PORT, HOST, async () => {
     try {
       await kc.listen();
       log('kc tunnel listening on 127.0.0.1:' + kc.port, 'upstream', gatewayUrl.host);
+      kcAutoLocalSignIn();
     } catch (e) {
       log('kc tunnel could not listen:', e.message);
     }

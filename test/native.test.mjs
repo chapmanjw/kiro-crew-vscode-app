@@ -402,6 +402,8 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
       KIROCREW_PROXY_SECRET: secret,
       KIROCREW_APP_NAME: 'vscode-pane',
       KIROCREW_GATEWAY_ORIGIN: origin,
+      // Never the real Kiro Crew home: the launcher's local sign-in reads gateway secrets from it.
+      KIROCREW_HOME: path.join(dataDir, 'no-kiro-crew-home'),
       VSCODE_PANE_DATA_DIR: path.join(dataDir, 'data'),
       VSCODE_PANE_SERVER_DIR: serverDir,
       VSCODE_PANE_WORKSPACE: workspace,

@@ -516,6 +516,8 @@ async function main() {
         KIROCREW_PROXY_SECRET: SECRET,
         KIROCREW_APP_NAME: 'vscode-pane',
         KIROCREW_GATEWAY_ORIGIN: gatewayOrigin,
+        // Never the real Kiro Crew home: the launcher's local sign-in reads gateway secrets from it.
+        KIROCREW_HOME: path.join(dataDir, 'no-kiro-crew-home'),
         VSCODE_PANE_DATA_DIR: dataDir,
         VSCODE_PANE_WORKSPACE: workspace,
         ...(APP ? {} : { VSCODE_PANE_SERVER_DIR: serverDir }),

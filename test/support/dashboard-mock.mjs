@@ -21,7 +21,7 @@
 import crypto from 'node:crypto';
 
 export function attachDashboard(rec) {
-  const dash = { links: new Map(), sessions: new Map(), refresh: new Map(), exchanges: 0, refreshes: 0, refreshInFlight: 0, maxRefreshInFlight: 0, reuse: 0, logouts: 0, wsOpens: 0, forbiddenHits: [], badOrigin: 0, xff: 0, pages: 0 };
+  const dash = { links: new Map(), sessions: new Map(), refresh: new Map(), exchanges: 0, refreshes: 0, refreshInFlight: 0, maxRefreshInFlight: 0, reuse: 0, logouts: 0, wsOpens: 0, forbiddenHits: [], badOrigin: 0, xff: 0, pages: 0, localSecret: '', localMints: 0, localDenied: 0, localTtls: [] };
   rec.dash = dash;
   const id = () => crypto.randomBytes(18).toString('base64url');
   const jwt = (sub, ttl) => {
@@ -128,6 +128,20 @@ boot();
     if (req.headers.origin !== undefined && req.headers.origin !== `http://${host}`) {
       dash.badOrigin++;
       return send(res, 403, { error: 'bad_origin', code: 'bad_origin' }), true;
+    }
+    if (p === '/api/token/local' && req.method === 'GET' && !req.headers['x-forwarded-for'] && dash.localSecret && req.headers['x-local-secret'] === dash.localSecret) {
+      // The local-owner bootstrap (core_local_token.py), reached directly on
+      // loopback by the launcher and never through the tunnel (which adds
+      // X-Forwarded-For). It answers a token the link exchange accepts.
+      dash.localMints++;
+      const t = jwt('link', 300);
+      dash.links.set(t, { used: false, exp: Date.now() + 300_000 });
+      dash.localTtls.push(url.searchParams.get('ttl'));
+      return send(res, 200, { token: t, expires_in: 72000 }), true;
+    }
+    if (p === '/api/token/local' && !req.headers['x-forwarded-for'] && dash.localSecret) {
+      dash.localDenied++;
+      return send(res, 403, { error: 'invalid secret', code: 'invalid_secret' }), true;
     }
     if (p === '/api/token/local' || p === '/api/logout' || p === '/api/auth/mobile-link' || p.startsWith('/api/tailnet')) {
       dash.forbiddenHits.push(`${req.method} ${p}`);
