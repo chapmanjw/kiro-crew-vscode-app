@@ -257,3 +257,29 @@ export function framePlacement(rect, bounds, radii = [0, 0, 0, 0]) {
     clip,
   };
 }
+
+/**
+ * What the page shows when it cannot reach its own backend. The gateway answers
+ * 502 "app 'vscode-pane' has no reachable backend" when it never started (or
+ * lost) the launcher. The commonest cause is that the gateway found no `node`
+ * (it looks through nvm, then its own PATH, and logs "no node binary found" in
+ * gateway.log). The page cannot read that log, so the message names Node.js as
+ * the likely cause and says where to confirm it. Any other session error is
+ * passed through unchanged.
+ *
+ * @returns {{backendDown:boolean, title:string, message:string}}
+ */
+export function describeSessionError(errorText) {
+  const text = String(errorText || '');
+  if (!/no reachable backend/i.test(text)) {
+    return { backendDown: false, title: 'VS Code could not start', message: text ? `Backend unreachable: ${text}` : '' };
+  }
+  return {
+    backendDown: true,
+    title: 'The VS Code backend is not running',
+    message:
+      'Kiro Crew did not start this app\'s backend. The usual cause is that Node.js is not installed, or is not on the PATH of the machine that runs the Kiro Crew gateway (an nvm-only install is not enough). ' +
+      'To confirm, look for "no node binary found" in ~/.kiro/crew/gateway.log. ' +
+      'Install Node.js 18 or later, or link node into a directory on the gateway\'s PATH, then disable and re-enable this app and use Check again.',
+  };
+}

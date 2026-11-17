@@ -137,7 +137,7 @@ test('framePlacement positions over the slot and clips to bounds with rounded bo
 });
 
 test('manifest: version, bundle names, permissions, icons and the composer control', () => {
-  assert.equal(manifest.version, '0.5.3');
+  assert.equal(manifest.version, '0.5.4');
   assert.equal(manifest.ui.entry, `vscode-pane-${manifest.version}.mjs`);
   assert.ok(fs.existsSync(path.join(ROOT, 'ui', manifest.ui.entry)));
   assert.equal(coreFile, `vscode-pane-core-${manifest.version}.mjs`);
@@ -160,4 +160,15 @@ test('manifest: version, bundle names, permissions, icons and the composer contr
     const src = fs.readFileSync(path.join(ROOT, 'ui', f), 'utf8');
     for (const m of src.matchAll(/from '\.\/([^']+)'/g)) assert.ok(fs.existsSync(path.join(ROOT, 'ui', m[1])), `${f} -> ${m[1]}`);
   }
+});
+
+test('describeSessionError names Node.js when the gateway has no backend for the app', () => {
+  const down = core.describeSessionError("app 'vscode-pane' has no reachable backend");
+  assert.equal(down.backendDown, true);
+  assert.match(down.message, /Node\.js/);
+  assert.match(down.message, /no node binary found/);
+  const other = core.describeSessionError('request failed');
+  assert.equal(other.backendDown, false);
+  assert.equal(other.message, 'Backend unreachable: request failed');
+  assert.equal(core.describeSessionError('').message, '');
 });

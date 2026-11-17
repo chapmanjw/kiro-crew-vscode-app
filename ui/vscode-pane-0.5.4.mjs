@@ -26,11 +26,12 @@ import {
   buildThemePayload,
   resolveKind,
   folderFromSearch,
+  describeSessionError,
   frameKey,
   framePlacement,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.5.3.mjs';
+} from './vscode-pane-core-0.5.4.mjs';
 
 const h = React.createElement;
 const FOLDER_KEY = 'kc:vscode-pane:folder';
@@ -64,7 +65,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-5-3';
+const STYLE_ID = 'vscode-pane-style-0-5-4';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to
@@ -703,8 +704,9 @@ export default function VsCodePane() {
   };
 
   const status = session ? session.status : sessionError ? 'error' : 'idle';
-  const statusText = sessionError
-    ? `Backend unreachable: ${sessionError}`
+  const sessionProblem = sessionError ? describeSessionError(sessionError) : null;
+  const statusText = sessionProblem
+    ? sessionProblem.message
     : session
       ? session.error
         ? `${session.message}: ${session.error}`
@@ -778,11 +780,12 @@ export default function VsCodePane() {
   let overlay = null;
   if (!showFrame) {
     const failed = status === 'error';
+    const backendDown = Boolean(sessionProblem && sessionProblem.backendDown);
     overlay = h('div', { className: 'vscp-overlay' },
-      h('div', null,
-        h('div', { style: { fontSize: 15, marginBottom: 8 } }, failed ? 'VS Code could not start' : 'Starting VS Code...'),
+      h('div', { style: { maxWidth: 560 } },
+        h('div', { style: { fontSize: 15, marginBottom: 8 } }, failed ? (sessionProblem ? sessionProblem.title : 'VS Code could not start') : 'Starting VS Code...'),
         h('div', { className: 'vscp-muted' }, statusText),
-        failed ? h('button', { type: 'button', className: 'vscp-btn vscp-btn-primary', style: { marginTop: 12 }, onClick: doRestart }, 'Try again') : null));
+        failed ? h('button', { type: 'button', className: 'vscp-btn vscp-btn-primary', style: { marginTop: 12 }, onClick: backendDown ? loadSession : doRestart }, backendDown ? 'Check again' : 'Try again') : null));
   }
 
   return h('div', {

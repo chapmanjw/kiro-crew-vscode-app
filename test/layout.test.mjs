@@ -11,10 +11,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CARD_MARGIN, BAR_HEIGHT } from '../ui/vscode-pane-core-0.5.3.mjs';
+import { CARD_MARGIN, BAR_HEIGHT } from '../ui/vscode-pane-core-0.5.4.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.5.3.mjs'), 'utf8');
+const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.5.4.mjs'), 'utf8');
 
 const NAV = { border: 1, padTop: 8, logoExpanded: 28, brandMarginBottom: 6, gap: 2, marginX: 8, marginBottom: 8, radius: 16 };
 const hairlineTop = NAV.border + NAV.padTop + NAV.logoExpanded + NAV.brandMarginBottom + NAV.gap;
