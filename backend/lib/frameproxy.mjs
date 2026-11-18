@@ -14,6 +14,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { clientHalfFrom, secretCookies } from './secretkey.mjs';
+import { injectScriptTag } from './overlay.mjs';
 
 const TOKEN_COOKIE = 'vscode-tkn';
 const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade']);
@@ -78,6 +79,25 @@ export function injectWebviewEndpoint(html, framePort) {
   return `${html.slice(0, at)}&quot;webviewEndpoint&quot;:&quot;${endpoint}&quot;,${html.slice(at)}`;
 }
 
+/** The setting that tells the bridge extension which page tab its window is (extension package.json). */
+export const PANE_TAB_SETTING = 'kiroCrew.paneTab';
+
+/**
+ * Tell the window which of the page's tabs it is: `configurationDefaults` in
+ * the workbench configuration (IWorkbenchConstructionOptions; the browser's
+ * DefaultConfiguration registers it, and the extension host gets defaults with
+ * its configuration) sets the default of kiroCrew.paneTab to the tab id. The
+ * server sets no configurationDefaults of its own (webClientServer.ts). Only a
+ * tab id (`t` and 12 hex digits) is accepted. Returns null when the marker is missing.
+ */
+export function injectConfigurationDefaults(html, tab) {
+  if (!/^t[0-9a-f]{12}$/.test(tab || '')) throw new Error('bad tab id');
+  const i = html.indexOf(CONFIG_MARKER);
+  if (i < 0) return null;
+  const at = i + CONFIG_MARKER.length;
+  return `${html.slice(0, at)}&quot;configurationDefaults&quot;:{&quot;${PANE_TAB_SETTING}&quot;:&quot;${tab}&quot;},${html.slice(at)}`;
+}
+
 /** Add http://*.localhost:<port> to a CSP's frame-src (or create one), leaving every other directive alone. */
 export function allowWebviewFrames(csp, port) {
   const src = `http://*.localhost:${port}`;
@@ -129,7 +149,7 @@ export function injectBootStyle(html, css) {
  *   workbench page (lib/secretkey.mjs).
  */
 export function createFrameProxy(getTarget, opts = {}) {
-  function handleRequest(req, res) {
+  function handleRequest(req, res, ctx = {}) {
     const target = getTarget();
     if (!target) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '2' });
@@ -163,7 +183,9 @@ export function createFrameProxy(getTarget, opts = {}) {
           const withToken = injectConnectionToken(html, target.token);
           let page = withToken ?? html;
           // Only the workbench page itself (it carries the config marker).
-          if (withToken !== null && opts.webviewPort && opts.webviewPort() > 0) {
+          // Not on the app web origin: there is one origin there, so no per-webview
+          // `<uuid>.localhost` names, and VS Code's default webview endpoint is used.
+          if (withToken !== null && !ctx.webOrigin && opts.webviewPort && opts.webviewPort() > 0) {
             const withEndpoint = injectWebviewEndpoint(page, opts.webviewPort());
             if (withEndpoint !== null) {
               page = withEndpoint;
@@ -172,6 +194,11 @@ export function createFrameProxy(getTarget, opts = {}) {
               if (h['content-security-policy']) h['content-security-policy'] = allowWebviewFrames(h['content-security-policy'], opts.webviewPort());
             }
           }
+          // The web origin's viewer cookie and chat overlay script (lib/overlay.mjs).
+          if (withToken !== null && ctx.setCookies && ctx.setCookies.length) h['set-cookie'] = [...(h['set-cookie'] || []), ...ctx.setCookies];
+          if (withToken !== null && ctx.scriptSrc) page = injectScriptTag(page, ctx.scriptSrc) ?? page;
+          // Which page tab this window is (the page loads each tab with ?vscpTab=<id>).
+          if (withToken !== null && ctx.paneTab) page = injectConfigurationDefaults(page, ctx.paneTab) ?? page;
           if (withToken !== null && opts.secretKey) {
             h['set-cookie'] = [...(h['set-cookie'] || []), ...secretCookies(clientHalfFrom(req.headers.cookie))];
           }
@@ -237,6 +264,23 @@ export function isWebviewHost(hostHeader) {
   return /^[a-z0-9-]{1,63}\.localhost$/.test(h);
 }
 
+/**
+ * The app's web origin host, `<app>.apps.localhost[:port]`: how the gateway's
+ * `backend.webOrigin` relay names this app (kiro_crew/apps/app_web_origin.py).
+ * The relay reaches the launcher's own port with this `Host`, from a browser
+ * that is on another machine than the launcher.
+ */
+export function isWebOriginHost(hostHeader, appName) {
+  const m = /^([a-z0-9-]{1,63})\.apps\.localhost(?::\d{1,5})?$/.exec(String(hostHeader || '').toLowerCase());
+  return !!m && m[1] === String(appName || '').toLowerCase();
+}
+
+/** On the web origin the workbench's own origin is the Host it was served under. */
+function webOriginOk(host, origin) {
+  if (origin === undefined || origin === null || origin === '') return true;
+  return String(origin).toLowerCase() === `http://${String(host).toLowerCase()}`;
+}
+
 const WEBVIEW_PRE = '/out/vs/workbench/contrib/webview/browser/pre/';
 
 /**
@@ -270,7 +314,8 @@ export function webviewRequestAllowed(method, rawUrl, basePath) {
  * `http://127.0.0.1:<launcher port>`, which is what the workbench in the
  * dashboard's iframe sends. Any other web page is refused.
  */
-export function upgradeAllowed({ host, origin, listenPort }) {
+export function upgradeAllowed({ host, origin, listenPort, appName }) {
+  if (appName && isWebOriginHost(host, appName)) return webOriginOk(host, origin);
   if (!isLoopbackHost(host)) return false;
   if (origin === undefined || origin === null || origin === '') return true;
   const o = String(origin).toLowerCase();

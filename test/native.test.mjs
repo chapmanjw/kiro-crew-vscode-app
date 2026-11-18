@@ -468,38 +468,41 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(machine['chat.editor.localAgent.enabled'], false);
     assert.equal(machine['github.copilot.chat.cloudAgent.enabled'], false);
 
-    // the crew view state and slot for the page
+    // the crew view state for the page, and the tabs
     let s = (await proxy('GET', `/api/session?folder=${encodeURIComponent(workspace)}`)).json;
     assert.equal(s.crewView, null);
     assert.equal(s.crewChatToggle, undefined, 'no docked-column toggle counter any more');
-    assert.deepEqual(s.crewSlot, { key: slotNameFor(workspace), folder: workspace, title: `VS Code: ${path.basename(workspace)}` });
-    // S-3: naming is not creating. Polls never create the slot; the Kiro Crew
-    // tab opening (GET /api/bridge/kc?opened=1) does, for an existing folder only.
-    const main = slotNameFor(workspace);
-    await sleep(300);
-    assert.equal(mock.rec.slots.has(main), false, 'GET /api/session does not create the slot');
-    let k = await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    assert.equal(s.crewSlot, undefined, 'no per-folder session any more');
+    assert.deepEqual([s.tabs.list.length, s.tabs.active, s.tabs.fresh], [0, null, true], 'a first run: no tab file yet');
+    // Opening VS Code never creates a Kiro Crew session: a tab opened on its own
+    // shows the session list in its Kiro Crew view, a chat's tab shows that chat.
+    const slotsBefore = mock.rec.slots.size;
+    const own = (await proxy('POST', '/api/tabs/open', { folder: workspace, reuse: true })).json;
+    assert.match(own.tab.id, /^t[0-9a-f]{12}$/);
+    assert.deepEqual([own.created, own.tab.folder, own.tab.session, own.tabs.active, own.tabs.fresh], [true, workspace, null, own.tab.id, false]);
+    assert.equal((await proxy('POST', '/api/tabs/open', { folder: workspace, reuse: true })).json.tab.id, own.tab.id, '?folder= reuses the tab on that folder');
+    let k = await bridgeCall('GET', `/api/bridge/kc?tab=${own.tab.id}`, undefined, 'h1');
     assert.equal(k.status, 200);
-    assert.equal(mock.rec.slots.has(main), false, 'a poll without opened=1 does not create it');
-    assert.equal(k.json.slot, main);
-    assert.equal((await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(path.join(workspace, 'missing'))}`, undefined, 'h1')).status, 403, 'a folder that does not exist');
-    assert.equal((await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=relative`, undefined, 'h1')).status, 403, 'a relative folder');
-    k = await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
-    assert.equal(k.json.ensured, true);
-    assert.equal(mock.rec.slots.get(main)?.project, workspace, 'opening the tab creates the slot pointed at the folder');
-    mock.closeSlot(main);
-    await proxy('GET', `/api/session?folder=${encodeURIComponent(workspace)}`);
-    await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
+    assert.deepEqual([k.json.tab, k.json.session, k.json.embedPath], [own.tab.id, null, '/embed/sessions']);
+    const chatTab = (await proxy('POST', '/api/tabs/open', { folder: workspace, session: 'dashboard:chat-1' })).json;
+    assert.notEqual(chatTab.tab.id, own.tab.id, 'a chat gets its own tab, even on a folder that has one');
+    assert.equal((await proxy('POST', '/api/tabs/open', { folder: path.dirname(workspace), session: 'dashboard:chat-1' })).json.tab.id, chatTab.tab.id, 'the chip again brings back the same tab');
+    k = await bridgeCall('GET', `/api/bridge/kc?tab=${chatTab.tab.id}`, undefined, 'h1');
+    assert.equal(k.json.embedPath, '/embed/chat/chat-1?sid=chat-1');
+    assert.equal((await bridgeCall('GET', '/api/bridge/kc?tab=tffffffffffff', undefined, 'h1')).json.embedPath, '/embed/sessions', 'an unknown tab gets the session list');
+    for (const bad of [{ folder: 'relative' }, { folder: path.join(workspace, 'missing') }, { session: 'x y' }, { session: '../x' }]) {
+      assert.equal((await proxy('POST', '/api/tabs/open', bad)).status, 400, JSON.stringify(bad));
+    }
     await sleep(300);
-    assert.equal(mock.rec.slots.has(main), false, 'closing it in Kiro Crew sticks until the tab is opened again');
-    await bridgeCall('GET', `/api/bridge/kc?opened=1&folder=${encodeURIComponent(workspace)}`, undefined, 'h1');
-    assert.equal(mock.rec.slots.has(main), true, 'reopening the tab brings it back');
+    assert.equal(mock.rec.slots.size, slotsBefore, 'no tab or Kiro Crew view request created a session');
+    assert.equal((await proxy('POST', '/api/tabs/activate', { id: own.tab.id })).json.tabs.active, own.tab.id);
+    assert.equal((await proxy('POST', '/api/tabs/activate', { id: 'tffffffffffff' })).status, 404);
 
     // The tunnel: the page sees only connected/not; the bridge gets the origin and embed URL.
     assert.deepEqual([s.kc.available, s.kc.connected], [true, false]);
     assert.equal(k.json.connected, false);
     assert.match(k.json.origin, /^http:\/\/[0-9a-f]{32}\.localhost:\d+$/);
-    assert.equal(k.json.embedUrl, `${k.json.origin}/embed/chat/${main}`);
+    assert.equal(k.json.embedUrl, `${k.json.origin}/embed/chat/chat-1?sid=chat-1`);
     const signed = (await proxy('POST', '/api/kc/sign-in', { url: mock.mintLink(), via: 'auto' })).json;
     assert.equal(signed.ok, true);
     s = (await proxy('GET', '/api/session')).json;
@@ -524,7 +527,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     // V5 S-1: the page's reason for a refused mint is kept with its code for the setup note.
     const noUrl = (await proxy('POST', '/api/kc/sign-in', { error: 'no dashboard URL', code: 'external_origin_unavailable', via: 'connect' })).json;
     assert.equal(noUrl.kc.lastCode, 'external_origin_unavailable');
-    const k2 = (await bridgeCall('GET', `/api/bridge/kc?opened=0&folder=${encodeURIComponent(workspace)}`, undefined, 'h1')).json;
+    const k2 = (await bridgeCall('GET', `/api/bridge/kc?tab=${own.tab.id}`, undefined, 'h1')).json;
     assert.notEqual(k2.origin, k.json.origin, 'Disconnect rotates the origin');
     assert.equal((await bridgeCall('POST', '/api/bridge/kc/sign-in', { url: mock.mintLink() }, 'h1')).json.ok, true, 'a pasted link signs in');
     assert.equal((await proxy('GET', '/api/session')).json.kc.via, 'paste');

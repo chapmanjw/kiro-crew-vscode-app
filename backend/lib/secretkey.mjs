@@ -150,13 +150,35 @@ export function loadServerHalf(file, { restrict = restrictToUser } = {}) {
  * workbench.ts getServerKeyPart), a loopback Host, no Origin or the frame's
  * own origin, and a well-formed client half.
  */
-export function mintAllowed({ method, host, origin, listenPort, clientHalf, isLoopbackHost }) {
+export function mintAllowed({ method, host, origin, listenPort, clientHalf, isLoopbackHost, isWebOrigin = false }) {
   if (method !== 'POST') return { ok: false, status: 405, error: 'method not allowed' };
-  if (!isLoopbackHost(host)) return { ok: false, status: 403, error: 'bad host' };
-  if (origin) {
+  if (!isWebOrigin && !isLoopbackHost(host)) return { ok: false, status: 403, error: 'bad host' };
+  if (isWebOrigin) {
+    // The app web origin: the workbench's origin is the Host it was served under.
+    if (origin && String(origin).toLowerCase() !== `http://${String(host).toLowerCase()}`) return { ok: false, status: 403, error: 'bad origin' };
+  } else if (origin) {
     const o = String(origin).toLowerCase();
     if (o !== `http://127.0.0.1:${listenPort}` && o !== `http://localhost:${listenPort}`) return { ok: false, status: 403, error: 'bad origin' };
   }
   if (!clientHalf) return { ok: false, status: 403, error: 'no client key half' };
   return { ok: true };
+}
+
+// The viewer cookie of the app's web origin (a remote crew's viewer). The
+// launcher sets it, HttpOnly, on the workbench page it serves; the Kiro Crew chat
+// that shares that origin is served only to a request that carries it, so a local
+// process or another page that can reach the same tunnel port cannot use the
+// dashboard session the launcher holds. Same attributes as the secret-key cookies.
+export const VIEWER_COOKIE = 'vscp-viewer';
+
+export function viewerCookieHeader(value) {
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(String(value || ''))) throw new Error('unsafe viewer value');
+  return `${VIEWER_COOKIE}=${value}; Path=/; HttpOnly; ${COOKIE_ATTRS.replace('Path=/; ', '')}`;
+}
+
+/** Whether a Cookie header carries the viewer cookie with exactly `secret`. */
+export function viewerOk(cookieHeader, secret) {
+  const got = readCookie(cookieHeader, VIEWER_COOKIE);
+  if (!got || !secret || got.length !== secret.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(secret));
 }

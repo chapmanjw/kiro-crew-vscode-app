@@ -138,6 +138,14 @@ export async function edgeChecks({ page, frame, shotDir, check, label = '' }) {
     const b = el.getBoundingClientRect();
     return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
   });
+  // The frame itself: the detached wrap the page places over the slot. It runs
+  // down over the card's bottom border, so it is measured here, not the slot.
+  const frameBox = await page.evaluate(() => {
+    const w = window.__vscodePane && window.__vscodePane.wrap;
+    if (!w) return null;
+    const b = w.getBoundingClientRect();
+    return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+  }).catch(() => null);
   const card = await page.locator('[data-testid="vscode-pane-card"]').first().evaluate((el) => {
     const b = el.getBoundingClientRect();
     const cs = getComputedStyle(el);
@@ -145,15 +153,17 @@ export async function edgeChecks({ page, frame, shotDir, check, label = '' }) {
   });
   const vp = page.viewportSize();
   const img = decodePng(await page.screenshot());
-  const seams = seamCheck(img, img.width / vp.width, slot);
+  const seams = seamCheck(img, img.width / vp.width, frameBox || slot);
   const bad = Object.entries(seams).filter(([, v]) => v.seam).map(([k]) => k);
   check(`${pre}no double border or 1px seam where VS Code meets the card's border, on all four sides next to all four corners`,
     bad.length === 0, `${bad.length ? `seams: ${bad.join('; ')} -- ` : ''}${JSON.stringify(seams)}`);
-  // The frame fills the card body: right inside the card's 1px border on the
-  // left, right and bottom (the toolbar strip is above it).
-  const inset = [slot.left - card.left, card.right - slot.right, card.bottom - slot.bottom].map((n) => Math.round(n * 100) / 100);
-  check(`${pre}the frame sits right inside the card's ${card.border} border on the left, right and bottom, under the card's ${card.radius} radius`,
-    inset.every((n) => n === parseFloat(card.border)), JSON.stringify({ inset, card }));
+  // The frame sits right inside the card's 1px border on the left and right, and
+  // runs down over the bottom border, so the status bar meets the card's edge.
+  const box = frameBox || slot;
+  const inset = [box.left - card.left, card.right - box.right, card.bottom - box.bottom].map((n) => Math.round(n * 100) / 100);
+  const bw = parseFloat(card.border);
+  check(`${pre}the frame sits right inside the card's ${card.border} border on the left and right, and meets the card's bottom edge (no line under the status bar), under the card's ${card.radius} radius`,
+    inset.every((n, i) => n === [bw, bw, 0][i]), JSON.stringify({ inset, card, frameMeasured: !!frameBox }));
   let shot = null;
   if (shotDir && e.parts && e.parts.auxiliarybar) {
     const aux = e.parts.auxiliarybar;

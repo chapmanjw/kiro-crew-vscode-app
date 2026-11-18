@@ -18,25 +18,29 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { resolveDataDir, parseConfig, effectiveConfig } from './lib/config.mjs';
-import { parseCodeVersion, findServerBuild, serverMetadataUrl, nodeExeName } from './lib/discovery.mjs';
+import { parseCodeVersion, findServerBuild, serverMetadataUrl, serverLatestMetadataUrl, nodeExeName } from './lib/discovery.mjs';
 import { buildServerArgs, buildServerEnv, workbenchUrl, terminalEnvSettings } from './lib/args.mjs';
 import { verifyProxySignature, checkBridgeSecret, randomSecret, PROXY_HEADER, BRIDGE_HEADER } from './lib/auth.mjs';
 import { matchRoute, parseOpenRequest, fileMenuToCommand } from './lib/router.mjs';
 import { Bridge } from './lib/bridge.mjs';
 import { BRIDGE_ID, bridgeFolderName, upsertBridgeEntry, staleBridgeFolders } from './lib/extensions.mjs';
-import { createFrameProxy, isLoopbackHost, isWebviewHost, webviewRequestAllowed, upgradeAllowed } from './lib/frameproxy.mjs';
-import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed } from './lib/secretkey.mjs';
+import { createFrameProxy, isLoopbackHost, isWebviewHost, isWebOriginHost, webviewRequestAllowed, upgradeAllowed } from './lib/frameproxy.mjs';
+import { MINT_PATH, loadServerHalf, clientHalfFrom, mintKey, mintAllowed, viewerCookieHeader, viewerOk } from './lib/secretkey.mjs';
+import { overlayScript } from './lib/overlay.mjs';
+import { diagnose, addAllowedPort, listedPorts, validPort, PORTS_VAR } from './lib/weborigin.mjs';
 import { parseCrewViewRequest, parseSecretProbe } from './lib/crewview.mjs';
 import { createKcProxy } from './lib/kcproxy.mjs';
-import { signInWithLocalToken } from './lib/localtoken.mjs';
+import { signInWithLocalToken, dataHome } from './lib/localtoken.mjs';
 import { tunnelCss } from './lib/chipcss.mjs';
 import { layoutSettings } from './lib/layoutprefs.mjs';
-import { crewSlotRequest, dashboardOrigins } from './lib/kctab.mjs';
+import { dashboardOrigins, overlayTabBody, embedPathFor } from './lib/kctab.mjs';
+import { TabStore, validTabId, validSessionKey, validFolder, sameFolder } from './lib/tabs.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
-import { provisionServer } from './lib/provision.mjs';
+import { provisionServer, fetchJson } from './lib/provision.mjs';
+import { ownedBuild, buildName, readRecord, writeRecord, recordedDir, decideUpdate, removableBuilds, updateBase, COMMIT_RE } from './lib/serverbuild.mjs';
 import { resolveTheme, toVsCodeTheme, themeSignature, seedThemeSettings, bootCss, bootColors } from './lib/theme.mjs';
-import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE, slotNameFor, folderSlotTitle } from './lib/gateway.mjs';
+import { GatewayClient, CHAT_PERMISSIONS, PERMISSION_MESSAGE } from './lib/gateway.mjs';
 import { parseChatRequest, parseNativeChatRequest, runChatTurn, runNativeTurn, folderInRoots } from './lib/chatbridge.mjs';
 import { SessionRegistry, newSessionSlotName, sessionTitle, historyTurns, APPROVE_IN_KIRO_CREW } from './lib/nativechat.mjs';
 import { chatSettings, parseChatPrefs, DEFAULT_CHAT_PREFS } from './lib/chatprefs.mjs';
@@ -48,6 +52,16 @@ const PORT = Number(env.PORT || 0);
 const HOST = '127.0.0.1';
 const DATA_DIR = resolveDataDir(env, APP_ROOT);
 const PROXY_SECRET = env.KIROCREW_PROXY_SECRET || '';
+// The app's name as the gateway knows it; its web origin (backend.webOrigin) is
+// <name>.apps.localhost, which the gateway relays to this port.
+const APP_NAME = env.KIROCREW_APP_NAME || 'vscode-pane';
+// The page's probe of whether this machine's frame port is reachable from its browser.
+const PROBE_PATH = '/_vscp-probe';
+// The build record: which VS Code server build the app installed last, and the one it replaced.
+const BUILD_RECORD = path.join(DATA_DIR, 'state', 'server-build.json');
+// The update service. VSCODE_PANE_UPDATE_BASE moves it to a loopback stand-in (for tests).
+const UPDATE_BASE = updateBase(env.VSCODE_PANE_UPDATE_BASE);
+const UPDATE_HTTP = UPDATE_BASE.startsWith('http://');
 const ALLOW_UNSIGNED = env.VSCODE_PANE_ALLOW_UNSIGNED === '1';
 const MAX_BODY = 64 * 1024;
 
@@ -92,10 +106,14 @@ const frameStateText = readText(FRAME_STATE_FILE);
 const frameState = frameStateFor(parseFrameState(frameStateText));
 const FRAME_KEY = frameState.key;
 const BASE_PATH = `/vsc-${FRAME_KEY}`;
+// What the gateway-relay diagnosis asks for on the web origin (lib/weborigin.mjs).
+const WEB_PROBE_PATH = `${BASE_PATH}/_vscp-probe`;
 // Identifies this launcher run in /api/session; the page reloads its kept-alive
 // frame when it changes.
 const RUN_ID = randomSecret(9);
 const BRIDGE_SECRET = randomSecret(24);
+// Sets, HttpOnly, on the workbench page served on the web origin; the chat on that origin needs it.
+const VIEWER_SECRET = randomSecret(24);
 // One connection token per launcher run, not per server start: the workbench
 // keeps the token from its config, so a reload after a server restart must
 // not need a new one. A launcher restart gives a new frame path and token.
@@ -113,7 +131,7 @@ const secretHalf = loadServerHalf(SECRET_HALF_FILE);
 // Kiro Crew gateway access for the built-in Chat, with this app's own token.
 const gateway = new GatewayClient({
   origin: env.KIROCREW_GATEWAY_ORIGIN || '',
-  appName: env.KIROCREW_APP_NAME || 'vscode-pane',
+  appName: APP_NAME,
   secret: PROXY_SECRET,
   log,
 });
@@ -121,6 +139,8 @@ const chatStats = { turns: 0, lastTurn: null, active: 0 };
 
 // One Kiro Crew slot per VS Code chat session of the "Kiro Crew" session type.
 const sessions = new SessionRegistry({ file: path.join(DATA_DIR, 'state', 'chat-sessions.json') });
+// The page's tabs, one VS Code window each (lib/tabs.mjs).
+const tabs = new TabStore({ file: path.join(DATA_DIR, 'state', 'tabs.json'), onError: (e) => log('could not save the tabs', e.message) });
 // Whether Copilot's own agents (local harness, Cloud, Copilot CLI) are hidden
 // so new chats open as Kiro Crew sessions. Mirrors the VS Code setting
 // kiroCrew.chat.hideCopilotAgents, which the extension reports.
@@ -152,6 +172,10 @@ function themeCommand() {
   return { kind: 'applyTheme', theme: { ...vsTheme, signature: themeSignature(vsTheme) } };
 }
 
+// How the browser that last loaded the workbench reached it: 'frame' (the frame
+// port) or 'origin' (the app web origin, a remote crew's tunnel).
+const viewer = { via: 'frame' };
+
 const state = {
   status: 'idle', // idle | provisioning | starting | ready | error | stopped
   message: '',
@@ -163,6 +187,12 @@ const state = {
   startedAt: null,
   generation: 0, // bumps every time a server becomes ready; the UI reloads its frame on change
   autoRetry: true,
+  // Set when no server build exists and the `code` command is not here to name
+  // one: the page then offers a button that downloads the latest stable build.
+  needsInstall: false,
+  installing: false,
+  // The page's update check and update: {phase, installed, latest, message, error, at}.
+  update: null,
   stopping: false,
 };
 
@@ -206,6 +236,11 @@ function provisionError(message) {
 
 async function ensureBuild() {
   const commit = config.serverDir ? null : detectCodeVersion().commit;
+  // With no `code` command to name a build, the build the app recorded as installed (its last download or update), while it is still there.
+  if (!commit && !config.serverDir) {
+    const dir = recordedDir({ dataDir: DATA_DIR, commit: (readRecord(BUILD_RECORD) || {}).commit });
+    if (dir) return { dir, source: 'data', commit: path.basename(dir) };
+  }
   const found = findServerBuild({
     configured: config.serverDir,
     dataDir: DATA_DIR,
@@ -220,10 +255,12 @@ async function ensureBuild() {
     try {
       setStatus('provisioning', 'Downloading VS Code server');
       const dir = await provisionServer({
-        metadataUrl: serverMetadataUrl(commit),
+        metadataUrl: serverMetadataUrl(commit, process.platform, process.arch, UPDATE_BASE),
         dataDir: DATA_DIR,
         commit,
+        allowHttp: UPDATE_HTTP,
         onStatus: (m) => setStatus('provisioning', m),
+        onInstalled: (m) => recordInstall(m, 'download'),
       });
       return { dir, source: 'download', commit };
     } catch (e) {
@@ -232,6 +269,17 @@ async function ensureBuild() {
     }
   }
   if (found) return found;
+  if (!commit && config.allowDownload) {
+    // No `code` command on this machine, so no commit to ask for. The user is
+    // offered the latest stable build rather than getting a 250 MB download unasked.
+    throw Object.assign(
+      provisionError(
+        'The code command is not available on this machine, so Kiro Crew cannot tell which VS Code server build to use. ' +
+          'You can download the latest stable VS Code server (a few hundred MB from update.code.visualstudio.com, checked against its SHA-256) into this app\'s data folder.',
+      ),
+      { needsInstall: true },
+    );
+  }
   throw provisionError(
     commit
       ? 'No VS Code server build found and downloads are disabled. Set serverDir in data/config.json.'
@@ -358,6 +406,7 @@ async function launchServer() {
     if (!state.build) {
       setStatus('provisioning', 'Locating VS Code server');
       state.build = await ensureBuild();
+      state.build.name = buildName(state.build.dir);
       log('server build', state.build.source, state.build.dir);
     }
     setStatus('starting', 'Starting VS Code server');
@@ -419,7 +468,14 @@ async function launchServer() {
     state.autoRetry = true;
     retry.recordSuccess();
     setStatus('ready', 'VS Code is running');
+    settleUpdate();
   } catch (e) {
+    if (e.needsInstall) {
+      state.needsInstall = true;
+      state.autoRetry = false;
+      setStatus('error', 'VS Code server is not installed', e.message);
+      return;
+    }
     const decision = retry.recordStartFailure(e.kind);
     if (decision.retry) {
       setStatus('error', 'VS Code server failed to start', `${e.message} (retrying in ${Math.round(decision.delayMs / 1000)} s)`);
@@ -437,6 +493,38 @@ async function launchServer() {
 }
 
 function stopRetrying(reason, detail) {
+  const rec = readRecord(BUILD_RECORD);
+  const back = rec && rec.previous ? recordedDir({ dataDir: DATA_DIR, commit: rec.previous.commit }) : null;
+  if (back) {
+    // The new build never got a server running: the build it replaced comes back, once.
+    try {
+      writeRecord(BUILD_RECORD, { commit: rec.previous.commit, name: rec.previous.name, installedAt: rec.installedAt, via: 'rollback', previous: null });
+    } catch (e) {
+      log('could not roll back the server build', e.message);
+      state.autoRetry = false;
+      setStatus('error', `Stopped: ${reason}`, `${detail} Use Restart server to try again.`);
+      return;
+    }
+    for (const name of removableBuilds([rec.commit], rec.previous.commit)) {
+      try {
+        fs.rmSync(path.join(DATA_DIR, 'server', name), { recursive: true, force: true });
+      } catch (e) {
+        log('could not remove the build that did not start', e.message);
+      }
+    }
+    state.update = {
+      phase: 'failed',
+      what: 'update',
+      installed: { commit: rec.previous.commit, name: rec.previous.name },
+      error: `VS Code ${rec.name || rec.commit.slice(0, 8)} did not start (${detail}). The previous build is running again.`,
+      at: new Date().toISOString(),
+    };
+    state.build = null;
+    state.autoRetry = true;
+    retry.reset();
+    restartServer();
+    return;
+  }
   state.autoRetry = false;
   setStatus('error', `Stopped: ${reason}`, `${detail} Use Restart server to try again.`);
 }
@@ -457,8 +545,143 @@ function scheduleRestart(delayMs) {
   restartTimer.unref?.();
 }
 
+/**
+ * "Download VS Code server" (the page's button): fetch the latest stable build
+ * into data/server/<commit>, then start it. Only runs when the launcher found no
+ * build and no `code` command (state.needsInstall); a failure leaves the button
+ * in place, and nothing is retried on its own.
+ */
+async function installLatestServer() {
+  if (state.installing || launching || state.stopping) return false;
+  state.installing = true;
+  try {
+    setStatus('provisioning', 'Looking up VS Code server download');
+    await provisionServer({
+      metadataUrl: serverLatestMetadataUrl(process.platform, process.arch, UPDATE_BASE),
+      allowHttp: UPDATE_HTTP,
+      onInstalled: (m) => recordInstall(m, 'download'),
+      dataDir: DATA_DIR,
+      commit: null,
+      onStatus: (m) => setStatus('provisioning', m),
+    });
+  } catch (e) {
+    log('server download failed', e.message);
+    setStatus('error', 'VS Code server download failed', `${e.message}. Use Download VS Code server to try again.`);
+    return false;
+  } finally {
+    state.installing = false;
+  }
+  state.needsInstall = false;
+  state.build = null;
+  await restartServer();
+  return true;
+}
+
+// ---------------------------------------------------------------- VS Code server updates
+//
+// A build the app installed (in data/server, or downloaded by the app), with no
+// `code` command pinning the server, can be checked for and updated from the page.
+// Nothing here runs by itself: each check and each update is the user's click.
+
+/** Record an install: which build the app owns, and (for an update) the one it replaced. */
+function recordInstall({ commit, name }, via, previous = null) {
+  try {
+    writeRecord(BUILD_RECORD, { commit, name: name || null, installedAt: new Date().toISOString(), via, previous });
+  } catch (e) {
+    log('could not record the server build', e.message);
+  }
+}
+
+/** The app owns the active build, and no `code` command pins the server to the user's VS Code. */
+function serverOwned() {
+  return ownedBuild(state.build, codeVersion ? codeVersion.commit : null);
+}
+
+/** The newest stable build the update service names, as {commit, name}. */
+function latestFrom(meta) {
+  const commit = meta && typeof meta.version === 'string' ? meta.version.toLowerCase() : '';
+  if (!COMMIT_RE.test(commit)) throw new Error('the update service named no build');
+  const name = meta.name || meta.productVersion;
+  return { commit, name: typeof name === 'string' && /^\d+\.\d+\.\d+/.test(name) ? name : null };
+}
+
+/** Ask the update service for the newest stable build. Changes nothing on disk. */
+async function checkServerUpdate() {
+  const installed = { commit: state.build.commit, name: state.build.name || null };
+  state.update = { phase: 'checking', installed, at: new Date().toISOString() };
+  try {
+    const meta = await fetchJson(serverLatestMetadataUrl(process.platform, process.arch, UPDATE_BASE), { allowHttp: UPDATE_HTTP });
+    const latest = latestFrom(meta);
+    const phase = decideUpdate({ installedCommit: installed.commit, latest }).available ? 'available' : 'current';
+    state.update = { phase, installed, latest, at: new Date().toISOString() };
+  } catch (e) {
+    log('server update check failed', e.message);
+    state.update = { phase: 'failed', what: 'check', installed, error: `Could not check for updates: ${e.message}`, at: new Date().toISOString() };
+  }
+  return state.update;
+}
+
+/** Download the build the user checked, then switch the server to it. The build it replaces stays until the new one runs. */
+async function installServerUpdate(commit) {
+  const wasReady = state.status === 'ready';
+  const installed = { commit: state.build.commit, name: state.build.name || null };
+  const latest = state.update && state.update.latest ? state.update.latest : { commit, name: null };
+  const stamp = () => new Date().toISOString();
+  state.installing = true;
+  state.update = { phase: 'downloading', installed, latest, message: 'Downloading the new VS Code server', at: stamp() };
+  try {
+    // The server keeps running, and its page keeps the frame, while the download runs.
+    const dir = await provisionServer({
+      metadataUrl: serverMetadataUrl(commit, process.platform, process.arch, UPDATE_BASE),
+      dataDir: DATA_DIR,
+      commit,
+      allowHttp: UPDATE_HTTP,
+      onStatus: (m) => {
+        if (state.update && state.update.phase === 'downloading') state.update.message = m;
+      },
+    });
+    const newCommit = path.basename(dir);
+    if (newCommit === installed.commit) {
+      state.update = { phase: 'current', installed, latest, at: stamp() };
+      return;
+    }
+    const name = buildName(dir) || latest.name || null;
+    const previous = { commit: installed.commit, name: installed.name };
+    writeRecord(BUILD_RECORD, { commit: newCommit, name, installedAt: stamp(), via: 'update', previous });
+    state.update = { phase: 'restarting', installed: { commit: newCommit, name }, previous, at: stamp() };
+    state.installing = false;
+    state.build = null;
+    await restartServer();
+  } catch (e) {
+    log('server update failed', e.message);
+    state.update = { phase: 'failed', what: 'update', installed, latest, error: `The update did not complete: ${e.message}`, at: stamp() };
+    if (wasReady && state.status !== 'ready') setStatus('ready', 'VS Code is running');
+  } finally {
+    state.installing = false;
+  }
+}
+
+/** The new build is running: the one it replaced is removed, and the record stops naming it. */
+function settleUpdate() {
+  const rec = readRecord(BUILD_RECORD);
+  if (!rec || !rec.previous || !state.build || state.build.commit !== rec.commit) return;
+  try {
+    for (const name of removableBuilds([rec.previous.commit], rec.commit)) {
+      fs.rmSync(path.join(DATA_DIR, 'server', name), { recursive: true, force: true });
+    }
+    writeRecord(BUILD_RECORD, { ...rec, previous: null });
+  } catch (e) {
+    log('could not finish the server update record', e.message);
+    return;
+  }
+  if (state.update && state.update.phase === 'restarting') {
+    state.update = { phase: 'done', installed: { commit: rec.commit, name: rec.name }, at: new Date().toISOString() };
+  }
+}
+
 /** Manual restart (UI "Restart server" / "Try again"): resets the retry budget. */
 async function restartServer() {
+  if (state.installing) return; // the download restarts the server itself when it finishes
   if (launching) {
     restartPending = true; // applied when the launch in flight settles
     return;
@@ -517,47 +740,111 @@ function parseJson(buf) {
 }
 
 
-// The folder's own crew slot is created (or reopened) in Kiro Crew only when
-// VS Code's "Kiro Crew" tab opens on it: the bridge asks GET /api/bridge/kc
-// with opened=1 when the view becomes visible or its folder changes. Polls and
-// page loads never create it, so a session closed in Kiro Crew stays closed
-// until the tab is opened again, and only an absolute folder that exists is
-// accepted (lib/kctab.mjs crewSlotRequest).
-function ensureCrewSlot(folder) {
-  return gateway.ensureSlot(folder).then(
-    () => true,
-    (e) => {
-      log('crew slot: could not ensure for', folder, '-', e.message);
-      return false;
-    },
-  );
+/** The folder a new tab opens on when the page names none: the configured workspace, else the home folder. */
+function defaultFolder() {
+  return fs.existsSync(config.workspace) ? config.workspace : os.homedir();
+}
+
+function isDirectory(p) {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The page's tabs as /api/session reports them: each with its workbench URL once the server is up. */
+function tabsBody() {
+  const ready = state.status === 'ready' && !!state.serverPort && !!framePort;
+  return {
+    list: tabs.list().map((t) => ({
+      id: t.id,
+      folder: t.folder,
+      session: t.session,
+      url: ready ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder: t.folder }) : null,
+    })),
+    active: tabs.active,
+    // No tab file yet: the page opens the first tab, on the folder it used last.
+    fresh: tabs.fresh,
+  };
+}
+
+/** The tab a file belongs in: of the tabs whose folder holds it, the one on the deepest folder (then the front tab, then the latest); null when none does. */
+function tabHolding(file) {
+  const holders = tabs.list().filter((t) => folderInRoots(file, [t.folder]));
+  if (!holders.length) return null;
+  const depth = (t) => path.resolve(t.folder).length;
+  holders.sort((a, b) => depth(b) - depth(a) || Number(b.id === tabs.active) - Number(a.id === tabs.active) || b.activeAt - a.activeAt);
+  return tabs.get(holders[0].id);
+}
+
+/**
+ * The tab to open a file in: `named` when given, else the tab holding the file,
+ * else a tab on `root` (the project the file menu names), else the front tab,
+ * else a new tab on the file's folder. `{tab}` (tab may be null) or `{error, status}`.
+ */
+function tabForFile(file, { named = null, root = null } = {}) {
+  if (named) return { tab: named };
+  const holding = tabHolding(file);
+  if (holding) return { tab: holding };
+  const base = validFolder(root);
+  const folder = base && isDirectory(base) ? base : tabs.get(tabs.active) ? null : path.dirname(file);
+  if (!folder) return { tab: tabs.get(tabs.active) };
+  if (!isDirectory(folder)) return { tab: null };
+  const r = tabs.open({ folder, reuse: true });
+  return r.error ? { error: r.error, status: r.status } : { tab: tabs.get(r.tab.id) };
+}
+
+/** Where a command for a tab goes (lib/bridge.mjs routes): that tab's window, or before it says so, a window on its folder. */
+function tabRoute(t) {
+  return t ? { tab: t.id, folder: t.folder } : null;
+}
+
+/**
+ * The window showing a page tab opened another folder itself (File > Open
+ * Folder in VS Code navigates the frame): the tab follows it, so its label and
+ * its next load name that folder. Only the tab's newest window counts.
+ */
+function followWindowFolder(host) {
+  const h = bridge.hosts.get(host);
+  if (!h || !h.tab || !h.folders.length || bridge.hostForTab(h.tab) !== host) return;
+  const t = tabs.get(h.tab);
+  const folder = h.folders[0];
+  if (t && !sameFolder(t.folder, folder) && isDirectory(folder) && tabs.setFolder(t.id, folder)) log('tab', t.id, 'follows its window to another folder');
 }
 
 function sessionBody(folderParam) {
   const folder = folderParam || (fs.existsSync(config.workspace) ? config.workspace : null);
   const ready = state.status === 'ready' && !!state.serverPort;
+  const front = tabs.get(tabs.active);
   return {
     status: state.status,
     ready,
     message: state.message,
     error: state.error,
-    url: ready && framePort ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder }) : null,
+    // The front tab's workbench (or the default folder's, with no tab); each tab has its own in `tabs`.
+    url: ready && framePort ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder: front ? front.folder : folder }) : null,
     folder,
     defaultFolder: config.workspace,
     generation: state.generation,
     instance: RUN_ID,
     autoRetry: state.autoRetry,
-    server: state.build ? { source: state.build.source, commit: state.build.commit, startedAt: state.startedAt } : null,
+    tabs: tabsBody(),
+    // How a page whose browser is not on this machine reaches the workbench:
+    // http://<webOriginHost>:<its own dashboard port><the path of `url`>.
+    webOrigin: { host: `${APP_NAME}.apps.localhost`, probe: PROBE_PATH },
+    // 'install-server' while the page should offer to download the server.
+    action: state.needsInstall && !state.installing ? 'install-server' : null,
+    server: state.build ? { source: state.build.source, commit: state.build.commit, name: state.build.name || null, startedAt: state.startedAt, owned: serverOwned() } : null,
+    // The page's update check and update: null until the user asks.
+    update: state.update,
     bridge: { connected: bridge.connected, extension: bridge.extension },
     theme: theme ? { kind: theme.kind, tier: theme.tier } : null,
     chat: chatProblem(),
-    // The folder's own Kiro Crew slot {key, folder, title}, the session VS
-    // Code's "Kiro Crew" tab opens on (named here, created only when the tab
-    // opens), and the tab's state as the bridge reports it.
+    // VS Code's "Kiro Crew" tab as the bridge last reported it.
     crewView: bridge.crewView,
     // The tunnel's sign-in state for the page: never its origin or a cookie.
     kc: kcBody(),
-    crewSlot: folder ? { key: slotNameFor(folder), folder, title: folderSlotTitle(folder) } : null,
   };
 }
 
@@ -711,10 +998,11 @@ const kc = gatewayUrl
     stateFile: KC_STATE_FILE,
     css: () => tunnelCss(bootCss(theme, vsTheme, { scheme: false })),
     // The frame chain: the dashboard, the workbench, the self-hosted webview origins.
-    frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`],
+    frameAncestors: () => [...dashboardOrigins(env), `http://127.0.0.1:${framePort}`, `http://*.localhost:${framePort}`, `http://${APP_NAME}.apps.localhost:*`],
     log,
     onChange: () => {
-      bridge.enqueueLatest({ kind: 'kcChanged' });
+      // Every window's Kiro Crew view looks again (signed in or out, or a new origin).
+      bridge.broadcast({ kind: 'kcChanged' });
       kcAutoLocalSignIn();
     },
   })
@@ -772,12 +1060,19 @@ function kcAutoLocalSignIn() {
   kcLocalSignIn('local').catch((e) => log('kc local sign-in crashed:', e && e.message));
 }
 
-/** For the bridge only: the tunnel origin (a capability) and the embed URL for the folder's slot. */
-function kcBridgeBody(folder) {
+/**
+ * For the bridge only: the tunnel origin (a capability) and what the window's
+ * Kiro Crew view frames for its page tab (lib/kctab.mjs embedPathFor): the
+ * session the tab was opened from, or the session list. `tab` is null for a
+ * window the page has no tab for (opened some other way).
+ */
+function kcBridgeBody(tab) {
   const body = kcBody();
-  if (!kc || !kc.port) return body;
-  const slot = folder ? slotNameFor(folder) : '';
-  return { ...body, origin: kc.origin, slot, embedUrl: `${kc.origin}/embed/chat/${encodeURIComponent(slot)}`, folder };
+  const embedPath = embedPathFor(tab && tab.session);
+  const about = { tab: tab ? tab.id : null, session: tab ? tab.session : null, embedPath };
+  if (viewer.via === 'origin') return overlayTabBody({ ...body, ...about });
+  if (!kc || !kc.port) return { ...body, ...about };
+  return { ...body, ...about, origin: kc.origin, embedUrl: `${kc.origin}${embedPath}` };
 }
 
 async function kcDoSignIn(link, via) {
@@ -798,7 +1093,7 @@ async function kcDoSignIn(link, via) {
  */
 function handleMint(req, res) {
   const clientHalf = clientHalfFrom(req.headers.cookie);
-  const ok = mintAllowed({ method: req.method, host: req.headers.host, origin: req.headers.origin, listenPort: framePort, clientHalf, isLoopbackHost });
+  const ok = mintAllowed({ method: req.method, host: req.headers.host, origin: req.headers.origin, listenPort: framePort, clientHalf, isLoopbackHost, isWebOrigin: isWebOriginHost(req.headers.host, APP_NAME) });
   req.resume();
   if (!ok.ok) {
     log('refused secret key mint', ok.error, `origin=${String(req.headers.origin || '').slice(0, 80)}`);
@@ -809,8 +1104,26 @@ function handleMint(req, res) {
   return res.end(key);
 }
 
-/** The frame listener serves only the workbench under its key, and only to a loopback Host. */
+/**
+ * The page's reachability probe: a tiny document that tells its parent which
+ * launcher run answered. A page whose browser is on another machine (a remote
+ * crew's dashboard) gets nothing from 127.0.0.1:<frame port> and so uses the
+ * app web origin instead.
+ */
+function handleProbe(req, res) {
+  req.resume();
+  const body = `<!doctype html><meta charset="utf-8"><script>parent.postMessage({vscodePaneProbe:${JSON.stringify(RUN_ID)}},'*')</script>`;
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-length': String(Buffer.byteLength(body)) });
+  res.end(body);
+}
+
+/**
+ * Serves only the workbench under its key. On the frame listener the Host must
+ * be loopback; on the main listener only the app web origin (<app>.apps.localhost,
+ * relayed by the gateway) reaches this, and the same key path guards it.
+ */
 function handleFrame(req, res) {
+  const webOrigin = isWebOriginHost(req.headers.host, APP_NAME);
   // A webview origin gets the webview host files and nothing else (V5 M-1).
   if (isWebviewHost(req.headers.host) && !webviewRequestAllowed(req.method, req.url, BASE_PATH)) {
     req.resume();
@@ -818,10 +1131,60 @@ function handleFrame(req, res) {
   }
   const url = new URL(req.url, `http://${HOST}`);
   if (url.pathname === MINT_PATH) return handleMint(req, res);
+  if (req.method === 'GET' && url.pathname === `${BASE_PATH}/`) viewer.via = webOrigin ? 'origin' : 'frame';
+  if (url.pathname === PROBE_PATH && !webOrigin && req.method === 'GET' && isLoopbackHost(req.headers.host)) return handleProbe(req, res);
   const route = matchRoute(req.method, url.pathname, BASE_PATH);
   if (route.name !== 'frame') return sendJson(res, 404, { error: 'not found' });
-  if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
-  return frameProxy.handleRequest(req, res);
+  if (!webOrigin && !isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'bad host' });
+  // The page loads each of its tabs with ?vscpTab=<id>; the workbench is told which tab it is.
+  const paneTab = req.method === 'GET' && url.pathname === `${BASE_PATH}/` ? validTabId(url.searchParams.get('vscpTab')) : null;
+  return frameProxy.handleRequest(req, res, webOrigin
+    ? { webOrigin, paneTab, setCookies: [viewerCookieHeader(VIEWER_SECRET)], scriptSrc: `${BASE_PATH}/_vscp-kc.js` }
+    : { webOrigin, paneTab });
+}
+
+/**
+ * A request on the app's web origin: the workbench (and its two files for the
+ * chat overlay) under the key path, the key mint route, and for every other path
+ * the Kiro Crew chat, served only to a browser that holds the viewer cookie.
+ */
+function handleWebOrigin(req, res) {
+  const url = new URL(req.url, `http://${HOST}`);
+  const p = url.pathname;
+  if (p === BASE_PATH || p.startsWith(BASE_PATH + '/') || p === MINT_PATH) {
+    if (req.method === 'GET' && p === `${BASE_PATH}/_vscp-kc.js`) {
+      const js = overlayScript(BASE_PATH);
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'content-length': String(Buffer.byteLength(js)) });
+      return res.end(js);
+    }
+    if (req.method === 'GET' && p === WEB_PROBE_PATH) {
+      // What the gateway relay's diagnosis (lib/weborigin.mjs) asks for: this run's id, nothing else.
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(RUN_ID);
+    }
+    if (req.method === 'GET' && p === `${BASE_PATH}/_vscp-kc/state`) {
+      handleKcState(req, res, url).catch((e) => {
+        log('kc state error', e.message);
+        sendJson(res, 500, { error: 'internal error' });
+      });
+      return undefined;
+    }
+    return handleFrame(req, res);
+  }
+  if (!kc || !kc.port || !viewerOk(req.headers.cookie, VIEWER_SECRET)) {
+    req.resume();
+    return sendJson(res, 404, { error: 'not found' });
+  }
+  return kc.serveShared(req, res);
+}
+
+/** The chat overlay's poll: whether the tab is signed in, and what the page tab's Kiro Crew view shows (nothing is created). */
+async function handleKcState(req, res, url) {
+  if (!viewerOk(req.headers.cookie, VIEWER_SECRET)) return sendJson(res, 403, { error: 'no viewer' });
+  const id = validTabId(url.searchParams.get('tab'));
+  const tab = id ? tabs.get(id) : null;
+  const st = kc && kc.port ? kc.status() : null;
+  return sendJson(res, 200, { connected: !!(st && st.connected), tab: tab ? tab.id : null, embed: embedPathFor(tab && tab.session) });
 }
 
 async function handle(req, res) {
@@ -865,49 +1228,164 @@ async function handle(req, res) {
       return sendJson(res, 200, { ok: true, status: state.status });
     case 'session':
       return sendJson(res, 200, sessionBody(url.searchParams.get('folder')));
+    case 'tabsOpen': {
+      // Open a tab (or bring back the one already open): from the composer's
+      // VS Code chip with the chat's session and folder, from the page's New tab,
+      // or from a `?folder=` link. A session tab is reused wherever its folder is now.
+      const parsed = parseJson(body);
+      if (!parsed || typeof parsed !== 'object') return sendJson(res, 400, { error: 'body must be {folder?, session?, reuse?}' });
+      const hasSession = parsed.session !== undefined && parsed.session !== null && parsed.session !== '';
+      const session = hasSession ? validSessionKey(parsed.session) : null;
+      if (hasSession && !session) return sendJson(res, 400, { error: 'session must be a Kiro Crew session key' });
+      const hasFolder = parsed.folder !== undefined && parsed.folder !== null && parsed.folder !== '';
+      const asked = hasFolder ? validFolder(parsed.folder) : null;
+      if (hasFolder && !asked) return sendJson(res, 400, { error: 'folder must be an absolute path' });
+      const open = session ? tabs.bySession(session) : null;
+      if (open) {
+        tabs.activate(open.id);
+        return sendJson(res, 200, { tab: tabs.get(open.id), created: false, tabs: tabsBody() });
+      }
+      let folder = asked || defaultFolder();
+      let note = null;
+      // A chat whose project folder is gone still gets its tab, on the default folder.
+      if (session && asked && !isDirectory(asked)) {
+        note = `${asked} is not a folder on this machine any more, so this chat's tab opened on ${defaultFolder()}`;
+        folder = defaultFolder();
+      }
+      if (!isDirectory(folder)) return sendJson(res, 400, { error: `${folder} is not a folder on this machine` });
+      const r = tabs.open({ folder, session, reuse: parsed.reuse === true });
+      if (r.error) return sendJson(res, r.status || 409, { error: r.error });
+      if (r.created) log('tab opened', r.tab.id, session ? `for session ${session}` : 'on its own');
+      return sendJson(res, 200, { tab: r.tab, created: r.created, tabs: tabsBody(), ...(note ? { note } : {}) });
+    }
+    case 'tabsActivate':
+    case 'tabsClose': {
+      const parsed = parseJson(body);
+      const id = validTabId(parsed && parsed.id);
+      if (!id) return sendJson(res, 400, { error: 'body must be {id}, a tab id' });
+      const done = route.name === 'tabsClose' ? tabs.close(id) : tabs.activate(id);
+      if (!done) return sendJson(res, 404, { error: 'no such tab', tabs: tabsBody() });
+      if (route.name === 'tabsClose') log('tab closed', id);
+      return sendJson(res, 200, { ok: true, tabs: tabsBody() });
+    }
     case 'state':
-      return sendJson(res, 200, { ...bridge.snapshot(), serverStatus: state.status });
+      return sendJson(res, 200, { ...bridge.snapshot(validTabId(url.searchParams.get('tab'))), serverStatus: state.status });
     case 'open': {
-      const parsed = parseOpenRequest(parseJson(body));
+      const raw = parseJson(body);
+      const parsed = parseOpenRequest(raw);
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });
-      const { id, done } = bridge.enqueue(parsed.command, 8000);
+      if (parsed.command.kind === 'openFolder') {
+        // A folder opens as a tab of its own (or the tab already on it), not in place of another tab's folder.
+        const folder = validFolder(parsed.command.path);
+        if (!folder || !isDirectory(folder)) return sendJson(res, 400, { error: 'path must be a folder on this machine' });
+        const r = tabs.open({ folder, reuse: true });
+        if (r.error) return sendJson(res, r.status || 409, { error: r.error });
+        return sendJson(res, 200, { ok: true, command: parsed.command, tab: r.tab, created: r.created });
+      }
+      // A file goes to the tab named in the body, else the tab whose folder holds it, else the front tab.
+      const named = validTabId(raw && raw.tab) ? tabs.get(raw.tab) : null;
+      const pick = tabForFile(parsed.command.path, { named });
+      if (pick.error) return sendJson(res, pick.status || 409, { error: pick.error });
+      const target = pick.tab;
+      if (target && target.id !== tabs.active) tabs.activate(target.id);
+      const { id, done } = bridge.enqueue(parsed.command, 8000, tabRoute(target));
       const result = await done;
-      return sendJson(res, 200, { id, command: parsed.command, ...result, bridgeConnected: bridge.connected });
+      return sendJson(res, 200, { id, command: parsed.command, tab: target ? target.id : null, ...result, bridgeConnected: bridge.connected });
     }
     case 'restart':
       restartServer();
       return sendJson(res, 202, { ok: true, status: 'restarting' });
+    case 'webOrigin': {
+      // Whether the gateway relays this app on the port the page's browser reaches
+      // the dashboard on, and if not, the one line that would let it.
+      const port = validPort(url.searchParams.get('port'));
+      if (!port) return sendJson(res, 400, { error: 'port must be a TCP port' });
+      const home = dataHome(env, os.homedir());
+      let envText = '';
+      try {
+        envText = fs.readFileSync(path.join(home, '.env'), 'utf8');
+      } catch {
+        envText = '';
+      }
+      const base = { envFile: path.join(home, '.env'), variable: PORTS_VAR, listed: listedPorts(envText), gatewayPort: gatewayUrl ? Number(gatewayUrl.port || 80) : null };
+      if (!gatewayUrl) return sendJson(res, 200, { ...base, state: 'gateway_unreachable', port, detail: 'no gateway address (KIROCREW_GATEWAY_ORIGIN)' });
+      const d = await diagnose({ gatewayPort: base.gatewayPort, appName: APP_NAME, port, probePath: WEB_PROBE_PATH, instance: RUN_ID });
+      return sendJson(res, 200, { ...base, ...d });
+    }
+    case 'webOriginAllow': {
+      // The page's "Allow port" button: add the port to KIROCREW_ALLOWED_LOOPBACK_PORTS
+      // in Kiro Crew's .env. The gateway reads it at start, so it needs a restart.
+      const parsed = parseJson(body);
+      const port = validPort(parsed && parsed.port);
+      if (!port) return sendJson(res, 400, { error: 'body must be {port: a TCP port}' });
+      const r = addAllowedPort({ home: dataHome(env, os.homedir()), port });
+      log('allow loopback port', port, r.ok ? (r.changed ? 'added' : 'already listed') : r.error);
+      return sendJson(res, r.ok ? 200 : 500, { ...r, variable: PORTS_VAR, restartNeeded: !!r.ok });
+    }
+    case 'serverUpdateCheck': {
+      if (!serverOwned()) return sendJson(res, 409, { error: 'this VS Code server was not installed by Kiro Crew, so it is not updated from here' });
+      if (state.installing || (state.update && state.update.phase === 'restarting')) return sendJson(res, 200, state.update);
+      return sendJson(res, 200, await checkServerUpdate());
+    }
+    case 'serverUpdateInstall': {
+      // Only the build the last check named can be installed: the user saw it and chose it.
+      const parsed = parseJson(body);
+      const commit = parsed && typeof parsed.commit === 'string' ? parsed.commit.toLowerCase() : '';
+      if (!COMMIT_RE.test(commit)) return sendJson(res, 400, { error: 'body must be {commit}, the build the update check named' });
+      if (!serverOwned()) return sendJson(res, 409, { error: 'this VS Code server was not installed by Kiro Crew, so it is not updated from here' });
+      if (state.installing || launching) return sendJson(res, 409, { error: 'an update is already running' });
+      const named = state.update && state.update.phase === 'available' && state.update.latest ? state.update.latest.commit : '';
+      if (named !== commit) return sendJson(res, 409, { error: 'check for updates first: the build asked for is not the one the last check named' });
+      installServerUpdate(commit).catch((e) => log('server update', e.message));
+      return sendJson(res, 202, { ok: true, status: 'downloading' });
+    }
+    case 'installServer':
+      if (!state.needsInstall || !config.allowDownload) return sendJson(res, 409, { error: 'no VS Code server download is needed or allowed' });
+      if (state.installing) return sendJson(res, 202, { ok: true, status: 'downloading' });
+      installLatestServer();
+      return sendJson(res, 202, { ok: true, status: 'downloading' });
     case 'fileMenu': {
-      const parsed = fileMenuToCommand(parseJson(body));
+      // "Open in VS Code" from Kiro Crew's file menus: a folder opens as a tab of
+      // its own (or the tab already on it); a file opens in the tab whose folder
+      // holds it, else a tab on the project root the menu names, else the front tab.
+      const raw = parseJson(body);
+      const parsed = fileMenuToCommand(raw);
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });
-      bridge.enqueue(parsed.command, 8000);
       const origin = env.KIROCREW_GATEWAY_ORIGIN;
       const name = path.basename(parsed.command.path);
+      let target = null;
+      if (parsed.command.kind === 'openFolder') {
+        const folder = validFolder(parsed.command.path);
+        if (!folder || !isDirectory(folder)) return sendJson(res, 400, { error: 'path must be a folder on this machine' });
+        const r = tabs.open({ folder, reuse: true });
+        if (r.error) return sendJson(res, r.status || 409, { error: r.error });
+        target = tabs.get(r.tab.id);
+      } else {
+        const pick = tabForFile(parsed.command.path, { root: raw && raw.root });
+        if (pick.error) return sendJson(res, pick.status || 409, { error: pick.error });
+        target = pick.tab;
+        if (target && target.id !== tabs.active) tabs.activate(target.id);
+        bridge.enqueue(parsed.command, 8000, tabRoute(target));
+      }
+      const page = `${String(origin || '').replace(/\/$/, '')}/apps/vscode-pane${target ? `?tab=${target.id}` : ''}`;
       return sendJson(res, 200, {
-        message: bridge.connected
-          ? `Opening ${name} in VS Code`
-          : `Queued ${name} for VS Code; open the VS Code app page to see it`,
-        ...(origin ? { url: `${origin.replace(/\/$/, '')}/apps/vscode-pane` } : {}),
+        message: parsed.command.kind === 'openFolder'
+          ? `Opening ${name} in a VS Code tab`
+          : bridge.connected
+            ? `Opening ${name} in VS Code`
+            : `Queued ${name} for VS Code; open the VS Code app page to see it`,
+        ...(origin ? { url: page } : {}),
       });
     }
     case 'bridgeCommands': {
-      const wait = Math.min(Math.max(Number(url.searchParams.get('wait')) || 25, 0), 25) * 1000;
+      // Each window (extension host) takes its own commands (lib/bridge.mjs routes).
+      const rawWait = url.searchParams.get('wait');
+      const askedWait = rawWait === null || rawWait === '' ? 25 : Number(rawWait);
+      const wait = (Number.isFinite(askedWait) ? Math.min(Math.max(askedWait, 0), 25) : 25) * 1000;
       const ac = new AbortController();
       res.on('close', () => ac.abort());
-      const host = url.searchParams.get('host');
-      if (bridge.isSuperseded(host)) {
-        // An older extension host (the pane was remounted): it gets no
-        // commands; it is held for the poll interval so it does not spin.
-        await new Promise((ok) => {
-          const t = setTimeout(ok, wait);
-          ac.signal.addEventListener('abort', () => {
-            clearTimeout(t);
-            ok();
-          });
-        });
-        return sendJson(res, 200, { commands: [], superseded: true });
-      }
-      const batch = await bridge.take(wait, ac.signal);
+      const host = String(url.searchParams.get('host') || bridgeHost || '').slice(0, 64) || null;
+      const batch = await bridge.take(wait, ac.signal, host);
       if (res.destroyed || res.writableEnded) {
         bridge.requeue(batch);
         return;
@@ -916,15 +1394,17 @@ async function handle(req, res) {
     }
     case 'bridgeEvents': {
       const ev = parseJson(body);
-      const hostBefore = bridge.currentHost;
-      const extensionBefore = bridge.extension;
-      if (!bridge.applyEvent(ev)) return sendJson(res, 400, { error: 'unknown event' });
-      // A new extension host (first start, a reload, a remount of the pane, a
-      // server restart) gets the current theme once; it writes it only if it
-      // differs. A repeated hello from the same host does not resend it.
-      const newHost = ev.type === 'hello' && (!extensionBefore || !ev.host || ev.host !== hostBefore);
-      if (newHost && vsTheme) bridge.enqueueLatest(themeCommand());
+      const sender = ev && typeof ev.host === 'string' && ev.host ? ev.host.slice(0, 64) : bridgeHost;
+      // A new extension host (first start, a reload, a new tab, a server
+      // restart) gets the current theme once; it writes it only if it differs.
+      const known = sender ? bridge.hosts.get(sender) : null;
+      const firstHello = !!(ev && ev.type === 'hello' && (!sender || !known || !known.helloAt));
+      // A window can only claim a tab the page has open.
+      if (ev && (ev.type === 'tab' || ev.type === 'hello') && ev.tab !== undefined && !(validTabId(ev.tab) && tabs.get(ev.tab))) ev.tab = null;
+      if (!bridge.applyEvent(ev, bridgeHost)) return sendJson(res, 400, { error: 'unknown event' });
+      if (firstHello && vsTheme) bridge.enqueueLatest(themeCommand(), 8000, sender ? { host: sender } : null);
       if (ev.type === 'chatPrefs') applyChatPrefs({ hideCopilotAgents: ev.hideCopilotAgents }, 'vscode');
+      if (sender && (ev.type === 'tab' || ev.type === 'hello')) followWindowFolder(sender);
       res.writeHead(204);
       return res.end();
     }
@@ -942,7 +1422,8 @@ async function handle(req, res) {
         vsTheme = next;
         fs.writeFileSync(THEME_FILE, JSON.stringify(theme, null, 2) + '\n');
         writeMachineSettings();
-        bridge.enqueueLatest(themeCommand());
+        // Every window: each browser origin keeps its own copy of the user settings.
+        bridge.broadcast(themeCommand());
         log('theme updated', theme.kind, 'tier', theme.tier, theme.reason || '');
       } else if (theme && theme.reason !== v.theme.reason) {
         theme = { ...theme, reason: v.theme.reason };
@@ -955,7 +1436,9 @@ async function handle(req, res) {
       const parsed = parseJson(body);
       const prompt = parsed && typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
       if (!prompt || prompt.length > 4000) return sendJson(res, 400, { error: 'prompt is required (at most 4000 characters)' });
-      const { id, done } = bridge.enqueue({ kind: 'askChat', prompt, ...(parsed.newChat === true ? { newChat: true } : {}) }, 8000);
+      // The front tab's window (or the tab named in the body).
+      const target = (validTabId(parsed.tab) && tabs.get(parsed.tab)) || tabs.get(tabs.active);
+      const { id, done } = bridge.enqueue({ kind: 'askChat', prompt, ...(parsed.newChat === true ? { newChat: true } : {}) }, 8000, tabRoute(target));
       const result = await done;
       return sendJson(res, 200, { id, ...result, bridgeConnected: bridge.connected });
     }
@@ -1000,13 +1483,11 @@ async function handle(req, res) {
       return sendJson(res, 200, { ok: true, kc: kcBody() });
     }
     case 'bridgeKc': {
-      const roots = windowRoots(bridgeHost);
-      const asked = url.searchParams.get('folder');
-      const reqd = crewSlotRequest({ folder: asked || roots[0], opened: url.searchParams.get('opened') === '1', roots, isAbsolute: path.isAbsolute, exists: fs.existsSync, inRoots: folderInRoots });
-      if (reqd.error) return sendJson(res, 403, { error: reqd.error });
-      let created = null;
-      if (reqd.ensure) created = await ensureCrewSlot(reqd.folder);
-      return sendJson(res, 200, { ...kcBridgeBody(reqd.folder), ensured: created });
+      // What this window's Kiro Crew view shows: its page tab's session, or the
+      // session list. The tab is the one the page told the view it is in.
+      const id = validTabId(url.searchParams.get('tab'));
+      const tab = id ? tabs.get(id) : null;
+      return sendJson(res, 200, kcBridgeBody(tab));
     }
     case 'bridgeKcSignIn': {
       if (!kc || !kc.port) return sendJson(res, 503, { error: 'the Kiro Crew tunnel is not running' });
@@ -1030,10 +1511,13 @@ async function handle(req, res) {
       await kc.disconnect();
       return sendJson(res, 200, { ok: true, kc: kcBody() });
     case 'crewView': {
-      // Reveal VS Code's "Kiro Crew" view, or move it to another part.
-      const parsed = parseCrewViewRequest(parseJson(body));
+      // Reveal VS Code's "Kiro Crew" view, or move it to another part, in the
+      // front tab's window (or the tab named in the body).
+      const raw = parseJson(body);
+      const parsed = parseCrewViewRequest(raw);
       if (parsed.error) return sendJson(res, 400, { error: parsed.error });
-      const { id, done } = bridge.enqueue(parsed.command, 8000);
+      const target = (raw && validTabId(raw.tab) && tabs.get(raw.tab)) || tabs.get(tabs.active);
+      const { id, done } = bridge.enqueue(parsed.command, 8000, tabRoute(target));
       return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
     }
     case 'secretProbe': {
@@ -1061,11 +1545,14 @@ async function handle(req, res) {
       return sendJson(res, 200, { id, ...result, prefs: chatPrefs });
     }
     case 'chatOpenSession': {
-      // Opens a Kiro Crew chat session in VS Code's Chat (by its slot).
+      // Opens a Kiro Crew chat session in VS Code's Chat (by its slot), in the
+      // window of the tab on the session's folder (the front tab first).
       const parsed = parseJson(body);
       const s = sessionFor(parsed && parsed.slot, bridgeHost);
       if (!s) return sendJson(res, 404, { error: 'unknown session' });
-      const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 12000);
+      const front = tabs.get(tabs.active);
+      const target = front && folderInRoots(s.folder, [front.folder]) ? front : tabHolding(s.folder) || front;
+      const { id, done } = bridge.enqueue({ kind: 'openChatSession', slot: s.slot }, 12000, tabRoute(target));
       return sendJson(res, 200, { id, ...(await done), bridgeConnected: bridge.connected });
     }
     case 'bridgeSessions': {
@@ -1168,13 +1655,39 @@ async function handle(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  // The gateway's web origin relay lands here with Host <app>.apps.localhost.
+  // Such a request reaches the workbench only: never the signed or bridge API.
+  if (isWebOriginHost(req.headers.host, APP_NAME)) {
+    try {
+      handleWebOrigin(req, res);
+    } catch (e) {
+      log('web origin handler error', e.stack || e.message);
+      sendJson(res, 500, { error: 'internal error' });
+    }
+    return;
+  }
   handle(req, res).catch((e) => {
     log('handler error', e.stack || e.message);
     sendJson(res, 500, { error: 'internal error' });
   });
 });
-// The API port never upgrades; the workbench socket lives on the frame port.
-server.on('upgrade', (_req, socket) => socket.destroy());
+// The API port upgrades only for the app web origin's workbench socket; the
+// same socket on the frame port is handled below.
+server.on('upgrade', (req, socket, head) => {
+  const p = (req.url || '').split('?')[0];
+  if (!isWebOriginHost(req.headers.host, APP_NAME)) return socket.destroy();
+  if (p !== BASE_PATH && !p.startsWith(BASE_PATH + '/')) {
+    // The Kiro Crew chat's WebSocket, on the web origin.
+    if (!kc || !kc.port || !viewerOk(req.headers.cookie, VIEWER_SECRET)) return socket.destroy();
+    return kc.upgradeShared(req, socket, head);
+  }
+  if (!upgradeAllowed({ host: req.headers.host, origin: req.headers.origin, listenPort: listenPort, appName: APP_NAME })) {
+    log('refused WebSocket upgrade (web origin)', `host=${String(req.headers.host).slice(0, 80)}`, `origin=${String(req.headers.origin).slice(0, 80)}`);
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  return frameProxy.handleUpgrade(req, socket, head);
+});
 
 const frameServer = http.createServer((req, res) => {
   try {

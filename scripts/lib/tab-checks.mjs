@@ -24,9 +24,9 @@ async function waitFor(fn, ms = 10_000, step = 250) {
   return v;
 }
 
-const EMBED_RE = /^http:\/\/[0-9a-f]{32}\.localhost:\d+\/embed\/chat\//;
+const EMBED_RE = /^http:\/\/[0-9a-f]{32}\.localhost:\d+\/embed\/(chat|sessions)/;
 
-/** The tunnelled /embed/chat frame inside the webview, or null. */
+/** The tunnelled /embed/ frame inside the webview, or null. */
 function embedFrame(page) {
   return page.frames().find((f) => EMBED_RE.test(f.url())) || null;
 }
@@ -159,7 +159,6 @@ export function embedFlush(e) {
 let exchangesAfterChecks = null;
 
 export async function tabChecks({ page, frame, api, hostServer, gatewayMock, workspace, shotDir, check, framePort, dataDir, rawRequest, cdnRequests }) {
-  const mainKey = slotNameFor(workspace);
   const dash = gatewayMock.rec.dash;
   await clearNotifications(page, frame);
 
@@ -174,21 +173,27 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     !!auto && auto.via === 'auto' && hostServer.mints[0] && hostServer.mints[0].status === 200 && hostServer.mints[0].cookie === true && dash.exchanges >= 1,
     JSON.stringify({ kc: auto && { connected: auto.connected, via: auto.via }, standinMints: hostServer.mints, exchanges: dash.exchanges }));
 
-  // 2. The status bar "Crew" item opens the tab, which frames the tunnelled
-  //    /embed/chat for the folder's slot, signed in, with its WebSocket open.
+  // 2. The status bar "Crew" item opens the tab. VS Code was opened on its own
+  //    (not from a chat), so it frames the tunnelled session list with its New
+  //    button, signed in with its WebSocket open, and no session is created.
+  const slotsBefore = gatewayMock.rec.slots.size;
   await frame.locator('.part.auxiliarybar .composite-bar [aria-label^="Chat"]').first().click().catch(() => {});
   await sleep(500);
   await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click();
-  const s1 = await waitFor(() => signedIn(page), 30_000);
-  check("the status bar item opens the Kiro Crew tab, framing Kiro Crew's /embed/chat for the folder's slot through the tunnel, signed in with the WebSocket open",
-    !!s1 && s1.url.endsWith(`/embed/chat/${mainKey}`) && s1.slot === mainKey, JSON.stringify(s1 || (await embedState(page))));
+  const s1 = await waitFor(async () => {
+    const s = await signedIn(page);
+    return s && s.url.endsWith('/embed/sessions') ? s : null;
+  }, 30_000);
+  check("the status bar item opens the Kiro Crew tab, framing Kiro Crew's session list (/embed/sessions) through the tunnel, signed in with the WebSocket open",
+    !!s1 && s1.url.endsWith('/embed/sessions'), JSON.stringify(s1 || (await embedState(page))));
   const tabs = await auxTabs(frame);
   const docked = await page.locator('[data-testid="vscode-pane-crew"], [data-testid="vscode-pane-crew-sash"]').count();
   check('VS Code\'s secondary side bar shows the "Kiro Crew" tab next to Chat, and the page draws no column or overlay of its own',
     tabs.some((t) => /^Kiro Crew/.test(t.label) && t.active) && tabs.some((t) => /^Chat/.test(t.label)) && docked === 0, `${JSON.stringify(tabs)}; page elements ${docked}`);
-  const made = gatewayMock.rec.slots.get(mainKey);
-  check('opening the tab created the folder\'s session pointed at the folder, whose name has a space', /\s/.test(path.basename(workspace)) && !!made && String(made.project).toLowerCase() === workspace.toLowerCase(),
-    JSON.stringify({ folder: path.basename(workspace), slot: mainKey, project: made && made.project }));
+  await sleep(1000);
+  check('opening the tab created no Kiro Crew session (not for the folder, whose name has a space, nor any other)',
+    /\s/.test(path.basename(workspace)) && gatewayMock.rec.slots.size === slotsBefore && !gatewayMock.rec.slots.has(slotNameFor(workspace)),
+    JSON.stringify({ folder: path.basename(workspace), slots: [slotsBefore, gatewayMock.rec.slots.size] }));
 
   // 3. The chain is all loopback: the webview comes from the self-hosted
   //    endpoint, nothing from vscode-cdn.net.
@@ -287,7 +292,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     const s = (await api('GET', '/api/session')).json;
     return v && v.mode === 'signin' && s.kc && !s.kc.connected ? { mode: v.mode } : null;
   }, 15_000);
-  const pageState = await waitFor(async () => ((await page.locator('[data-testid="vscode-pane-kc-state"]').getAttribute('data-connected')) === 'false' ? 'false' : null), 8000) || 'true';
+  const pageState = await waitFor(async () => ((await page.locator('[data-testid="vscode-pane-menu-button"]').getAttribute('data-kc-connected')) === 'false' ? 'false' : null), 8000) || 'true';
   check('Disconnect signs the tab out at the gateway, rotates the origin and shows Connect and the paste field',
     !!out && dash.logouts === logouts0 + 1 && !embedFrame(page) && pageState === 'false', JSON.stringify({ out, logouts: dash.logouts - logouts0, page: pageState }));
   check('after Disconnect the old tunnel origin is refused', (await rawRequest({ port: kcPort, path: '/', headers: { host: new URL(origin).host } })).status === 421);

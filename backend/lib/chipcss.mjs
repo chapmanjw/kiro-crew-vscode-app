@@ -10,14 +10,14 @@
 // dashboard is untouched. The chip is matched by `data-session-control-chip`
 // plus its icon's lucide class, never by text.
 
-/** app.json contributes.sessionControls[0].icon; AppIcon renders it as <svg class="lucide lucide-tag"> */
-export const CHIP_ICON = 'Tag';
+/** app.json contributes.sessionControls[0].icon; AppIcon renders it as <svg class="lucide lucide-package"> */
+export const CHIP_ICON = 'Package';
 /**
  * app.json contributes.sessionControls[0].label. The chip's aria-label is the
  * label alone while the control has no status (ContextShelf.tsx:117-148; this
  * app declares no statusPath). The host renders no app-identity attribute on
  * the chip, so label plus icon is the narrowest stable match: another app's
- * Package-icon chip (Package is AppIcon's fallback, and no longer ours) keeps showing (V5 S-6).
+ * Package-icon chip with another label keeps showing (V5 S-6).
  */
 export const CHIP_LABEL = 'VS Code';
 

@@ -41,36 +41,62 @@ const SECRET_PROBE_KEY = 'kiroCrew.secretProbe';
 //
 // A webview view in VS Code's secondary side bar, next to Chat and Claude
 // Code (package.json viewsContainers.secondarySidebar `kiroCrew`). It frames
-// Kiro Crew's own live dashboard chat, /embed/chat/<the folder's slot>, on the
-// launcher's tunnel origin (backend/lib/kcproxy.mjs), or shows Connect and a
-// paste field while the tunnel is not signed in (crewview.js).
+// Kiro Crew's own live dashboard on the launcher's tunnel origin
+// (backend/lib/kcproxy.mjs): the chat session this window's page tab was
+// opened from, or the session list for a tab opened any other way. It shows
+// Connect and a paste field while the tunnel is not signed in (crewview.js).
 const crewViewHtmlFor = require('./crewview').crewViewHtml;
 const CREW_CONTAINER_ID = 'workbench.view.extension.kiroCrew';
 const CREW_VIEW_ID = 'kiroCrew.chatView';
 let crewView = null;
 let kcInfo = null;
 let kcRendered = '';
+// Which of the vscode-pane page's tabs this window is (backend/lib/tabs.mjs):
+// undefined until known, null when the page has no tab for it (VS Code opened
+// some other way), else the tab id. The page loads each tab with ?vscpTab=<id>
+// and the launcher hands it over as the default of kiroCrew.paneTab
+// (backend/lib/frameproxy.mjs injectConfigurationDefaults); a window that lost
+// it (it opened another folder itself) asks the page from its Kiro Crew view.
+const TAB_ID_RE = /^t[0-9a-f]{12}$/;
+let paneTab;
+const STARTED_AT = Date.now();
+
+/** The tab this window was loaded for, from the default the launcher gave kiroCrew.paneTab (a user value never counts). */
+function configuredPaneTab() {
+  try {
+    const v = vscode.workspace.getConfiguration().inspect('kiroCrew.paneTab');
+    const d = v && v.defaultValue;
+    return typeof d === 'string' && TAB_ID_RE.test(d) ? d : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function reportCrewView() {
   return postEvent({ type: 'crewView', resolved: !!crewView, visible: !!(crewView && crewView.visible) });
 }
 
-function firstFolder() {
-  const f = (vscode.workspace.workspaceFolders || [])[0];
-  return f && f.uri.scheme === 'file' ? f.uri.fsPath : '';
+/** The view's page answered (or timed out): remember the tab, tell the launcher, and show what the tab shows. */
+function setPaneTab(tab) {
+  const t = typeof tab === 'string' && TAB_ID_RE.test(tab) ? tab : null;
+  // A later page that timed out must not undo an answer.
+  if (t === null && typeof paneTab === 'string') return;
+  if (t === paneTab) return;
+  paneTab = t;
+  log(`page tab ${t || '(none)'}`);
+  postEvent({ type: 'tab', tab: t });
+  refreshKc();
 }
 
 /**
- * Ask the launcher for the tunnel state and the folder's embed URL, and
- * redraw the view when what it shows changed. `opened` is true when the tab
- * has just been shown or its folder changed: only then does the launcher
- * create or reopen the folder's Kiro Crew session.
+ * Ask the launcher for the tunnel state and what this window's tab shows, and
+ * redraw the view when that changed. Nothing is created in Kiro Crew.
  */
-async function refreshKc(opened) {
+async function refreshKc() {
   if (!BRIDGE_URL) return;
-  const folder = firstFolder();
+  const q = typeof paneTab === 'string' ? `?tab=${encodeURIComponent(paneTab)}` : '';
   try {
-    kcInfo = await request('GET', `/api/bridge/kc?opened=${opened ? 1 : 0}${folder ? `&folder=${encodeURIComponent(folder)}` : ''}`, undefined, 20000);
+    kcInfo = await request('GET', `/api/bridge/kc${q}`, undefined, 20000);
   } catch (e) {
     kcInfo = { available: false, reason: `Kiro Crew tunnel: ${e.message}` };
   }
@@ -79,14 +105,16 @@ async function refreshKc(opened) {
 
 function renderCrewView() {
   if (!crewView) return;
+  // Until the page has said which tab this is (and the launcher has answered), the view only asks it.
+  const info = paneTab === undefined || !kcInfo ? { ...(kcInfo || {}), pending: true } : kcInfo;
   // lastError only matters to the sign-in panel; while the frame shows, a new
   // error must not reload it and drop what the user typed (V5 N-5).
-  const connectedNow = !!(kcInfo && kcInfo.connected);
-  const key = JSON.stringify([kcInfo && kcInfo.available, connectedNow, kcInfo && kcInfo.origin, kcInfo && kcInfo.slot, connectedNow ? null : kcInfo && kcInfo.lastError, kcInfo && kcInfo.reason]);
+  const connectedNow = !!(info && info.connected);
+  const key = JSON.stringify([info && info.pending, info && info.available, connectedNow, info && info.origin, info && info.embedPath, info && info.overlay, connectedNow ? null : info && info.lastError, info && info.reason]);
   if (key === kcRendered) return;
   kcRendered = key;
   const nonce = require('crypto').randomBytes(16).toString('base64');
-  crewView.webview.html = crewViewHtmlFor(kcInfo, nonce);
+  crewView.webview.html = crewViewHtmlFor(info, nonce);
 }
 
 const crewViewProvider = {
@@ -96,17 +124,18 @@ const crewViewProvider = {
     view.webview.options = { enableScripts: true, localResourceRoots: [] };
     view.webview.onDidReceiveMessage((m) => {
       if (!m || typeof m !== 'object') return;
-      if (m.type === 'connect') connectKc();
+      if (m.type === 'paneTab') setPaneTab(m.tab);
+      else if (m.type === 'connect') connectKc();
       else if (m.type === 'paste' && typeof m.url === 'string') pasteKc(m.url);
     });
     view.onDidChangeVisibility(() => {
       reportCrewView();
-      if (view.visible) refreshKc(true);
+      if (view.visible) refreshKc();
     });
-    // Every window looks again now and then while its tab shows, because the
-    // launcher's kcChanged reaches only the newest window (V5 N-2).
+    // Every window looks again now and then while its tab shows, in case a
+    // kcChanged command did not reach it (V5 N-2).
     const poll = setInterval(() => {
-      if (view.visible) refreshKc(false);
+      if (view.visible) refreshKc();
     }, 30_000);
     view.onDidDispose(() => {
       clearInterval(poll);
@@ -115,7 +144,7 @@ const crewViewProvider = {
     });
     reportCrewView();
     renderCrewView();
-    refreshKc(view.visible);
+    refreshKc();
   },
 };
 
@@ -129,7 +158,7 @@ async function connectKc() {
   // The page polls every 2 s; look again for a while.
   for (let i = 0; i < 10 && !(kcInfo && kcInfo.connected); i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    await refreshKc(false);
+    await refreshKc();
   }
   if (!(kcInfo && kcInfo.connected)) {
     kcRendered = '';
@@ -144,7 +173,7 @@ async function pasteKc(url) {
   } catch (e) {
     vscode.window.showWarningMessage(`Kiro Crew sign-in failed: ${e.message}`);
   }
-  await refreshKc(false);
+  await refreshKc();
 }
 
 async function disconnectKc() {
@@ -154,7 +183,7 @@ async function disconnectKc() {
   } catch (e) {
     vscode.window.showWarningMessage(`Kiro Crew disconnect failed: ${e.message}`);
   }
-  await refreshKc(false);
+  await refreshKc();
 }
 
 /** Open the Kiro Crew view: its container in the secondary side bar, then the view wherever it was moved. */
@@ -169,6 +198,7 @@ const chatState = { participant: false, defaultParticipant: false, model: false,
 // The "Kiro Crew" chat session type, when the proposal is available (sessions.js).
 let sessionsApi = null;
 const HIDE_SETTING = 'kiroCrew.chat.hideCopilotAgents';
+const OPEN_BY_DEFAULT_SETTING = 'kiroCrew.openByDefault';
 
 function hideCopilotAgents() {
   return vscode.workspace.getConfiguration().get(HIDE_SETTING, true) !== false;
@@ -308,7 +338,7 @@ async function runCommand(cmd) {
       return revealCrewView();
     case 'kcChanged':
       // The tunnel signed in or out, or rotated its origin.
-      return refreshKc(false);
+      return refreshKc();
     case 'moveCrewView':
       // Internal workbench command (viewPaneContainer.ts MoveViews); opens the destination.
       await vscode.commands.executeCommand('vscode.moveViews', { viewIds: [CREW_VIEW_ID], destinationId: String(cmd.container || '') });
@@ -332,14 +362,8 @@ async function pollLoop() {
   let backoff = 1000;
   while (!stopped) {
     try {
+      // Every window takes its own commands (the launcher routes them by this host id).
       const res = await request('GET', `/api/bridge/commands?wait=25&host=${HOST_ID}`, undefined, 35000);
-      if (res && res.superseded) {
-        // A newer window (the pane was remounted or reloaded) owns the bridge;
-        // this host stays quiet until the server retires it.
-        if (connected) log('superseded by a newer VS Code window');
-        setConnected(false, 'superseded by a newer window');
-        continue;
-      }
       if (!connected) {
         setConnected(true);
         log('connected');
@@ -372,6 +396,10 @@ function sendHello() {
     type: 'hello',
     version: VERSION,
     host: HOST_ID,
+    // When this extension host started, so the launcher can tell a reloaded window's new host from its old one.
+    startedAt: STARTED_AT,
+    // The vscode-pane page's tab this window is (null before it is known), so a restarted launcher learns it again.
+    tab: typeof paneTab === 'string' ? paneTab : null,
     workspaceFolders: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath),
     // Whether this extension host (and so the server process) still carries the
     // gateway's process-tracking variable. A boolean only, never the value.
@@ -743,8 +771,11 @@ function sendEditor(editor) {
 }
 
 function activate(context) {
+  // Which page tab this window is, when the page loaded it for one.
+  paneTab = configuredPaneTab();
   output = vscode.window.createOutputChannel('Kiro Crew Bridge');
   context.subscriptions.push(output);
+  if (paneTab) log(`page tab ${paneTab} (from the window's configuration)`);
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
   statusItem.command = 'kiroCrewBridge.showStatus';
   setConnected(false);
@@ -789,6 +820,13 @@ function activate(context) {
     return;
   }
   crewItem.show();
+  // Make the Kiro Crew tab the one showing in the secondary side bar, ahead of
+  // Chat. Delayed so the workbench has laid out its side bars first.
+  // KIROCREW_VSCODE_OPEN_BY_DEFAULT=0 in the server's environment turns it off too (the smoke test, which drives the Chat tab).
+  if (process.env.KIROCREW_VSCODE_OPEN_BY_DEFAULT !== '0' && vscode.workspace.getConfiguration().get(OPEN_BY_DEFAULT_SETTING, true) !== false) {
+    const openTimer = setTimeout(() => revealCrewView().catch((e) => log(`could not open the Kiro Crew tab: ${e && e.message}`)), 1500);
+    context.subscriptions.push({ dispose: () => clearTimeout(openTimer) });
+  }
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration(HIDE_SETTING) || COPILOT_AGENT_SETTINGS.some((k) => e.affectsConfiguration(k))) postEvent(chatPrefsEvent());
@@ -807,7 +845,7 @@ function activate(context) {
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       sendHello();
-      if (crewView && crewView.visible) refreshKc(true);
+      if (crewView && crewView.visible) refreshKc();
     }),
     { dispose: () => { stopped = true; clearTimeout(selTimer); } },
   );

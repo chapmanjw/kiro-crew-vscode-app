@@ -1,18 +1,23 @@
 // Small pure rules for the Kiro Crew tab (backend/launcher.mjs).
+import { validSessionKey } from './tabs.mjs';
 
 /**
- * Whether GET /api/bridge/kc may name and create the folder's crew slot.
- * The slot is created only when the tab opens (`opened`), only for an absolute
- * folder that exists and that the calling VS Code window has open. A folder
- * that fails those checks is refused; a poll without `opened` only names it.
- * @returns {{folder: string, ensure: boolean} | {error: string}}
+ * What VS Code's "Kiro Crew" view shows for a page tab, as a path on the
+ * dashboard (lib/kcproxy.mjs serves the dashboard on the tunnel origin): the
+ * chat session the tab was opened from, the way the dashboard's own embed tabs
+ * open one (`/embed/chat/<key>?sid=<key>`), or the dashboard's session list with
+ * its New button (`/embed/sessions`) for a tab opened any other way. Nothing is
+ * created: a new session is made only from that list, by the user.
  */
-export function crewSlotRequest({ folder, opened, roots, isAbsolute, exists, inRoots }) {
-  const f = typeof folder === 'string' ? folder : '';
-  if (!f || !isAbsolute(f) || !exists(f)) return { error: 'folder must be an absolute path that exists' };
-  if (!inRoots(f, roots)) return { error: 'folder is not open in this VS Code window' };
-  return { folder: f, ensure: !!opened };
+export function embedPathFor(session) {
+  const key = validSessionKey(session);
+  if (!key) return '/embed/sessions';
+  const k = encodeURIComponent(key);
+  return `/embed/chat/${k}?sid=${k}`;
 }
+
+/** The embed paths embedPathFor makes, and nothing else (the extension and the overlay check the same shape). */
+export const EMBED_PATH_RE = /^\/embed\/(?:sessions|chat\/[A-Za-z0-9._%-]{1,600}\?sid=[A-Za-z0-9._%-]{1,600})$/;
 
 /**
  * The dashboard origins allowed to frame the chain: the gateway's own origin
@@ -36,4 +41,16 @@ export function dashboardOrigins(env) {
   add(env.KIROCREW_GATEWAY_ORIGIN);
   for (const v of String(env.VSCODE_PANE_DASHBOARD_ORIGIN || '').split(',')) add(v);
   return [...out];
+}
+
+/**
+ * What the "Kiro Crew" tab is told when the workbench was last loaded through
+ * the app web origin (a remote crew's viewer). Its own frame cannot reach the
+ * tunnel on the launcher's loopback, so the tab draws no frame: the chat is laid
+ * over it by the script the launcher adds to the workbench (lib/overlay.mjs).
+ * The tunnel's address is withheld; the tab only needs to know to stay empty.
+ */
+export function overlayTabBody(body) {
+  const { origin, embedUrl, ...rest } = body || {};
+  return { ...rest, overlay: true };
 }

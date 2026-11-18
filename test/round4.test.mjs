@@ -18,7 +18,7 @@ import {
 } from '../backend/lib/secretkey.mjs';
 import { createFrameProxy, injectWebviewEndpoint, isLoopbackHost } from '../backend/lib/frameproxy.mjs';
 import { parseCrewViewRequest, parseSecretProbe, CREW_VIEW_HOMES } from '../backend/lib/crewview.mjs';
-import { crewSlotRequest, dashboardOrigins } from '../backend/lib/kctab.mjs';
+import { dashboardOrigins } from '../backend/lib/kctab.mjs';
 import { chipHideCss, CHIP_ICON } from '../backend/lib/chipcss.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -230,13 +230,17 @@ test('POST /api/crew/view and /api/secret-probe bodies', () => {
   for (const bad of [{ op: 'set' }, { op: 'set', value: '' }, { op: 'set', value: 'x'.repeat(201) }, { op: 'set', value: 'a\nb' }, { op: 'del' }]) assert.ok(parseSecretProbe(bad).error, JSON.stringify(bad));
 });
 
-test('the view frames /embed/chat/<slot> on the tunnel origin only, with a CSP that allows only that frame', () => {
+test('the view frames the tab\'s embed path on the tunnel origin only, with a CSP that allows only that frame', () => {
   const origin = `http://${'a'.repeat(32)}.localhost:41234`;
-  const kc = { available: true, connected: true, origin, slot: 'vscode-my-folder-0123456789' };
+  const kc = { available: true, connected: true, origin, embedPath: '/embed/chat/chat-1795016838-ab12?sid=chat-1795016838-ab12' };
   const html = crewview.crewViewHtml(kc, 'n0nce');
   assert.equal(crewview.viewMode(kc), 'frame');
-  assert.match(html, new RegExp(`<iframe id="kc" title="Kiro Crew" src="${origin}/embed/chat/vscode-my-folder-0123456789"`));
+  assert.match(html, new RegExp(`<iframe id="kc" title="Kiro Crew" src="${origin}/embed/chat/chat-1795016838-ab12\\?sid=chat-1795016838-ab12"`));
   assert.match(html, new RegExp(`default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-n0nce'; frame-src ${origin}"`));
+  // A tab opened on its own, or an embed path of any other shape: the session list.
+  for (const p of [undefined, '/embed/sessions', '/embed/chat/x', '/embed/chat/a?sid=b&x=1', 'https://evil.example/embed/sessions', '/embed/chat/a b?sid=a b', '/api/token/local']) {
+    assert.match(crewview.crewViewHtml({ ...kc, embedPath: p }, 'n'), new RegExp(`src="${origin}/embed/sessions"`), String(p));
+  }
   // Not signed in: Connect and paste, no frame.
   const signin = crewview.crewViewHtml({ ...kc, connected: false, lastError: '<b>x</b>' }, 'n');
   assert.equal(crewview.viewMode({ ...kc, connected: false }), 'signin');
@@ -249,22 +253,34 @@ test('the view frames /embed/chat/<slot> on the tunnel origin only, with a CSP t
     assert.equal(crewview.viewMode({ ...kc, origin: bad }), 'unavailable', bad);
     assert.doesNotMatch(crewview.crewViewHtml({ ...kc, origin: bad }, 'n'), /<iframe/);
   }
-  assert.equal(crewview.viewMode({ ...kc, slot: '' }), 'nofolder');
+  // Until the page has said which tab this is, the view only asks it (no frame yet).
+  assert.equal(crewview.viewMode({ ...kc, pending: true }), 'pending');
+  assert.doesNotMatch(crewview.crewViewHtml({ ...kc, pending: true }, 'n'), /<iframe/);
 });
 
-test('S-3: the folder slot is created only when the tab opens, for an absolute existing folder the window has open', () => {
-  const roots = ['C:\\w\\proj'];
-  const base = { roots, isAbsolute: path.win32.isAbsolute, exists: (f) => f.startsWith('C:\\w\\'), inRoots: (f, r) => r.some((x) => f.toLowerCase().startsWith(x.toLowerCase())) };
-  assert.deepEqual(crewSlotRequest({ ...base, folder: 'C:\\w\\proj', opened: true }), { folder: 'C:\\w\\proj', ensure: true });
-  assert.deepEqual(crewSlotRequest({ ...base, folder: 'C:\\w\\proj', opened: false }), { folder: 'C:\\w\\proj', ensure: false }, 'a poll only names it');
-  assert.ok(crewSlotRequest({ ...base, folder: 'relative\\proj', opened: true }).error);
-  assert.ok(crewSlotRequest({ ...base, folder: 'C:\\gone\\proj', opened: true }).error, 'must exist');
-  assert.ok(crewSlotRequest({ ...base, folder: 'C:\\w\\other', opened: true }).error, 'must be open in the window');
-  assert.ok(crewSlotRequest({ ...base, folder: undefined, opened: true }).error);
-  // GET /api/session no longer creates the slot (it only names it).
+test('every version of the view asks the page which tab it is in, once, and reports it to the extension', () => {
+  const origin = `http://${'a'.repeat(32)}.localhost:41234`;
+  for (const kc of [{ pending: true }, { available: true, connected: true, origin }, { available: true, connected: false, origin }, { available: false }, { overlay: true, available: true, connected: true }]) {
+    const html = crewview.crewViewHtml(kc, 'n0nce');
+    assert.equal((html.match(/acquireVsCodeApi\(\)/g) || []).length, 1, JSON.stringify(kc));
+    assert.match(html, /window\.top\.postMessage\(\{ vscodePane: 'tab\?', nonce: asked \}, '\*'\)/);
+    assert.match(html, /vscode\.postMessage\(\{ type: 'paneTab'/);
+    assert.match(html, /d\.vscodePane === 'tab' && d\.nonce === asked/, 'only the answer to its own question counts');
+  }
+});
+
+test('the Kiro Crew view never creates a session: no slot creation in the launcher, the session list for tabs opened on their own', async () => {
+  const { embedPathFor, EMBED_PATH_RE } = await import('../backend/lib/kctab.mjs');
+  assert.equal(embedPathFor(null), '/embed/sessions');
+  assert.equal(embedPathFor('bad key/../x'), '/embed/sessions');
+  assert.equal(embedPathFor('dashboard:chat-1'), '/embed/chat/chat-1?sid=chat-1');
+  for (const k of ['chat-1795016838-ab12', 'vscode-kiro-crew-vscode-app-23c67dd6d4', 'member-clio.memory-member-clio-1a2b']) assert.match(embedPathFor(k), EMBED_PATH_RE);
+  assert.match('/embed/sessions', crewview.EMBED_PATH_RE);
+  assert.equal(String(crewview.EMBED_PATH_RE), String(EMBED_PATH_RE), 'the extension checks the same shape the launcher makes');
   const launcher = fs.readFileSync(path.join(ROOT, 'backend', 'launcher.mjs'), 'utf8');
+  assert.doesNotMatch(launcher, /ensureCrewSlot|gateway\.ensureSlot\(/);
   const sessionFn = launcher.slice(launcher.indexOf('function sessionBody('), launcher.indexOf('function chatProblem('));
-  assert.doesNotMatch(sessionFn, /ensureCrewSlot|ensureSlot/);
+  assert.doesNotMatch(sessionFn, /ensureSlot|crewSlot/);
 });
 
 test('dashboardOrigins: the gateway origin in both loopback spellings, plus the override; nothing else', () => {
@@ -277,11 +293,11 @@ test('dashboardOrigins: the gateway origin in both loopback spellings, plus the 
 test('the chip-hiding CSS matches the manifest chip by its icon class, never by text', () => {
   assert.equal(CHIP_ICON, manifest.contributes.sessionControls[0].icon);
   const css = chipHideCss();
-  // V5 S-6: our chip only, by its label and icon; another app's Package chip is kept.
+  // V5 S-6: our chip only, by its label and icon; another app's chip with the same icon but another label is kept.
   assert.equal(manifest.contributes.sessionControls[0].label, 'VS Code');
   assert.ok(!('statusPath' in manifest.contributes.sessionControls[0]), 'no status, so the aria-label is the label alone');
-  assert.match(css, /^button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-tag\)\{display:none !important\}/);
-  assert.throws(() => chipHideCss('Tag', 'x"]{}'));
+  assert.match(css, /^button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)\{display:none !important\}/);
+  assert.throws(() => chipHideCss('Package', 'x"]{}'));
   assert.match(chipHideCss('AudioLines'), /lucide-audio-lines/);
   assert.doesNotMatch(css, /title=/);
 });

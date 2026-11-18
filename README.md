@@ -6,33 +6,43 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.5.5). Tested standalone on Windows 11 with Node
-24.18 and VS Code server 1.146.0 against a stand-in dashboard; 0.2.0 was
-installed into the live Kiro Crew 0.13.0-rc.1 desktop app and worked.
+Status: prototype (0.6.3). Earlier builds were tested standalone on Windows 11
+with Node 24.18 and VS Code server 1.146.0 against a stand-in dashboard. 0.6.3
+is tested on Linux (arm64) with VS Code server 1.146.0: the unit tests pass,
+the smoke run passes 180 of 182 checks, and the web-origin overlay smoke passes.
+The two that fail, a gap under the Restricted Mode banner and a seam at the
+bottom-left corner, failed before this change too. The Kiro Crew view's tab
+behaviour was also checked with real mouse clicks in the live Kiro Crew
+0.13.0.2 dashboard, with two views side by side. 0.2.0 was installed into the
+live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
 ## How it works
 
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.5.5.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.6.3.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
- |     status, folder, Kiro Crew, Reload, Restart server, "Open file", active-file readout
- |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=..."> kept on
- |     document.body and placed over the card, so it survives leaving the page
+ |     VS Code tabs, New tab, and one menu (status, Reload, Restart server,
+ |     updates, the Kiro Crew tab's sign-in, the active file)
+ |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=...&vscpTab=<tab>">
+ |     per tab that has been shown, kept on document.body and placed over the
+ |     card, so they survive leaving the page; only the front tab's shows
  |   - signs VS Code's "Kiro Crew" tab in: mints a sign-in link with the
  |     dashboard's own session and hands it to the launcher
- |  composer chip: ui/vscode-pane-session-0.5.5.mjs (contributes.sessionControls)
- |   - opens the page on the chat's project folder; hidden inside the tab's chat
+ |  composer chip: ui/vscode-pane-session-0.6.3.mjs (contributes.sessionControls)
+ |   - opens (or brings back) the chat's own tab on its project folder;
+ |     hidden inside the tab's chat
  |
  |  /apps/vscode-pane/api/*  (gateway proxy, signs X-KiroCrew-Proxy)
  v
 backend/launcher.mjs  on 127.0.0.1:<PORT>   (Node built-ins only, supervised by the gateway)
  |   /health                 unsigned, for the gateway health check
- |   /api/session|state|open|restart|file-menu   HMAC-verified proxy calls
+ |   /api/session|tabs/*|state|open|restart|file-menu   HMAC-verified proxy calls
  |   /api/bridge/commands|events                 bridge secret, used by the extension
  |   /vsc-<key>/*  HTTP + WebSocket reverse proxy; adds the connection token,
- |                 the secret-storage cookies and the loopback webview endpoint
+ |                 the secret-storage cookies, the loopback webview endpoint and
+ |                 the window's tab (configurationDefaults)
  |   /_vscode-cli/mint-key   the workbench's secret-storage key (frame port)
  |   http://<secret>.localhost:<kc port>/*   the Kiro Crew tunnel: the live
  |                 dashboard, HTTP + WebSocket, holding the tab's session
@@ -42,9 +52,10 @@ backend/launcher.mjs  on 127.0.0.1:<PORT>   (Node built-ins only, supervised by 
 node.exe out/server-main.js  on 127.0.0.1:<random>            |
   (official VS Code server, --connection-token-file,          |
    --server-base-path /vsc-<key>)                             |
-   '- remote extension host -- extension/kiro-crew-bridge ---'
+   '- one remote extension host per window -- extension/kiro-crew-bridge ---'
         (also contributes the "Kiro Crew" webview view to the secondary side
-         bar, which frames <tunnel>/embed/chat/<the folder's slot>)
+         bar, which frames <tunnel>/embed/chat/<the tab's chat> or
+         <tunnel>/embed/sessions)
 ```
 
 The pieces, in order of a cold start:
@@ -111,9 +122,21 @@ The pieces, in order of a cold start:
   minutes.
 - A missing build or a failed or bad download is never retried on its own, so
   the 245 MB download is not repeated in a loop.
+- With no `code` command on the machine (a headless Linux host, for example) the
+  launcher has no commit to ask for, so it downloads nothing by itself. It stops
+  with "VS Code server is not installed" and `/api/session` reports
+  `action: "install-server"`; the page then shows a "Download VS Code server"
+  button. The button POSTs `/api/install-server`, which asks
+  `update.code.visualstudio.com/api/update/server-<os>-<arch>-web/stable/latest`
+  for the latest stable build and its SHA-256, downloads and checks it, unpacks
+  it into `data/server/<commit>` and starts it. A failed download leaves the
+  button in place. `allowDownload: false` (or `VSCODE_PANE_NO_DOWNLOAD=1`)
+  removes the button and the route answers 409. The latest stable build can be
+  newer than the VS Code the bridge extension's proposed APIs were written for
+  (1.146 at the time of writing).
 - When retries stop, `/api/session` reports `status: "error"`,
-  `autoRetry: false` and a message starting with "Stopped:". "Restart server"
-  in the toolbar (or "Try again") resets the budget and tries once more,
+  `autoRetry: false` and a message starting with "Stopped:". "Restart the VS
+  Code server" in the menu (or "Try again") resets the budget and tries once more,
   including a new download.
 - When the gateway never starts the launcher, the page's session request gets
   502 "has no reachable backend" and the page shows "The VS Code backend is not
@@ -161,23 +184,25 @@ gateways send.
 | Route | Purpose |
 |---|---|
 | `GET /health` | `{ok, status}`; unsigned |
-| `GET /api/session?folder=<path>` | status, error, `autoRetry`, `generation`, frame URL for that folder, bridge state |
-| `GET /api/state` | bridge connected, active editor path and selection, last saved file |
-| `POST /api/open` `{path, line?, column?, kind?}` | `kind` is `openFile` (default), `openFolder` or `revealInExplorer`; waits up to 8 s for the extension's result |
+| `GET /api/session` | status, error, `autoRetry`, `generation`, the tabs (`tabs: {list: [{id, folder, session, url}], active, fresh}`), bridge state |
+| `POST /api/tabs/open` `{folder?, session?, reuse?}` | open a tab and bring it to the front: with `session` (a chat's key) the chat's tab, reused when open; with `reuse` a tab on the same folder that has no chat; otherwise a new tab. `folder` defaults to the workspace and must be a folder on this machine |
+| `POST /api/tabs/activate` `{id}`, `POST /api/tabs/close` `{id}` | bring a tab to the front, or close it (the tab to its right takes its place) |
+| `GET /api/state[?tab=<id>]` | bridge connected, active editor path and selection (with `tab`, that tab's window), last saved file |
+| `POST /api/open` `{path, line?, column?, kind?, tab?}` | `kind` is `openFile` (default), `openFolder` or `revealInExplorer`; a file goes to `tab`, else the tab whose folder holds it, else the front tab, which comes to the front; a folder opens as a tab of its own. Waits up to 8 s for the extension's result |
 | `POST /api/restart` | restarts the VS Code server process |
-| `POST /api/file-menu` | target of the `Open in VS Code` row (`contributes.fileMenuItems`) |
+| `POST /api/file-menu` | target of the `Open in VS Code` row (`contributes.fileMenuItems`); answers with a link to the tab it used (`/apps/vscode-pane?tab=<id>`) |
 | `GET /api/theme` | the stored Kiro Crew palette, the VS Code base theme and what the extension last applied |
 | `POST /api/theme` `{kind, vars?}` | apply the Kiro Crew theme in VS Code, tier "palette" or "base" (see Theme) |
 | `GET /api/chat/status[?probe=1]` | whether chat can run: gateway origin, app token, last error, the extension's chat registration, the last turn; `probe=1` also calls the gateway |
-| `POST /api/chat/ask` `{prompt}` | open VS Code's Chat view and submit a prompt to Kiro Crew there |
-| `POST /api/crew/view` `{action: "reveal"}` or `{action: "move", to}` | open VS Code's "Kiro Crew" tab, or move the view to `auxiliarybar`, `sidebar` or `panel` (`vscode.moveViews`) |
+| `POST /api/chat/ask` `{prompt, tab?}` | open the front tab's Chat view and submit a prompt to Kiro Crew there |
+| `POST /api/crew/view` `{action: "reveal", tab?}` or `{action: "move", to}` | open the front tab's "Kiro Crew" view, or move the view to `auxiliarybar`, `sidebar` or `panel` (`vscode.moveViews`) |
 | `POST /api/kc/sign-in` `{url, via?}` or `{error, via?}` | hand the tunnel a sign-in link (the page's mint, or a paste), or report why the page could not mint one |
 | `POST /api/kc/disconnect` | sign VS Code's Kiro Crew tab out (see "The Kiro Crew tab") |
-| `GET /api/bridge/kc?folder=&opened=1` | the tunnel origin, sign-in state and `/embed/chat` URL for the folder; with `opened=1` (the tab just showed) it also creates or reopens the folder's slot; bridge header |
+| `GET /api/bridge/kc?tab=<id>` | the tunnel origin, sign-in state and what the window's Kiro Crew view frames for its tab (`embedPath`: `/embed/chat/<key>?sid=<key>` for a chat's tab, `/embed/sessions` otherwise); creates nothing; bridge header |
 | `POST /api/bridge/kc/sign-in` `{url}`, `POST /api/bridge/kc/connect`, `POST /api/bridge/kc/disconnect` | the tab's paste field, Connect button and Disconnect action; bridge header |
 | `POST /api/secret-probe` `{op: "set", value}` or `{op: "get"}` | store or read one fixed probe value in the bridge's own `context.secrets`; the smoke test uses it to prove secrets persist. Nothing else in secret storage is reachable |
-| `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; header `X-Kiro-Bridge-Secret` |
-| `POST /api/bridge/events` | extension events; same header |
+| `GET /api/bridge/commands?wait=25&host=<id>` | extension long poll; each window gets its own commands; header `X-Kiro-Bridge-Secret` |
+| `POST /api/bridge/events` | extension events (`hello` with the window's `tab`, `tab`, `editor`, ...); same header |
 | `POST /api/bridge/chat` `{prompt, folder?, slot?}` | one chat turn; streams newline-delimited JSON parts back; with `slot`, a turn of a Kiro Crew session type session; same header |
 | `GET /api/chat/prefs` | the app's chat preferences (`hideCopilotAgents`), what VS Code last reported and the Machine settings they produce |
 | `POST /api/chat/prefs` `{hideCopilotAgents}` | change the VS Code setting through the extension; the setting's change comes back as an event and is applied |
@@ -188,16 +213,12 @@ gateways send.
 | `POST /api/bridge/approve` | relay an approval answered in VS Code to `POST /api/chat/slots/{slot}/approve`; bridge header |
 | `POST /api/bridge/question` | relay a question's answer to the slot's question route; bridge header |
 
-`GET /api/session` also carries `crewSlot: {key, folder, title}`, the
-folder's own Kiro Crew session that VS Code's Kiro Crew tab opens on,
-`crewView: {resolved, visible, at}`, the tab's state as the bridge last
-reported it, and `kc: {available, connected, accessExpiresAt, canRefresh,
-signedInAt, lastError, attempts, via, connectRequests}`, the tunnel's sign-in
-state. It never carries the tunnel origin or a cookie. Naming the slot does
-not create it: the launcher creates or reopens it in Kiro Crew only when the tab
-opens on that folder (`GET /api/bridge/kc?opened=1`), for an absolute folder
-that exists and that the calling VS Code window has open. A session you close
-in Kiro Crew therefore stays closed until you open the tab again.
+`GET /api/session` also carries `crewView: {resolved, visible, at}`, the
+tab's state as the bridge last reported it, and `kc: {available, connected,
+accessExpiresAt, canRefresh, signedInAt, lastError, attempts, via,
+connectRequests}`, the tunnel's sign-in state. It never carries the tunnel
+origin or a cookie. Nothing here, and nothing the Kiro Crew view asks for,
+creates a Kiro Crew session: see "Tabs" below.
 
 Every `/api/bridge/*` call names its VS Code window (`X-Kiro-Bridge-Host`, one
 id per extension host), and the native chat routes check the folder against
@@ -206,6 +227,95 @@ bridge relays turns, approvals and questions only for slots the app minted for
 that folder (`slotNameFor(folder)` plus `-` and 8 hex digits), whatever
 `data/state/chat-sessions.json` says, and only VS Code's "Approve" button
 approves; any other answer, a bare "yes" included, rejects.
+
+### Tabs (0.6.3)
+
+The page holds VS Code in tabs, each one VS Code window on a folder, all
+served by the one VS Code server and its one connection token. The launcher
+keeps the list in `data/state/tabs.json` (`backend/lib/tabs.mjs`, at most 20),
+so tabs survive page reloads and launcher restarts; the page only shows them.
+
+- A tab opened from a chat's VS Code chip (`?folder=<cwd>&session=<key>`) is
+  that chat's tab. Its Kiro Crew view frames the chat itself
+  (`/embed/chat/<key>?sid=<key>`, the way the dashboard's own embed tabs open
+  one), and the chip brings the same tab back instead of opening another,
+  wherever its folder is now. A chat with no project folder gets a tab on the
+  default folder. The tab keeps the chat's slot name, which is the dashboard's key
+  without its `dashboard:` prefix, because the embed names chats that way.
+- Any other tab (New tab, a `?folder=` link, a folder from the file menus,
+  the first tab of a first run) shows the dashboard's session list with its
+  New button (`/embed/sessions`). Opening VS Code never creates a Kiro Crew
+  session; one is made only from that list, by the user. (Up to 0.5.6 the view
+  created a session per folder when it opened.)
+- Only tabs looked at since the page loaded have a window. The others load
+  when first shown, and switching tabs reloads nothing: hidden windows stay
+  loaded behind the front one. After a server restart, a hidden window reloads
+  when it is next shown.
+- Labels are the folder's name, numbered when two would repeat. A chat's tab
+  shows the chat's title instead when the host shares session titles with the
+  app (the SDK's `useHostSessions`, which needs `/api/config/default-agent` in
+  `permissions.api`; the manifest does not ask for it, so today chat tabs show
+  their folder name too).
+
+The Kiro Crew view is an embed on the tunnel's origin, and the tunnel adds one
+script to each `/embed/` page, served at `/_vscp-kc/embed.js`
+(`backend/lib/embedboot.mjs`). The script does two things.
+
+First, it gives each view its own tabs. The embed keeps its open tabs in
+`sessionStorage` (`kirocrew-embed-tabs` and `kirocrew-embed-active-index`),
+and every embed in one dashboard tab shares that storage, so without help a
+view could show another view's chat. The script tells views apart by a random
+id in `window.name`, which belongs to the view's frame and survives the frame's
+own page loads. It keeps each view's tabs in `sessionStorage` under that id and
+answers the embed's reads and writes of the two keys from them. The shared keys
+are never written. A new view starts from its URL: the chat named by `?sid=`, or
+the session list.
+
+Second, it works around a fault in the embed's tab strip. The strip copies the
+store's active chat into the Sessions tab whenever the route changes, so
+closing the last chat tab, clicking New tab, or clicking the Sessions tab
+turned that tab back into the chat the store still held, or into the first chat
+in the list. A page that loads fresh on the list does not do this. So when the
+strip moves from a chat page to the list, the script holds that move back, lets
+the strip finish saving its tabs, freezes the page, and loads the list page
+again. The saved tabs rebuild the strip, so the other tabs stay. In the check, a
+draft typed in a chat's message box was still there after closing the chat and
+opening it again. The view reloads for a moment when it goes to the list.
+
+The script depends on the names in the dashboard's bundle: the two storage
+keys, the `kirocrew-tab-update` event and the two routes. If a Kiro Crew update
+renames one of them, that part does nothing and the embed behaves as it does
+without the script. Kiro Crew 0.13.0.2 is the version this was checked against.
+Version 0.6.2 cleared the store's active chat instead; that made the page pick a
+different chat on its own and is gone.
+
+Which window is which tab. The page loads each tab with `?vscpTab=<id>`; the
+frame proxy puts `configurationDefaults: {"kiroCrew.paneTab": "<id>"}` into
+that page's workbench configuration (the embedder option the browser
+workbench registers as default settings, which the extension host receives),
+and the bridge reads the setting's default, never a user value, and says it in
+every `hello`. A window that lost it (VS Code's own Open Folder navigates the
+frame to a URL of its own) asks the page from its Kiro Crew view: a
+`postMessage` up the frame chain, which the page answers only for a window
+inside one of its own frames, and only with the tab id. The tab then follows
+the window to its new folder. Remote viewers' chat overlay reads the same
+query value (see "On a Remote Crew").
+
+Every window long-polls for its own commands (`lib/bridge.mjs`): a command for
+a tab goes to the tab's newest window by when its extension host started, so a
+reloaded window's old host, which runs on until the server's reconnection grace
+ends, gets nothing; the theme and tunnel changes go to every window. Files from
+`/api/open` and the file menus go to the tab whose folder holds them (the
+deepest), and that tab comes to the front.
+
+The toolbar has the tabs, New tab (a folder field and the recent projects)
+and one menu button whose dot is the server's status (an accent badge when an
+update is out). The menu holds what used to be toolbar buttons: Reload this
+tab, Restart the VS Code server, Check for updates and Update to <version>
+(for a build the app installed), the Kiro Crew tab's sign-in state with Connect
+or Disconnect, Show the Kiro Crew tab in VS Code, and the active file. The
+open-file form is gone; Kiro Crew opens files through the file menus and
+`/api/open`.
 
 The frame port also serves `POST /_vscode-cli/mint-key` (see "Secret storage"
 below).
@@ -241,6 +351,11 @@ and approval policy.
   and a first plain message go to Kiro Crew. Turn it off to bring them back;
   the launcher applies the change to the Machine settings live, and
   `POST /api/chat/prefs` changes it from the app side.
+- Default tab. `kiroCrew.openByDefault` (default on, an application setting)
+  makes the extension open the Kiro Crew tab in the secondary side bar about
+  1.5 s after it starts, ahead of Chat. Turn it off to keep VS Code's own
+  choice of the last active tab. `KIROCREW_VSCODE_OPEN_BY_DEFAULT=0` in the
+  launcher's environment turns it off too (the smoke test sets it).
 - Kiro Crew tab. `kiroCrew.openCrewChat` (Ctrl+Alt+K, the status bar "Crew"
   item and an editor title action) opens VS Code's "Kiro Crew" tab (see
   below). The 0.4.0 id `kiroCrew.toggleCrewChat` still runs it.
@@ -348,7 +463,7 @@ colour, no `--bg` or `--text`), or whose `--text` on `--bg` contrast is below
 --panel --border --text --muted --accent` plus other dashboard names such as
 `--card`, `--chrome`, `--bg-hover`, `--accent-hover`, `--ok`, `--warn` and
 `--danger`, and every name the page sends (`THEME_VARS` in
-`ui/vscode-pane-core-0.5.5.mjs`, including `--diff-*`, `--ring` and
+`ui/vscode-pane-core-0.5.6.mjs`, including `--diff-*`, `--ring` and
 `--search-highlight`). One unknown name drops the whole palette to tier "base",
 so `test/contract.test.mjs` fails if the page's list grows a name the launcher
 does not know.
@@ -439,27 +554,36 @@ the bridge sends commands only to the extension host that said hello last.
   outer top (1px border, `pt-2`, the 28px logo row, `mb-1.5`, `gap-0.5`;
   `navRail.tsx:149-154`, `railChrome.tsx`). With the card's 1px top border the
   toolbar's controls sit on the 23px line and its bottom border on that
-  hairline. The earlier 34px strip put the border 11px above it.
+  hairline. The earlier 34px strip put the border 11px above it. Since 0.6.0
+  it holds the tabs, New tab and the menu (see "Tabs"); the menu and the New
+  tab panel are drawn on `document.body` (a React portal) above the VS Code
+  frames and under the dashboard's own popovers, close on Escape, a click
+  elsewhere or a click into VS Code, and move with the arrow keys.
 - VS Code keeps running when you leave the page. The dashboard unmounts an app
   page whenever you go to another route, and an iframe taken out of the
-  document is destroyed, which is why 0.2.0 started over each time. The iframe
-  now lives in one element on `document.body`. While the page is mounted it is
-  placed over the card's body and clipped to the card's rounded bottom corners.
+  document is destroyed, which is why 0.2.0 started over each time. The
+  iframes (one per tab that has been shown) now live in one element on
+  `document.body`. While the page is mounted it is placed over the card's body
+  and clipped to the card's rounded bottom corners, and only the front tab's
+  frame shows in it.
   Placement runs on change, not every animation frame: a `ResizeObserver` on
   the card, its frame slot, `<main>` and the document element (window resize,
   side panels, zoom), window `resize`, capture-phase `scroll`, and a 500 ms
   fallback for a move nothing reports; each trigger asks for at most one
-  placement in the next frame. While the page is not mounted the frame is
-  hidden, not removed, and loses keyboard focus. It is reloaded only for
-  another folder, the Reload button, a restarted server or a restarted
-  backend (a new run id).
+  placement in the next frame. While the page is not mounted the frames are
+  hidden, not removed, and lose keyboard focus. A tab's frame is reloaded only
+  for Reload this tab, a restarted server or a restarted backend (a new run
+  id), and a hidden tab's only when it is next shown.
 - VS Code chip in the chat composer. `contributes.sessionControls` adds a
   "VS Code" chip to the composer shelf, before the agent chip ("Ultra Mode")
   and the project chip. Kiro Crew mounts the control when the chip is clicked
-  and hands it the chat's project folder (`session.cwd`); the control navigates
-  to `/apps/vscode-pane?folder=<that folder>` and the page opens it. A chat with
-  no project shows a short note and an "Open VS Code" button instead. The chip's
-  glyph comes from the host's fixed set (`Tag`, the closest to a code or markup glyph; see below), because session controls
+  and hands it the chat (`session.sessionKey`) and its project folder
+  (`session.cwd`); the control navigates to
+  `/apps/vscode-pane?folder=<that folder>&session=<the chat>` and the page
+  opens the chat's tab, or brings back the one it opened before. A chat with
+  no project shows a short note and an "Open VS Code" button, which opens the
+  chat's tab on the default folder. The chip's
+  glyph comes from the host's fixed set (`Package`, which is also AppIcon's fallback; see below), because session controls
   cannot use an app image: the chip renders `<AppIcon icon={sc.icon} size={13} />`
   with no `iconUrl` (`components/chat-input/ContextShelf.tsx` in 0.14, the same
   call in the shipped 0.13.0-rc.1 bundle), `AppIcon` maps names to eleven
@@ -481,11 +605,11 @@ the bridge sends commands only to the extension host that said hello last.
   The fallback is a stylesheet the tunnel adds only to the dashboard HTML it
   serves to the tab (`chipHideCss` in `backend/lib/chipcss.mjs`): it hides
   `button[data-session-control-chip][aria-label="VS Code"]` whose icon `<svg>`
-  has the class `lucide-tag`, and the chip row's wrapper when that was its
+  has the class `lucide-package`, and the chip row's wrapper when that was its
   only chip. The real dashboard never gets it. The host puts no app identity on
   the chip, so its label (the aria-label is the label alone, since this app
   declares no `statusPath`, `ContextShelf.tsx:117-148`) plus its icon is the
-  narrowest stable match; another app's `Package` chip keeps showing. A Kiro
+  narrowest stable match; another app's `Package` chip with a different label keeps showing. A Kiro
   Crew change that adds a per-surface visibility rule to session controls would
   replace this.
 - Theme. On mount, on every dashboard theme change and after each server
@@ -497,7 +621,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.5.5.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.6.3.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -516,10 +640,12 @@ R5).
 - The tab. The bridge contributes `viewsContainers.secondarySidebar` `kiroCrew`
   with one webview view, `kiroCrew.chatView` (`extension/kiro-crew-bridge/crewview.js`).
   When the tunnel is signed in, the view is one full-size iframe on the tunnel
-  origin at `/embed/chat/<the folder's slot>` (`App.tsx:597-608`, the embed
-  route built for IDE side panels). Its CSP allows framing that origin only.
+  origin (`App.tsx:597-608`, the embed routes built for IDE side panels): for a
+  page tab opened from a chat, that chat (`/embed/chat/<key>?sid=<key>`);
+  otherwise the session list with its New button (`/embed/sessions`). Its CSP
+  allows framing that origin only, and it frames only those two path shapes.
   Clicking the tab, Ctrl+Alt+K, the status bar "Crew" item, the editor title
-  action and the page toolbar's "Kiro Crew" button open it.
+  action and "Show the Kiro Crew tab in VS Code" in the page's menu open it.
 - The tunnel (`backend/lib/kcproxy.mjs`). The launcher serves the gateway's
   dashboard on its own loopback origin, `http://<128-bit secret>.localhost:<kc port>`,
   for HTTP and WebSocket. The SPA is built for `/`, so it needs a whole origin.
@@ -653,8 +779,8 @@ R5).
   running as you, Kiro Crew agents included, can read it; on a single-user
   machine a second key on disk would not change that.
 - Disconnect. "Kiro Crew: Disconnect the Kiro Crew Tab" (the view's title
-  action, or the command palette) and the page toolbar's Disconnect button
-  call `POST /api/auth/logout` through the tunnel (that session only), delete
+  action, or the command palette) and "Disconnect the Kiro Crew tab" in the
+  page's menu call `POST /api/auth/logout` through the tunnel (that session only), delete
   the stored cookies and rotate the host name, so a frame still holding the
   old URL gets 421. The choice is kept until you press Connect or paste a link.
   `kirocrew logout` still ends every session everywhere. Pasting a new link
@@ -665,8 +791,8 @@ R5).
   page in the dashboard"), so the tunnel adds a stylesheet to the dashboard HTML
   it serves (`backend/lib/chipcss.mjs`). That copy exists only inside VS Code;
   the real dashboard is untouched. It hides the chip labelled "VS Code" whose
-  icon `<svg>` has the class `lucide-tag`, and the chip row's wrapper when
-  that was its only chip. Another app's `Package` chip keeps showing.
+  icon `<svg>` has the class `lucide-package`, and the chip row's wrapper when
+  that was its only chip. Another app's `Package` chip with a different label keeps showing.
 - Edges (0.5.1). The same stylesheet (`embedFlushCss`) pins the embed page to
   the webview: `html`, `body` and `#root`, the embed shell (`#root`'s child
   that holds `[data-chat-scope]`), every box down to the outermost chat pane,
@@ -677,9 +803,13 @@ R5).
   composer, its glass card, the context shelf and split-view panes keep their
   own styling, and every rule is scoped away from the full dashboard's
   `data-testid="app-frame"` shell. The smoke measures all four edges at 0 px.
-- Folders. The tab follows the window's first folder; a folder change reloads
-  the frame on that folder's slot. Session tabs, "+" and the all-tabs menu are
-  the embed route's own (`EmbedTabStrip`).
+- What it shows. The view frames what its page tab shows (see "Tabs"); a
+  folder change inside VS Code does not change it, and nothing it loads creates
+  a session. Session tabs, "+" and the all-tabs menu at the top of the view are
+  the embed route's own (`EmbedTabStrip`). In the session list, the dashboard
+  also shows the side panel of the session it last focused (a conductor's
+  Board, for example); in a narrow side bar that panel can take most of the
+  width until you close it with its panel toggle.
 - Not Kiro Crew desktop. The frame gets no Electron preload, so desktop-only
   extras (the native browser panel, desktop popouts) fall back to their browser
   behaviour, and VS Code keybindings do not reach the frame while it has focus.
@@ -751,10 +881,14 @@ Kiro Crew window was refreshed, while installed extensions stayed.
 
 `app.json` declares one `contributes.fileMenuItems` row, "Open in VS Code", on
 the file overflow menu, the tree context menu and folder rows. Kiro Crew POSTs
-`{item_id, surface, path, kind}` to `/apps/vscode-pane/api/file-menu`; files
-open in an editor tab, folders replace the workspace. The reply carries a toast
-message and a link to the app page. The host does not navigate on its own, so
-the user clicks the link or the sidebar icon to see VS Code.
+`{item_id, surface, path, kind, root?}` to `/apps/vscode-pane/api/file-menu`. A
+file opens in the tab whose folder holds it (the deepest such folder), else in
+a tab on the project root the menu names, else in the front tab; that tab comes
+to the front. A folder opens as a tab of its own, or brings back the tab
+already on it (no tab's folder is replaced any more). The reply carries a toast
+message and a link to the app page that names the tab (`?tab=<id>`). The host
+does not navigate on its own, so the user clicks the link or the sidebar icon
+to see VS Code.
 
 ## Install into Kiro Crew (local path)
 
@@ -808,6 +942,7 @@ standalone development. Logs are in `data/logs/launcher.log` and
 ```
 node --test "test/*.test.mjs"     # unit tests (node:test)
 node scripts/smoke.mjs            # end-to-end against the cached server build
+VSCODE_PANE_SERVER_DIR=<build> SMOKE_BROWSER=<chrome> node scripts/overlay-smoke.mjs   # the Kiro Crew tab on the web origin, in a real browser (Node 22+, no packages)
 node scripts/smoke.mjs --minimal-env   # same, launcher started with only the gateway's env allowlist
 node scripts/stage.mjs            # clean install copy
 node scripts/smoke.mjs --app-root .cache/stage/vscode-pane   # same, from the staged copy
@@ -825,8 +960,9 @@ terminal and checks (by name only, never printing values) that it sees
 `PSModulePath`, `USERNAME`, `ProgramFiles(x86)` and a user variable such as
 `GOPATH` and does not see the tracking, bridge or proxy variables, checks that
 the server process itself still has the tracking variable, and that the bridge
-connects. `/api/open` and the toolbar both open a file at a line, the state
-readout follows, and the file-menu route works. A killed server is restarted
+connects. `/api/open` opens a file at a line, the state readout in the menu
+follows, the window says which page tab it is from its configuration, and the
+file-menu route works. A killed server is restarted
 with the same frame URL and a new generation, the page reloads the frame on
 its own, the bridge reconnects and `/api/open` works again. It also plays the Kiro Crew gateway with a mock
 (`test/support/gateway-mock.mjs`): the launcher exchanges its secret for an app
@@ -858,8 +994,9 @@ composer chips, frame headers like the real ones, and `/api/ws`), not the real
 Kiro Crew SPA. The stand-in sets an HttpOnly dashboard session cookie and
 serves `/api/auth/mobile-link` only to requests that carry it. The checks
 cover: the automatic sign-in when the page opens; the status bar item opening
-the tab on the folder's slot (a folder name with a space), signed in, with the
-WebSocket open; the tab next to Chat and nothing drawn by the page; the webview
+the tab on the session list (`/embed/sessions`, for VS Code opened on a folder
+whose name has a space), signed in, with the WebSocket open, and no session
+created; the tab next to Chat and nothing drawn by the page; the webview
 served from `<uuid>.localhost` with no webview from vscode-cdn.net; the chip
 hidden in the tab while another app's shows; no `mc_*` cookie in the browser
 and the session file owner-only and never logged; credential routes refused
@@ -917,9 +1054,16 @@ few times a second while idle and still matches its slot after a window
 resize and a layout shift; that leaving the page unmounts it while the iframe stays in the
 document, hidden, and that coming back shows the same iframe element with no
 new workbench load, no new extension-host hello and the same editor tab; and
-that the composer chip lands on `/apps/vscode-pane?folder=<chat project>` and
-VS Code opens that folder. `.cache/smoke/pane-dark.png` is the pane in the dark
-palette. The pane then goes back to the workspace folder for the restart checks.
+that the composer chip lands on `/apps/vscode-pane?folder=<chat project>&session=<chat>`,
+opens a new tab in front whose window loads that folder with its tab id and
+whose Kiro Crew view frames that chat with no session created, that clicking
+the first tab shows its window again with both windows loaded and nothing
+reloaded, that the chip again brings back the chat's tab instead of opening
+another, that New tab opens a typed folder as a tab of its own and lists the
+recent projects, and that a tab's close button removes the tab and its window.
+`.cache/smoke/pane-dark.png` is the pane in the dark palette and
+`.cache/smoke/menu.png` the menu open. The pane then goes back to the workspace
+folder's tab for the restart checks.
 
 ## Icon
 
@@ -968,16 +1112,89 @@ VS Code tints it like its own icons. These are Kiro Crew's marks. The Kiro
 Crew source is Apache-2.0, which grants no trademark rights (section 6), so
 check their use before any public release of this app.
 
-The composer chip uses the `Tag` glyph (0.5.3): it accepts only a name from
-`AppIcon`'s eleven lucide icons, matched case-sensitively with `Package` as the
-fallback (checked in the installed 0.13.0-rc.1 bundle, `AppIcon-*.js`, which has
-no alias or case-insensitive lookup), and none of them depicts code. `Tag` is
-the closest, as the angle-bracket tag of markup. A real code glyph needs a Kiro
+The composer chip uses the `Package` glyph (0.5.6; `Tag` in 0.5.3 to 0.5.5): it
+accepts only a name from `AppIcon`'s eleven lucide icons (`Shield`, `Bot`,
+`Search`, `Tag`, `Users`, `Zap`, `Star`, `Package`, `Cat`, `AudioLines`,
+`Mic`), matched case-sensitively with `Package` as the fallback (read from the
+installed 0.13.0.1 dashboard bundle, which has no alias or case-insensitive
+lookup), and none of them depicts code. A real code glyph needs a Kiro
 Crew change (`Code` is already in the panel-tab icon set, and `iconUrl` on
 session controls is written up in `research/R7-icon-paths.md`). The tunnel's
 chip-hiding CSS matches the chip by its label and this glyph. The Kiro Crew
 change that would let both surfaces use the theme's own colours is written up in
 `research/kirocrew-icon-proposal.md`.
+
+## On a Remote Crew
+
+On a Remote Crew (a dashboard reached through the hub's tunnel) the browser
+cannot reach `127.0.0.1:<frame port>` on the launcher's machine, so two things
+change. Local installs are unaffected.
+
+The workbench loads from the app's web origin. `app.json` sets
+`backend.webOrigin: true`, so the gateway relays
+`http://vscode-pane.apps.localhost:<dashboard port>`, HTTP and WebSocket, to
+the launcher's own port. The browser resolves `*.localhost` to its own
+loopback, so the request rides whatever carries the dashboard. The page decides
+per launcher run: it loads `/_vscp-probe` from the frame port in a hidden
+iframe, and if that document does not report this run's id within 2.5 s it
+loads `http://vscode-pane.apps.localhost:<its own port>/vsc-<key>/...` instead.
+On that host the launcher serves the workbench under the unguessable key path
+and the key mint route; the signed and bridge API are not served, the
+workbench's origin and WebSocket `Origin` must be that same host, and the
+gateway forwards no credential of its own.
+
+The "Kiro Crew" tab shows the same chat as locally. A webview cannot frame the
+chat from there (the gateway's relay rewrites `frame-ancestors` to the dashboard
+and itself, which excludes a webview's origin), so the launcher adds
+`/vsc-<key>/_vscp-kc.js` to the workbench page it serves
+(`backend/lib/overlay.mjs`). The script finds the tab's webview iframe (VS Code
+names it `...pre/index.html?id=...&extensionId=kiro-crew.kiro-crew-bridge&purpose=webviewView`),
+lays an iframe over its rectangle in the workbench's own document, and follows
+it as the side bar resizes or the tab is hidden. The iframe shows what the page
+tab shows: the script reads the window's `?vscpTab=<id>` (or, without it, asks
+the page in its parent), and `GET /vsc-<key>/_vscp-kc/state?tab=<id>` answers
+with the embed path, `/embed/chat/<key>?sid=<key>` for a chat's tab or
+`/embed/sessions`; it creates nothing. That frame is the dashboard's page on the same origin, served by
+the launcher's Kiro Crew proxy (`backend/lib/kcproxy.mjs`, which attaches the
+dashboard session, refuses the credential routes and checks `Origin`). Its
+frame chain is the workbench (same origin) and the dashboard, which the relay
+allows. The tab's own webview stays an empty placeholder (it still shows the
+sign-in panel when the tab is not connected). Every path outside the workbench's
+key path is the chat, and is served only to a browser that holds the
+`vscp-viewer` cookie, set HttpOnly (and partitioned) on the workbench page, so a
+local process or another page that reaches the same tunnel port gets 404.
+
+The relay serves only the gateway's own dashboard ports, and a tunnel's local
+port is not one of them, so before it loads the workbench the page asks the
+launcher, which runs beside the gateway, `GET /api/web-origin?port=<the port
+this browser reaches the dashboard on>`. The launcher asks the gateway what the
+browser will ask it (`Host: <app>.apps.localhost:<port>` for the launcher's
+probe path, `backend/lib/weborigin.mjs`) and reports `ok`, `port_not_allowed`
+(421 on that port but not on the gateway's own), `refused` (421 on both),
+`not_enabled` (the gateway has no web origin for the app) or
+`gateway_unreachable`, with the ports already listed in
+`<Kiro Crew home>/.env`. For `port_not_allowed` the pane shows the reason and an
+**Allow port N** button, which calls `POST /api/web-origin/allow-port` and adds
+the port to `KIROCREW_ALLOWED_LOOPBACK_PORTS` in that `.env` (owner-only, every
+other line kept, existing ports kept). The gateway reads the variable at start,
+so the pane then says to restart Kiro Crew on that machine and offers a copy
+button for the command and **Check again**; if the port is already listed it
+goes straight to the restart. When the file cannot be written the pane prints
+the exact line to add. The port is the one this browser actually uses, so a
+changed tunnel port is detected the next time the pane opens.
+
+What this trades away: the workbench and the signed-in chat share one origin on
+a remote crew, so code running in the workbench page can call the chat's API as
+the signed-in owner (locally they are separate origins). VS Code's server and
+extensions already run as you on that host. Other limits of the route: the relay
+serves only the dashboard's own ports and only direct loopback requests, so a
+tunnel whose local port the gateway does not count as a dashboard port
+(`KIROCREW_ALLOWED_LOOPBACK_PORTS` on the remote), or one carried by the Session
+Manager listener, is refused with 421 (the reason is in the security log,
+`security_events.jsonl`); the relay allows one origin per app, so VS Code's
+per-webview `<uuid>.localhost` hosts are not used and webviews take VS Code's
+default endpoint; and the overlay relies on VS Code's webview iframe naming, so
+a VS Code release that changes it needs the finder in `overlay.mjs` updated.
 
 ## Known limits
 
@@ -1010,7 +1227,8 @@ change that would let both surfaces use the theme's own colours is written up in
   dashboard element that overlaps the content area with a lower stacking order
   would be drawn under it. Checked in the stand-in only.
 - Only one VS Code page per window: two dashboard windows each keep their own
-  frame, and therefore their own workbench.
+  frames, and therefore their own workbenches. They share the tab list, and
+  picking a tab in one brings it to the front in the other on its next poll.
 - Workspace trust stays on. A new folder opens in Restricted Mode until you
   trust it; the bridge declares support for untrusted workspaces so it keeps
   working.
@@ -1026,8 +1244,20 @@ change that would let both surfaces use the theme's own colours is written up in
 - The tunnel was proven against a mock gateway and a mock dashboard page. The
   real SPA through the tunnel, the real mobile-link mint and an authenticated
   WebSocket on the live 0.13.0-rc.1 are still to be checked (see "Next steps").
-- Two open VS Code windows (two frames) share one command queue; the one that
-  connected last receives the commands.
+- Each VS Code window takes its own commands (see "Tabs"). A window that
+  opened another folder itself has lost its `?vscpTab=`, and until its Kiro
+  Crew view has been shown (which asks the page), commands for its tab reach it
+  only through the tab's folder. Telling apart two such windows on the same
+  folder is not possible, so either may take them.
+- The tab id rides in the workbench's `configurationDefaults` and the
+  `kiroCrew.paneTab` setting the bridge declares. Both are public behaviour of
+  the 1.146 web build (`IWorkbenchConstructionOptions`); a server that set
+  `configurationDefaults` of its own would win over the launcher's, and the
+  window would then fall back to asking the page.
+- The Kiro Crew view's session list is the dashboard's own `/embed/sessions`.
+  Its New button starts a session the way the dashboard does; the app does not
+  pass the tab's folder to it, so the new session gets the project the
+  dashboard picks.
 - The bridge secret leaves the extension host's environment when the bridge
   loads. A process an extension or VS Code itself starts before that (the
   bridge activates on `*`, early but not first) still inherits it, and the
@@ -1058,6 +1288,14 @@ change that would let both surfaces use the theme's own colours is written up in
 - VS Code's secondary side bar starts about 300px wide; drag its sash to widen
   it, and VS Code remembers the width.
 
+## Server updates
+
+The app updates the VS Code server only for a build it installed itself: a build it downloaded into `data/server`, either automatically or with "Download VS Code server". A build from `serverDir`, from the dev cache, or one that a `code` command pins to the user's own VS Code is left alone, and the menu shows no update controls for it.
+
+"Check for updates" in the menu makes one request to the update service and changes nothing. When a newer stable build is out, a line under the toolbar and the menu offer "Update to <version>", and the menu button carries a badge. Updating downloads that exact build, checks its SHA-256, unpacks it next to the current one and restarts the server with it. The build it replaces stays until the new one is running, and is then removed. If the new build does not start after the launcher's three tries, it is removed, the previous build comes back by itself, and the line under the toolbar says so.
+
+Nothing updates on its own. Newer builds can change the chat extension's proposed APIs (the extension was written for VS Code 1.146), so check the chat after an update. The record of installs is `data/state/server-build.json`. `VSCODE_PANE_UPDATE_BASE` moves the update service to a loopback stand-in; `test/serverupdate-e2e.test.mjs` runs this whole path with small fake builds.
+
 ## Next steps
 
 1. Install into the live Kiro Crew 0.13.0-rc.1 desktop app from the staged
@@ -1071,9 +1309,10 @@ change that would let both surfaces use the theme's own colours is written up in
      `kirocrew token` link.
    - Security Posture may report the session pin as shared (the tunnel's
      requests are proxied); that is expected.
-   - The tab shows the real chat for the folder's "VS Code: <folder>" session,
-     a turn streams, an approval can be answered there, and the session tabs,
-     pickers and side panels work in a side-bar-wide view.
+   - The tab shows the real chat a page tab was opened from (from its VS Code
+     chip), or the session list for a tab opened on its own; a turn streams,
+     an approval can be answered there, and the session tabs, pickers and side
+     panels work in a side-bar-wide view.
    - The WebSocket stays open (the launcher log shows `kc WebSocket /api/ws 101`)
      and no `mc_*` cookie appears in the tab's frame.
    - From the frame's DevTools console, `fetch('/api/token/local',{method:'POST'})`

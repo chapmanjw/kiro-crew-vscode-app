@@ -145,7 +145,7 @@ test('pages through the tunnel: frame headers rewritten, chip stylesheet added, 
   assert.equal(page.headers['referrer-policy'], 'no-referrer');
   assert.match(page.headers['content-security-policy'], /frame-ancestors http:\/\/localhost:5476 http:\/\/127\.0\.0\.1:4100 http:\/\/\*\.localhost:4100$/);
   assert.match(page.headers['content-security-policy'], /default-src 'self'/, 'the rest of the CSP is kept');
-  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-tag\)/);
+  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)/);
   assert.ok(page.body.includes(`<style id="kc-vscode-pane">${tunnelCss()}</style></head>`), 'the chip rule and the embed flush rules are injected whole, before </head>');
   assert.equal(page.headers['content-length'], String(Buffer.byteLength(page.body)));
   assert.ok(mock.rec.dash.xff > x0, 'X-Forwarded-For reached the gateway');
@@ -308,4 +308,28 @@ test('V5 N-1, N-3, N-4, N-7, N-8: refresh vs disconnect, foreign-port cookies, W
   assert.equal(mock.rec.dash.logouts, logouts + 1);
   assert.equal((await req(kc.port, { path: '/api/auth/me', headers: { host: newHost } })).status, 200, 'the new session still works');
   assert.ok(host);
+});
+
+test('embed pages get the bootstrap before </head>; the script is served on the tunnel origin behind the same gate and never forwarded', async (t) => {
+  const { EMBED_BOOT_PATH, EMBED_BOOT_SOURCE } = await import('../backend/lib/embedboot.mjs');
+  const { kc, mock, H } = await setup(t);
+  await kc.signIn(mock.mintLink());
+  const n0 = mock.rec.requests.length;
+  const tag = `<script src="${EMBED_BOOT_PATH}"></script>`;
+  const embed = await req(kc.port, { path: '/embed/chat/chat-1?sid=chat-1', headers: H() });
+  assert.equal(embed.status, 200);
+  assert.ok(embed.body.includes(tag), 'the bootstrap tag');
+  assert.ok(embed.body.indexOf(tag) < embed.body.indexOf('</head>'), 'the tag is in the head');
+  assert.match(embed.body, /<style id="kc-vscode-pane">/, 'the theme sheet is still added');
+  assert.equal(embed.headers['content-length'], String(Buffer.byteLength(embed.body)));
+  const boot = await req(kc.port, { path: EMBED_BOOT_PATH, headers: H() });
+  assert.equal(boot.status, 200);
+  assert.match(boot.headers['content-type'], /^text\/javascript/);
+  assert.equal(boot.headers['cache-control'], 'no-store');
+  assert.equal(boot.body, EMBED_BOOT_SOURCE);
+  assert.equal((await req(kc.port, { method: 'HEAD', path: EMBED_BOOT_PATH, headers: H() })).status, 200);
+  assert.equal((await req(kc.port, { path: EMBED_BOOT_PATH, headers: { host: `127.0.0.1:${kc.port}` } })).status, 421, 'the same gate as every page');
+  assert.ok(!mock.rec.requests.slice(n0).some((r) => r.includes(EMBED_BOOT_PATH)), 'the script is never forwarded to the gateway');
+  const shell = await req(kc.port, { path: '/', headers: H() });
+  assert.ok(!shell.body.includes(EMBED_BOOT_PATH), 'pages that are not embeds get no bootstrap');
 });

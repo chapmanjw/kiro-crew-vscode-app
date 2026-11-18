@@ -111,5 +111,5 @@ test('svgProblems rejects broken or scripted SVG', () => {
 
 test('the composer chip keeps a glyph from AppIcon\'s fixed set', () => {
   // ContextShelf renders <AppIcon icon={sc.icon} /> with no iconUrl, so a file cannot be used there.
-  assert.equal(manifest.contributes.sessionControls[0].icon, 'Tag');
+  assert.equal(manifest.contributes.sessionControls[0].icon, 'Package');
 });

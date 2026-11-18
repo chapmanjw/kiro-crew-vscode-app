@@ -156,13 +156,14 @@ export async function nativeChatChecks({ page, frame, api, check, gatewayMock, w
   );
   await until(async () => (await api('GET', '/api/chat/status')).json?.activeTurns === 0, 15_000);
 
-  // GET /api/session names the folder's crew slot for the page's overlay
-  // (Ctrl+Alt+K and the status bar item are checked with the Kiro Crew tab).
+  // GET /api/session names no per-folder session any more: the page's tabs say
+  // what each window's Kiro Crew view shows (Ctrl+Alt+K and the status bar item
+  // are checked with the Kiro Crew tab).
   const sess = (await api('GET', '/api/session')).json;
   check(
-    "GET /api/session names the folder's crew slot {key, folder, title}",
-    !!sess.crewSlot && sess.crewSlot.key === slotNameFor(sess.folder) && sess.crewSlot.folder === sess.folder && /^VS Code: /.test(sess.crewSlot.title),
-    `crewSlot ${JSON.stringify(sess.crewSlot)}`,
+    'GET /api/session lists the page\'s tabs (the first run opened one on the workspace, on its own) and no per-folder session',
+    !('crewSlot' in sess) && !!sess.tabs && sess.tabs.list.length >= 1 && sess.tabs.list.some((t) => t.id === sess.tabs.active && !t.session),
+    `tabs ${JSON.stringify(sess.tabs && { n: sess.tabs.list.length, active: sess.tabs.active, fresh: sess.tabs.fresh })}`,
   );
 
   return { s1, s2 };

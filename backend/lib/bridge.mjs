@@ -1,30 +1,47 @@
 // Command queue (Kiro Crew -> VS Code) and editor state (VS Code -> Kiro Crew)
 // shared between the launcher API and the extension's long poll.
+//
+// Every VS Code window (one per page tab, see lib/tabs.mjs) runs its own
+// extension host, and each host long-polls for its own commands. A command can
+// name where it goes (its route):
+//   {host}          that extension host only
+//   {tab, folder}   the newest window showing that page tab; until a window has
+//                   said which tab it is (its Kiro Crew view asks the page), the
+//                   newest one with the tab's folder open
+//   none            the newest live window (or the first to poll, when none is known)
+// A window that was reloaded leaves its old extension host running until the
+// server's reconnection grace runs out (remoteExtensionHostAgentServer.ts), so
+// "newest" (by when the host started) keeps commands away from those hosts.
+// A window knows its tab from the start: the page loads it with ?vscpTab=<id>,
+// and the frame proxy hands that to the extension as the default of the
+// kiroCrew.paneTab setting (lib/frameproxy.mjs injectConfigurationDefaults).
+import { validTabId, sameFolder } from './tabs.mjs';
+
+// A command whose tab has no window yet: it waits for one, until its TTL.
+const NOBODY = Symbol('nobody');
 
 export class Bridge {
-  constructor({ now = () => Date.now(), connectedWindowMs = 40_000, maxQueue = 100, commandTtlMs = 60_000 } = {}) {
+  constructor({ now = () => Date.now(), connectedWindowMs = 40_000, maxQueue = 100, commandTtlMs = 60_000, liveMs = 60_000 } = {}) {
     this.now = now;
     this.commandTtlMs = commandTtlMs;
     this.expiry = new Map(); // command id -> expiry time; a command older than this is dropped undelivered
     this.connectedWindowMs = connectedWindowMs;
+    this.liveMs = liveMs;
     this.maxQueue = maxQueue;
     this.queue = [];
-    this.waiters = new Set(); // pending long polls
+    this.routes = new WeakMap(); // queued command -> its route
+    this.waiters = new Set(); // pending long polls: {host, finish}
     this.results = new Map(); // id -> resolve fn
     this.nextId = 1;
     this.lastSeen = 0;
     this.activePolls = 0;
-    this.extension = null; // {version, pid, workspaceFolders}
-    this.editor = null; // {path, selection, languageId, at}
+    this.extension = null; // {version, workspaceFolders, ...} from the newest hello
+    this.editor = null; // {path, selection, languageId, at}, from whichever window reported last
     this.lastSaved = null; // {path, at}
     this.theme = null; // {signature, applied, error, at} last theme result from the extension
-    // The extension host that said hello last. After a pane remount or reload
-    // the old host lingers until the server's shortened reconnection grace
-    // runs out (remoteExtensionHostAgentServer.ts:381-391), so commands go to
-    // the newest host only.
+    // The extension host that said hello last.
     this.currentHost = null;
-    // Every live extension host (one per VS Code window) and its folders, so
-    // two windows each keep their own sessions: host -> {folders, at}.
+    // Every extension host (one per VS Code window): host -> {folders, tab, at, helloAt, firstAt, startedAt, polls, editor}.
     this.hosts = new Map();
     this.hostTtlMs = 10 * 60 * 1000;
     this.events = 0;
@@ -39,6 +56,54 @@ export class Bridge {
     return this.activePolls > 0 || this.now() - this.lastSeen < this.connectedWindowMs;
   }
 
+  isLive(h) {
+    return !!h && (h.polls > 0 || this.now() - h.at < this.liveMs);
+  }
+
+  /** The id of the live host started last (by its own start time) among those `pred` accepts, or null. */
+  newestHost(pred = () => true) {
+    let best = null;
+    let bestAt = -1;
+    for (const [id, h] of this.hosts) {
+      if (!this.isLive(h) || !pred(h)) continue;
+      // A host's start, not its latest hello: a lingering host that reconnects must not look new.
+      const at = h.startedAt || h.firstAt || 0;
+      if (at > bestAt) {
+        best = id;
+        bestAt = at;
+      }
+    }
+    return best;
+  }
+
+  /** Who a command with this route goes to now: a host id, null (whoever polls), or NOBODY (hold it). */
+  designee(route) {
+    if (!route) return this.newestHost();
+    if (route.host) return route.host;
+    if (route.tab) {
+      const mapped = this.newestHost((h) => h.tab === route.tab);
+      if (mapped) return mapped;
+      if (route.folder) {
+        const byFolder = this.newestHost((h) => !h.tab && h.folders.some((f) => sameFolder(f, route.folder)));
+        if (byFolder) return byFolder;
+      }
+      return NOBODY;
+    }
+    return this.newestHost();
+  }
+
+  deliverable(cmd, host) {
+    const d = this.designee(this.routes.get(cmd) || null);
+    if (d === NOBODY) return false;
+    return d === null || d === host;
+  }
+
+  /** The host a page tab's commands go to now, or null. */
+  hostForTab(tab) {
+    const d = this.designee(tab ? { tab } : null);
+    return d === NOBODY ? null : d;
+  }
+
   /** Drop queued commands past their TTL so a late VS Code does not replay stale requests. */
   prune() {
     const now = this.now();
@@ -51,10 +116,12 @@ export class Bridge {
   }
 
   /** Queue a command; resolves with the extension's result or {ok:false, timeout:true}. */
-  enqueue(command, timeoutMs = 8000) {
+  enqueue(command, timeoutMs = 8000, route = null) {
     this.prune();
     const id = String(this.nextId++);
     const entry = { id, ...command };
+    const r = normRoute(route);
+    if (r) this.routes.set(entry, r);
     this.expiry.set(id, this.now() + this.commandTtlMs);
     if (this.queue.length >= this.maxQueue) this.expiry.delete(this.queue.shift().id);
     this.queue.push(entry);
@@ -64,78 +131,95 @@ export class Bridge {
         resolve({ id, ok: false, delivered: !this.queue.includes(entry), timeout: true });
       }, timeoutMs);
       timer.unref?.();
-      this.results.set(id, (r) => {
+      this.results.set(id, (res) => {
         clearTimeout(timer);
         this.results.delete(id);
-        resolve({ id, delivered: true, ...r });
+        resolve({ id, delivered: true, ...res });
       });
     });
     this.flush();
     return { id, done };
   }
 
+  /** The queued commands `host` may take now, removed from the queue. */
+  takeFor(host) {
+    const out = [];
+    this.queue = this.queue.filter((c) => {
+      if (!this.deliverable(c, host)) return true;
+      this.expiry.delete(c.id);
+      out.push(c);
+      return false;
+    });
+    return out;
+  }
+
   flush() {
     this.prune();
-    if (!this.queue.length) return;
-    for (const w of this.waiters) {
-      this.waiters.delete(w);
-      const batch = this.queue.splice(0);
-      for (const c of batch) this.expiry.delete(c.id);
-      w(batch);
-      return;
+    for (const w of [...this.waiters]) {
+      if (!this.queue.length) return;
+      const batch = this.takeFor(w.host);
+      if (batch.length) w.finish(batch);
     }
   }
 
   /**
-   * Long poll: returns queued commands, or waits up to waitMs for one.
-   * An aborted signal ends the wait with an empty batch and consumes nothing.
+   * Long poll from `host`: returns the commands for it, or waits up to waitMs
+   * for one. An aborted signal ends the wait with an empty batch and consumes nothing.
    */
-  take(waitMs = 25_000, signal) {
+  take(waitMs = 25_000, signal, host = null) {
+    const h = host ? String(host).slice(0, 64) : null;
     this.lastSeen = this.now();
+    const rec = h ? this.hosts.get(h) : null;
+    if (rec) rec.at = this.now();
     this.prune();
-    if (this.queue.length) {
-      const batch = this.queue.splice(0);
-      for (const c of batch) this.expiry.delete(c.id);
-      return Promise.resolve(batch);
-    }
+    const ready = this.takeFor(h);
+    if (ready.length) return Promise.resolve(ready);
     if (signal?.aborted) return Promise.resolve([]);
     this.activePolls++;
+    if (rec) rec.polls++;
     return new Promise((resolve) => {
       let finished = false;
+      const waiter = { host: h, finish: null };
       const finish = (batch) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
         signal?.removeEventListener?.('abort', onAbort);
-        this.waiters.delete(finish);
+        this.waiters.delete(waiter);
         this.activePolls--;
+        if (rec && rec.polls > 0) rec.polls--;
         this.lastSeen = this.now();
+        if (rec) rec.at = this.now();
         resolve(batch);
       };
+      waiter.finish = finish;
       const onAbort = () => finish([]);
       const timer = setTimeout(() => finish([]), waitMs);
       timer.unref?.();
       signal?.addEventListener?.('abort', onAbort);
-      this.waiters.add(finish);
+      this.waiters.add(waiter);
     });
   }
 
   /**
-   * Queue a command that supersedes any queued command of the same kind (the
-   * theme: only the newest matters). Fire and forget.
+   * Queue a command that supersedes any queued command of the same kind for
+   * the same route (the theme: only the newest matters). Fire and forget.
    */
-  enqueueLatest(command, timeoutMs = 8000) {
+  enqueueLatest(command, timeoutMs = 8000, route = null) {
+    const key = routeKey(normRoute(route));
     this.queue = this.queue.filter((c) => {
-      if (c.kind !== command.kind) return true;
+      if (c.kind !== command.kind || routeKey(this.routes.get(c) || null) !== key) return true;
       this.expiry.delete(c.id);
       return false;
     });
-    return this.enqueue(command, timeoutMs);
+    return this.enqueue(command, timeoutMs, route);
   }
 
-  /** True when `host` is an older extension host than the one that said hello last. */
-  isSuperseded(host) {
-    return !!(host && this.currentHost && host !== this.currentHost);
+  /** One copy for every live window (the theme, a tunnel change), or one for the first to poll when none is live. */
+  broadcast(command, timeoutMs = 8000) {
+    const live = [...this.hosts].filter(([, h]) => this.isLive(h)).map(([id]) => id);
+    if (!live.length) return [this.enqueueLatest(command, timeoutMs, null)];
+    return live.map((host) => this.enqueueLatest(command, timeoutMs, { host }));
   }
 
   /** Put undelivered commands back at the front of the queue (with a fresh TTL). */
@@ -149,17 +233,31 @@ export class Bridge {
 
   /** Drop waiters (a disconnected client) without losing commands. */
   cancelWaiters() {
-    for (const w of [...this.waiters]) w([]);
+    for (const w of [...this.waiters]) w.finish([]);
   }
 
-  /** Apply an event posted by the extension. Returns false for unknown types. */
-  applyEvent(ev) {
+  hostRecord(host) {
+    const id = String(host).slice(0, 64);
+    let rec = this.hosts.get(id);
+    if (!rec) {
+      rec = { folders: [], tab: null, at: this.now(), helloAt: 0, firstAt: 0, startedAt: 0, polls: 0, editor: null };
+      this.hosts.set(id, rec);
+    }
+    return rec;
+  }
+
+  /**
+   * Apply an event posted by the extension. `fromHost` is the window that sent
+   * it (the X-Kiro-Bridge-Host header). Returns false for unknown types.
+   */
+  applyEvent(ev, fromHost = null) {
     if (!ev || typeof ev !== 'object') return false;
     this.lastSeen = this.now();
     this.events++;
     const at = new Date(this.now()).toISOString();
+    const sender = typeof ev.host === 'string' && ev.host ? ev.host.slice(0, 64) : fromHost ? String(fromHost).slice(0, 64) : null;
     switch (ev.type) {
-      case 'hello':
+      case 'hello': {
         this.extension = {
           version: str(ev.version),
           workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
@@ -168,11 +266,30 @@ export class Bridge {
           chat: chatInfo(ev.chat),
           at,
         };
-        if (typeof ev.host === 'string' && ev.host) {
-          this.currentHost = ev.host.slice(0, 64);
-          this.hosts.set(this.currentHost, { folders: this.extension.workspaceFolders, at: this.now() });
+        if (sender) {
+          this.currentHost = sender;
+          const rec = this.hostRecord(sender);
+          rec.folders = this.extension.workspaceFolders;
+          rec.at = this.now();
+          rec.helloAt = this.now();
+          if (!rec.firstAt) rec.firstAt = this.now();
+          // When the extension host started (epoch ms, same machine), so the order survives a launcher restart.
+          const started = Number(ev.startedAt);
+          if (Number.isFinite(started) && started > 0 && started <= this.now() + 60_000) rec.startedAt = started;
+          if (ev.tab !== undefined) rec.tab = validTabId(ev.tab);
+          this.flush();
         }
         return true;
+      }
+      case 'tab': {
+        // The window's Kiro Crew view asked the page which tab it is in.
+        if (!sender) return false;
+        const rec = this.hostRecord(sender);
+        rec.tab = validTabId(ev.tab);
+        rec.at = this.now();
+        this.flush();
+        return true;
+      }
       case 'theme':
         this.theme = {
           signature: str(ev.signature),
@@ -186,11 +303,13 @@ export class Bridge {
           at,
         };
         return true;
-      case 'editor':
+      case 'editor': {
         this.editor = ev.path
           ? { path: str(ev.path), languageId: str(ev.languageId), selection: sel(ev.selection), at }
           : null;
+        if (sender && this.hosts.has(sender)) this.hosts.get(sender).editor = this.editor;
         return true;
+      }
       case 'saved':
         this.lastSaved = { path: str(ev.path), at };
         return true;
@@ -235,32 +354,52 @@ export class Bridge {
    */
   rootsFor(host) {
     const now = this.now();
-    for (const [k, v] of this.hosts) if (now - v.at > this.hostTtlMs) this.hosts.delete(k);
+    for (const [k, v] of this.hosts) if (v.polls === 0 && now - v.at > this.hostTtlMs) this.hosts.delete(k);
     const own = host && this.hosts.get(String(host).slice(0, 64));
-    if (own) return own.folders;
-    if (!this.hosts.size) return null;
-    return [...new Set([...this.hosts.values()].flatMap((v) => v.folders))];
+    if (own && own.helloAt) return own.folders;
+    const known = [...this.hosts.values()].filter((v) => v.helloAt);
+    if (!known.length) return null;
+    return [...new Set(known.flatMap((v) => v.folders))];
   }
 
-  /** The extension host went away (server restart): forget it until it says hello again. */
+  /** The extension hosts went away (server restart): forget them until they say hello again. */
   resetConnection() {
     this.cancelWaiters();
     this.lastSeen = 0;
     this.extension = null;
     this.editor = null;
+    this.hosts.clear();
+    this.currentHost = null;
   }
 
-  snapshot() {
+  /** What GET /api/state reports; with a tab, the active editor is that tab's window's. */
+  snapshot(tab = null) {
     this.prune();
+    let editor = this.editor;
+    if (tab) {
+      const host = this.hostForTab(tab);
+      editor = host && this.hosts.has(host) ? this.hosts.get(host).editor : null;
+    }
     return {
       connected: this.connected,
       extension: this.extension,
-      activeEditor: this.editor,
+      activeEditor: editor,
       lastSaved: this.lastSaved,
       theme: this.theme,
       pendingCommands: this.queue.length,
     };
   }
+}
+
+function normRoute(route) {
+  if (!route || typeof route !== 'object') return null;
+  if (typeof route.host === 'string' && route.host) return { host: route.host.slice(0, 64) };
+  if (validTabId(route.tab)) return { tab: route.tab, folder: typeof route.folder === 'string' && route.folder ? route.folder : null };
+  return null;
+}
+
+function routeKey(r) {
+  return r ? (r.host ? `h:${r.host}` : `t:${r.tab}`) : '';
 }
 
 function str(v) {

@@ -4,6 +4,9 @@ import path from 'node:path';
 
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 
+/** The public update service: the server downloads and their metadata come from it. */
+export const PUBLIC_UPDATE_BASE = 'https://update.code.visualstudio.com';
+
 /** `code --version` prints version, commit, arch on three lines. */
 export function parseCodeVersion(stdout) {
   const lines = String(stdout || '')
@@ -89,10 +92,20 @@ export function serverDownloadUrl(commit, platform = process.platform, arch = pr
   return `https://update.code.visualstudio.com/commit:${commit}/server-${slug}-web/stable`;
 }
 
+/**
+ * Update-service metadata for the latest stable server build, for a machine with
+ * no `code` command to name a commit: `{url, sha256hash, version (the commit), ...}`.
+ */
+export function serverLatestMetadataUrl(platform = process.platform, arch = process.arch, base = PUBLIC_UPDATE_BASE) {
+  const slug = serverPlatformSlug(platform, arch);
+  if (!slug) throw new Error(`no VS Code server build for ${platform}/${arch}`);
+  return `${base}/api/update/server-${slug}-web/stable/latest`;
+}
+
 /** Update-service metadata for a server build: `{url, sha256hash, version, ...}`. */
-export function serverMetadataUrl(commit, platform = process.platform, arch = process.arch) {
+export function serverMetadataUrl(commit, platform = process.platform, arch = process.arch, base = PUBLIC_UPDATE_BASE) {
   if (!COMMIT_RE.test(commit || '')) throw new Error('invalid commit id');
   const slug = serverPlatformSlug(platform, arch);
   if (!slug) throw new Error(`no VS Code server build for ${platform}/${arch}`);
-  return `https://update.code.visualstudio.com/api/versions/commit:${commit}/server-${slug}-web/stable`;
+  return `${base}/api/versions/commit:${commit}/server-${slug}-web/stable`;
 }

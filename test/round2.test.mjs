@@ -340,17 +340,61 @@ test('Bridge records chat capability, theme results, and keeps only the newest t
   assert.equal(b.snapshot().theme.applied, true);
 });
 
-test('Bridge: after a remount the newest extension host owns the command queue', () => {
-  const b = new Bridge();
-  assert.equal(b.isSuperseded('a'), false, 'nothing said hello yet');
-  b.applyEvent({ type: 'hello', host: 'old', chat: { participant: true, defaultParticipant: true, model: true } });
-  assert.equal(b.isSuperseded('old'), false);
-  b.applyEvent({ type: 'hello', host: 'new' });
-  assert.equal(b.isSuperseded('old'), true);
-  assert.equal(b.isSuperseded('new'), false);
-  assert.equal(b.isSuperseded(null), false, 'an extension without host ids is never refused');
+test('Bridge: each window takes its own commands; a tab\'s commands go to its newest window, and a reloaded window\'s old host gets none', async () => {
+  let t = 1000;
+  const b = new Bridge({ now: () => t });
+  const T1 = 't000000000001';
+  const T2 = 't000000000002';
+  b.applyEvent({ type: 'hello', host: 'old', tab: T1, workspaceFolders: ['/w/a'], chat: { participant: true, defaultParticipant: true, model: true } });
+  t += 10;
+  b.applyEvent({ type: 'hello', host: 'other', tab: T2, workspaceFolders: ['/w/b'] });
+  t += 10;
+  b.applyEvent({ type: 'hello', host: 'new', workspaceFolders: ['/w/a'] }); // the reloaded window, before its view said which tab it is
+  b.applyEvent({ type: 'tab', tab: T1 }, 'new');
+  assert.equal(b.hostForTab(T1), 'new', 'the newest window on the tab');
+  assert.equal(b.hostForTab(T2), 'other');
+  b.enqueue({ kind: 'openFile', path: '/w/a/x' }, 50, { tab: T1, folder: '/w/a' });
+  b.enqueue({ kind: 'openFile', path: '/w/b/y' }, 50, { tab: T2, folder: '/w/b' });
+  assert.deepEqual((await b.take(0, undefined, 'old')).map((c) => c.path), [], 'the old host of a reloaded window gets nothing');
+  assert.deepEqual((await b.take(0, undefined, 'other')).map((c) => c.path), ['/w/b/y']);
+  assert.deepEqual((await b.take(0, undefined, 'new')).map((c) => c.path), ['/w/a/x']);
+  // A command for one host waits for that host's poll, and a waiting poll gets it at once.
+  const waiting = b.take(1000, undefined, 'other');
+  b.enqueue({ kind: 'revealCrewView' }, 50, { host: 'new' });
+  b.enqueue({ kind: 'revealCrewView', n: 2 }, 50, { host: 'other' });
+  assert.deepEqual((await waiting).map((c) => c.n), [2]);
+  assert.equal(b.queue.length, 1);
+  // A tab with no window yet: its command waits; a window on its folder that has not said its tab takes it.
+  const T3 = 't000000000003';
+  b.enqueue({ kind: 'openFile', path: '/w/c/z' }, 50, { tab: T3, folder: '/w/c' });
+  assert.deepEqual((await b.take(0, undefined, 'other')).map((c) => c.path), []);
+  t += 10;
+  b.applyEvent({ type: 'hello', host: 'c', workspaceFolders: ['/w/c/'] });
+  assert.deepEqual((await b.take(0, undefined, 'c')).map((c) => c.path), ['/w/c/z']);
+  // broadcast: one copy per live window; the theme keeps only the newest per window.
+  b.queue.length = 0;
+  b.broadcast({ kind: 'applyTheme', theme: { signature: '1' } });
+  b.broadcast({ kind: 'applyTheme', theme: { signature: '2' } });
+  assert.equal(b.queue.length, 4, 'old, other, new, c');
+  assert.deepEqual((await b.take(0, undefined, 'new')).map((c) => c.theme.signature), ['2']);
+  // Untargeted commands go to the newest live window only.
+  b.queue.length = 0;
+  b.enqueue({ kind: 'secretProbe', op: 'get' }, 50);
+  assert.deepEqual((await b.take(0, undefined, 'new')).length, 0);
+  assert.deepEqual((await b.take(0, undefined, 'c')).map((c) => c.kind), ['secretProbe']);
+  // A host that has not polled for a minute is not live: it neither gets broadcasts nor holds tab commands.
+  t += 61_000;
+  b.seeHost('other');
+  assert.equal(b.broadcast({ kind: 'kcChanged' }).length, 1);
+  // The per-window editor: /api/state for a tab reports that tab's window.
+  b.applyEvent({ type: 'editor', path: '/w/b/y' }, 'other');
+  assert.equal(b.snapshot(T2).activeEditor.path, '/w/b/y');
+  assert.equal(b.snapshot(T1).activeEditor, null, 'no live window on the tab, so no editor for it');
   b.applyEvent({ type: 'theme', signature: 's', applied: true, changed: false, readBack: { colorTheme: 'Dark Modern', editorBackground: '#000000', count: '3' } });
   assert.deepEqual(b.theme.readBack, { colorTheme: 'Dark Modern', editorBackground: '#000000', count: 3 });
+  // A server restart ends every extension host.
+  b.resetConnection();
+  assert.equal(b.hosts.size, 0);
 });
 
 test('buildServerArgs enables proposed API only for well-formed extension ids', () => {

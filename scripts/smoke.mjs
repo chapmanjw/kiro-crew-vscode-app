@@ -58,9 +58,11 @@ const GATEWAY_SAFE_ENV = new Set([
   'JAVA_HOME', 'NODE_PATH', 'NVM_DIR', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_DEFAULT_ENV', 'CONDA_PREFIX', 'ANT_HOME',
   'GRADLE_USER_HOME', 'MAVEN_OPTS', 'GIT_SSH', 'GIT_SSH_COMMAND',
 ]);
+// The tab that opens by default would take the Chat tab's place while the Chat checks run; the tab checks open it themselves.
+const NO_AUTO_OPEN = { KIROCREW_VSCODE_OPEN_BY_DEFAULT: '0' };
 function launcherBaseEnv() {
-  if (!MINIMAL_ENV) return { ...process.env };
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => GATEWAY_SAFE_ENV.has(k.toUpperCase())));
+  if (!MINIMAL_ENV) return { ...process.env, ...NO_AUTO_OPEN };
+  return { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => GATEWAY_SAFE_ENV.has(k.toUpperCase()))), ...NO_AUTO_OPEN };
 }
 
 /** Names (never values) of the user's own HKCU variables the gateway does not pass on. */
@@ -237,7 +239,7 @@ function portOpen(port) {
 // Round-2 UI checks, run in the stand-in dashboard once VS Code is up:
 // the inset rounded card, theme sync, the frame surviving an unmount, and the
 // composer's VS Code chip opening the chat's project folder.
-async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads }) {
+async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads, api, gatewayMock }) {
   const HEX = /^#[0-9a-f]{6}$/;
 
   // Item 1: the card matches the Sessions panel card and the frame is clipped to
@@ -278,7 +280,8 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
       railShape: [Math.round(rl.top - mr.top), Math.round(mr.left - rl.right), rs.marginBottom].join(' '),
       clip: host.style.clipPath,
       // Frame edges against the card's inner edges and the toolbar's bottom: 0 = no seam, no overlap.
-      seams: [hr.top - br.bottom, hr.left - (r.left + 1), (r.right - 1) - hr.right, (r.bottom - 1) - hr.bottom].map(r1),
+      // The frame runs down over the card's bottom border, so its bottom is the card's outer edge.
+      seams: [hr.top - br.bottom, hr.left - (r.left + 1), (r.right - 1) - hr.right, r.bottom - hr.bottom].map(r1),
       bar: r1(br.height),
       barTop: r1(br.top - r.top),
       // The toolbar's bottom border (its last 1px) and its content centre, from the card's outer top.
@@ -424,7 +427,14 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
   check('the same editor is still open in the workbench', activeBefore && path.basename(activeBefore).toLowerCase() === path.basename(target).toLowerCase() && /hello\.txt/i.test(tab),
     `active ${activeBefore && path.basename(activeBefore)}, tab "${tab}"`);
 
-  // Item 4: the composer chip opens VS Code on the chat's project folder.
+  // Item 4: the composer chip opens a tab for the chat on its project folder,
+  // whose Kiro Crew view shows that chat, and the chip again brings the same tab back.
+  const CHAT_KEY = 'dashboard:chat-1';
+  // The chip hands over the prefixed key; the page and the embed carry its slot name.
+  const CHAT_SLOT = 'chat-1';
+  const tabsNow = () => page.evaluate(() => [...document.querySelectorAll('[data-testid="vscode-pane-tab"]')].map((t) => ({ id: t.dataset.tabId, session: t.dataset.session, active: t.dataset.active === 'true' })));
+  const tabsBefore = await tabsNow();
+  const workspaceTab = tabsBefore.find((t) => t.active);
   await page.click('#nav-chat');
   await page.locator('[data-testid="composer-context-shelf"] [data-chip-id^="vscode-pane:"]').click({ timeout: 5000 });
   let landed = '';
@@ -434,17 +444,20 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     if (landed.startsWith('/apps/vscode-pane?folder=')) break;
     await sleep(200);
   }
-  check('composer VS Code chip navigates to the app page with ?folder=<chat project>', landed === `/apps/vscode-pane?folder=${encodeURIComponent(chatProject)}`, landed);
+  check('composer VS Code chip navigates to the app page with ?folder=<chat project>&session=<chat>', landed === `/apps/vscode-pane?folder=${encodeURIComponent(chatProject)}&session=${encodeURIComponent(CHAT_SLOT)}`, landed);
   let src = '';
-  let folderValue = '';
+  let chatTab = null;
   const t2 = Date.now();
   while (Date.now() - t2 < 20_000) {
+    chatTab = (await tabsNow()).find((x) => x.session === CHAT_SLOT && x.active) || null;
     src = (await page.locator('iframe[title="VS Code"]').getAttribute('src').catch(() => '')) || '';
-    folderValue = await page.locator('#vscp-folder').inputValue().catch(() => '');
-    if (src.includes(`folder=`) && decodeURIComponent(src.split('folder=')[1] || '').replace(/\//g, '\\').toLowerCase().endsWith(path.basename(chatProject).toLowerCase())) break;
+    if (chatTab && /chat-project$/i.test(new URL(src, 'http://x').searchParams.get('folder') || '')) break;
     await sleep(300);
   }
-  check('the page takes the folder param and the frame loads that folder', folderValue === chatProject && /chat-project$/i.test(decodeURIComponent(src.split('folder=')[1] || '')), `input ${folderValue}; src folder ${decodeURIComponent(src.split('folder=')[1] || '').slice(-40)}`);
+  const tabsAfter = await tabsNow();
+  check('the chip opens a new tab for the chat, in front, and its frame loads the chat\'s folder with its tab id',
+    !!chatTab && tabsAfter.length === tabsBefore.length + 1 && /chat-project$/i.test(new URL(src, 'http://x').searchParams.get('folder') || '') && new URL(src, 'http://x').searchParams.get('vscpTab') === chatTab.id,
+    `${JSON.stringify(tabsAfter)}; src ${src.replace(/vsc-[^/]+/, 'vsc-<key>').slice(-90)}`);
   let explorer = '';
   const t3 = Date.now();
   while (Date.now() - t3 < 60_000) {
@@ -458,6 +471,96 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     await sleep(1000);
   }
   check('VS Code shows the chat project in its explorer', /from-chat\.md/i.test(explorer), explorer.slice(0, 80));
+  // The chat tab's Kiro Crew view shows that chat, not the session list, and no session was made for it.
+  for (let i = 0; i < 40; i++) {
+    const s = (await api('GET', '/api/session')).json;
+    if (s && s.kc && s.kc.connected) break;
+    await sleep(500);
+  }
+  const slotsBefore = gatewayMock.rec.slots.size;
+  await frame.locator('[aria-label="Open the Kiro Crew chat"]').first().click({ timeout: 20_000 }).catch(() => {});
+  /** The tunnelled /embed/ frame inside one tab's window, or null. */
+  const embedInTab = async (tabId) => {
+    const el = await page.$(`div[data-vscode-pane-frame-host] iframe[data-tab="${tabId}"]`);
+    const root = el && (await el.contentFrame());
+    if (!root) return null;
+    return page.frames().find((f) => {
+      if (!/^http:\/\/[0-9a-f]{32}\.localhost:\d+\/embed\//.test(f.url())) return false;
+      for (let p = f.parentFrame(); p; p = p.parentFrame()) if (p === root) return true;
+      return false;
+    }) || null;
+  };
+  let chatEmbed = '';
+  const t4 = Date.now();
+  while (chatTab && Date.now() - t4 < 30_000) {
+    const ef = await embedInTab(chatTab.id);
+    chatEmbed = ef ? ef.url() : '';
+    if (chatEmbed.includes('/embed/chat/')) break;
+    await sleep(500);
+  }
+  check('the chat tab\'s Kiro Crew view frames that chat (/embed/chat/<key>?sid=<key>) and creates no session',
+    chatEmbed.endsWith(`/embed/chat/${encodeURIComponent(CHAT_SLOT)}?sid=${encodeURIComponent(CHAT_SLOT)}`) && gatewayMock.rec.slots.size === slotsBefore,
+    `${chatEmbed.replace(/^http:\/\/[0-9a-f]{6}[0-9a-f]*/, 'http://<tunnel>')}; slots ${slotsBefore} -> ${gatewayMock.rec.slots.size}`);
+  // Switching tabs shows the other window and reloads nothing.
+  const loadsAtSwitch = await page.evaluate(() => window.__vscodePane.loads);
+  const docLoadsAtSwitch = getLoads();
+  if (workspaceTab) await page.click(`[data-testid="vscode-pane-tab"][data-tab-id="${workspaceTab.id}"] [role="tab"]`);
+  await sleep(1500);
+  const shown = await page.evaluate(() => {
+    const frames = [...document.querySelectorAll('div[data-vscode-pane-frame-host] iframe')];
+    return { frames: frames.length, shown: frames.filter((f) => getComputedStyle(f).visibility === 'visible').map((f) => f.dataset.tab), titled: frames.filter((f) => f.title === 'VS Code').map((f) => f.dataset.tab) };
+  });
+  check('clicking the first tab shows its window again; both windows stay loaded and nothing reloads',
+    !!workspaceTab && shown.frames === 2 && shown.shown.length === 1 && shown.shown[0] === workspaceTab.id && shown.titled[0] === workspaceTab.id &&
+      (await page.evaluate(() => window.__vscodePane.loads)) === loadsAtSwitch && getLoads() === docLoadsAtSwitch,
+    JSON.stringify(shown));
+  // The chip again: the chat's tab comes back, no new tab.
+  await page.click('#nav-chat');
+  await page.locator('[data-testid="composer-context-shelf"] [data-chip-id^="vscode-pane:"]').click({ timeout: 5000 });
+  let back2 = null;
+  const t5 = Date.now();
+  while (Date.now() - t5 < 15_000) {
+    const now = await tabsNow().catch(() => []);
+    if (now.length && now.find((x) => x.session === CHAT_SLOT && x.active)) {
+      back2 = now;
+      break;
+    }
+    await sleep(300);
+  }
+  check('the chip again brings back the chat\'s tab instead of opening another, with no reload', !!back2 && back2.length === tabsAfter.length && (await page.evaluate(() => window.__vscodePane.loads)) === loadsAtSwitch,
+    JSON.stringify(back2));
+  // New tab: its panel offers a folder field and the recent projects; a folder opens a tab of its own, and its x closes it.
+  await page.click('[data-testid="vscode-pane-new-tab"]');
+  const panel = page.locator('[data-testid="vscode-pane-new-tab-panel"]');
+  await panel.waitFor({ timeout: 5000 }).catch(() => {});
+  const recentShown = await panel.locator('.vscp-item').count().catch(() => 0);
+  await page.fill('#vscp-folder', chatProject);
+  await page.keyboard.press('Enter');
+  let added = null;
+  const t6 = Date.now();
+  while (Date.now() - t6 < 10_000) {
+    const now = await tabsNow();
+    if (now.length === tabsAfter.length + 1) {
+      added = now.find((x) => x.active) || null;
+      break;
+    }
+    await sleep(300);
+  }
+  check('New tab opens the typed folder as a new tab in front (even where another tab has that folder), lists the recent projects and closes its panel',
+    !!added && !added.session && recentShown >= 1 && (await panel.count()) === 0, JSON.stringify({ added, recentShown }));
+  if (added) await page.click(`[data-testid="vscode-pane-tab"][data-tab-id="${added.id}"] [data-testid="vscode-pane-tab-close"]`);
+  let gone = false;
+  const t7 = Date.now();
+  while (added && Date.now() - t7 < 10_000) {
+    const now = await tabsNow();
+    const frameLeft = await page.evaluate((id) => !!document.querySelector(`div[data-vscode-pane-frame-host] iframe[data-tab="${id}"]`), added.id);
+    if (now.length === tabsAfter.length && !frameLeft && now.find((x) => x.session === CHAT_SLOT && x.active)) {
+      gone = true;
+      break;
+    }
+    await sleep(300);
+  }
+  check('closing a tab with its x removes the tab and its VS Code window, and the tab to its left comes to the front', gone);
   await sleep(1000);
   const shot = path.join(shotDir, 'pane-dark.png');
   await page.screenshot({ path: shot });
@@ -1053,6 +1156,15 @@ async function main() {
       await sleep(500);
     }
     check('/api/state reports the opened file as active at line 3', active && active.path.toLowerCase() === target.toLowerCase() && active.selection && active.selection.startLine === 3, active && `${active.path}:${active.selection && active.selection.startLine}`);
+    {
+      // The window knows its page tab from its configuration (kiroCrew.paneTab), with
+      // its Kiro Crew view never opened: /api/state for that tab names that window's editor.
+      const sNow = (await api('GET', '/api/session')).json;
+      const front = sNow && sNow.tabs && sNow.tabs.active;
+      const byTab = front ? (await api('GET', `/api/state?tab=${front}`)).json : null;
+      check('the window says which page tab it is from the start (kiroCrew.paneTab), so commands and state follow the tab',
+        !!byTab && byTab.activeEditor && byTab.activeEditor.path.toLowerCase() === target.toLowerCase(), JSON.stringify({ front, active: byTab && byTab.activeEditor }));
+    }
 
     // 10. file-menu contribution endpoint
     const fm = await api('POST', '/api/file-menu', { item_id: 'open-in-vscode', surface: 'file-overflow', path: path.join(workspace, 'other.js'), kind: 'file' });
@@ -1069,26 +1181,40 @@ async function main() {
     }
     check('file-menu request opened other.js in VS Code', otherActive);
 
-    // 11. the same round trip driven from the UI toolbar
-    await page.fill('#vscp-open', target);
-    await page.fill('input[aria-label="Line"]', '2');
-    await page.click('form:has(#vscp-open) button[type="submit"]');
-    let uiOpened = false;
-    try {
-      await page.getByText('Opened in VS Code').waitFor({ timeout: 15_000 });
-      uiOpened = true;
-    } catch {
-      /* reported below */
-    }
-    check('toolbar "Open file" opens the file and shows the confirmation', uiOpened);
+    // 11. the menu shows the active VS Code file and line (the open-file form is gone)
+    const openUi = await api('POST', '/api/open', { path: target, line: 2 });
+    check('POST /api/open with a line opens the file there', openUi.json && openUi.json.ok, JSON.stringify(openUi.json));
     let readout = '';
     const t4 = Date.now();
     while (Date.now() - t4 < 10_000) {
-      readout = (await page.locator('text=/^Active: /').first().textContent().catch(() => '')) || '';
-      if (/hello\.txt:2:/i.test(readout)) break;
+      await page.click('[data-testid="vscode-pane-menu-button"]');
+      readout = (await page.locator('[data-testid="vscode-pane-active-file"]').textContent({ timeout: 1500 }).catch(() => '')) || '';
+      await page.keyboard.press('Escape');
+      if (/hello\.txt:2$/i.test(readout)) break;
       await sleep(500);
     }
-    check('toolbar readout shows the active VS Code file and line', /hello\.txt:2:/i.test(readout), readout);
+    check('the menu shows the active VS Code file and line', /hello\.txt:2$/i.test(readout), readout);
+    {
+      await page.click('[data-testid="vscode-pane-menu-button"]');
+      await sleep(400);
+      await page.screenshot({ path: path.join(ROOT, '.cache', 'smoke', 'menu.png') }).catch(() => {});
+      const items = await page.evaluate(() => {
+        const m = document.querySelector('[data-testid="vscode-pane-menu"]');
+        return m ? { role: m.getAttribute('role'), items: [...m.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent), focused: document.activeElement && document.activeElement.getAttribute('role') } : null;
+      });
+      await page.keyboard.press('Escape');
+      await sleep(200);
+      const closed = await page.locator('[data-testid="vscode-pane-menu"]').count();
+      const refocused = await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-testid'));
+      check('the toolbar menu holds the server and Kiro Crew tab actions, takes focus, and Escape closes it and gives focus back to its button',
+        !!items && items.role === 'menu' && ['Reload this tab', 'Restart the VS Code server', 'Show the Kiro Crew tab in VS Code'].every((x) => items.items.includes(x)) && items.focused === 'menuitem' && closed === 0 && refocused === 'vscode-pane-menu-button',
+        JSON.stringify({ items, closed, refocused }));
+      const bar = await page.evaluate(() => {
+        const t = document.querySelector('[role="toolbar"]');
+        return { inputs: t.querySelectorAll('input').length, text: t.innerText.replace(/\s+/g, ' ').trim() };
+      });
+      check('the toolbar holds only the tabs, New tab and the menu (no folder or open-file inputs)', bar.inputs === 0 && !/Open file|Restart server|Reload/.test(bar.text), JSON.stringify(bar));
+    }
 
     // 12. screenshot
     await sleep(1500);
@@ -1098,7 +1224,7 @@ async function main() {
     await page.screenshot({ path: shot });
     check('screenshot saved', fs.existsSync(shot), shot);
 
-    await uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads: () => workbenchLoads });
+    await uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads: () => workbenchLoads, api, gatewayMock });
 
     // The composer chip left the pane on the chat project (and remembered it);
     // take it back to the workspace folder with hello.txt open for steps 13-15.
@@ -1196,6 +1322,25 @@ async function main() {
       const back2 = await api('POST', '/api/open', { path: target, line: 2 });
       check('hello.txt reopened for the restart check', back2.json && back2.json.ok);
       await sleep(3000); // let the workbench flush its storage
+    }
+
+    // 14a. a remote crew's viewer: with the frame port unreachable from the browser
+    //      (the probe never answers), the page asks the launcher whether the gateway
+    //      relays the app's web origin on this port. The gateway mock has no such
+    //      relay, so the check says so and the page shows what to do, not a blank pane.
+    {
+      await page.route('**/_vscp-probe', (route) => route.abort());
+      await page.reload();
+      const advice = page.locator('[data-testid="vscode-pane-origin-advice"]');
+      await advice.waitFor({ timeout: 30_000 }).catch(() => {});
+      const text = (await advice.innerText().catch(() => '')) || '';
+      check('a viewer that cannot reach the frame port gets the web origin check\'s advice instead of a blank pane', /web address/i.test(text) && /Check again/.test(text), text.slice(0, 160));
+      const chk = (await api('GET', `/api/web-origin?port=${new URL(page.url()).port || 80}`)).json;
+      check('GET /api/web-origin answers with a state and the .env file it would change', !!chk && typeof chk.state === 'string' && chk.state !== 'ok' && typeof chk.envFile === 'string', JSON.stringify(chk));
+      await page.unroute('**/_vscp-probe');
+      await page.reload();
+      await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
+      await sleep(3000);
     }
 
     // 14b. restart the backend while the page stays open (an app disable and

@@ -27,12 +27,18 @@
 // refreshes run one at a time (a replayed refresh revokes the chain,
 // remote-and-mobile.md:702-706), frame-ancestors names the exact chain, and
 // Referrer-Policy is no-referrer because the host name is the capability.
+//
+// Embed pages. The dashboard's /embed/ pages get one script tag (embedboot.mjs)
+// that points the embed at the chat its own URL names, so each VS Code tab's view
+// shows its own chat. The script is served from this origin at EMBED_BOOT_PATH and
+// is never forwarded to the gateway. It holds no secret.
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { restrictToUser } from './secretkey.mjs';
+import { EMBED_BOOT_PATH, EMBED_BOOT_SOURCE, embedBootTag, insertHeadTag, isEmbedPath } from './embedboot.mjs';
 
 const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade']);
 const DROP_REQ = new Set(['cookie', 'origin', 'host', 'referer', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'accept-encoding']);
@@ -216,11 +222,15 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     onChange();
   };
 
-  function gate(req) {
+  // `shared`: the request came in on the app's web origin (the gateway's relay,
+  // <app>.apps.localhost, which the launcher has already checked and gated by its
+  // viewer cookie), so the Host is the one it was served under and the Origin
+  // must be that same host. Otherwise the tunnel's own random-label origin.
+  function gate(req, shared = false) {
     const host = String(req.headers.host || '').toLowerCase();
-    if (!port || host !== publicHost()) return 'host';
+    if (!port || (!shared && host !== publicHost())) return 'host';
     const origin = req.headers.origin;
-    if (origin !== undefined && origin !== publicOrigin()) return 'origin';
+    if (origin !== undefined && origin !== (shared ? `http://${host}` : publicOrigin())) return 'origin';
     const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     if (mutating && origin === undefined) return 'origin-missing';
     return null;
@@ -287,6 +297,11 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     return i < 0 ? tag + html : html.slice(0, i) + tag + html.slice(i);
   }
 
+  /** The page as the tunnel serves it: the embed bootstrap on the embed pages, and the theme sheet. */
+  function decorate(html, pathname) {
+    return injectCss(isEmbedPath(pathname) ? insertHeadTag(html, embedBootTag()) : html);
+  }
+
   /** Forward one request upstream; resolves when the response is finished. */
   function forward(req, res, pathname, body) {
     const startEpoch = epoch;
@@ -301,7 +316,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
           const sessionCheck = /^\/api\/auth\/(refresh|me)$/i.test(pathname) && !/[?&]token=/.test(req.url);
           if (upRes.statusCode === 401 && sessionCheck && startEpoch === epoch) dropSession(`${pathname} answered 401`);
           const h = rewriteHeaders(upRes.headers, startEpoch);
-          const html = String(h['content-type'] || '').startsWith('text/html') && !h['content-encoding'] && cssNow();
+          const html = String(h['content-type'] || '').startsWith('text/html') && !h['content-encoding'] && (cssNow() || isEmbedPath(pathname));
           if (!html) {
             res.writeHead(upRes.statusCode || 502, h);
             upRes.pipe(res);
@@ -312,7 +327,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
           const chunks = [];
           upRes.on('data', (c) => chunks.push(c));
           upRes.on('end', () => {
-            const out = Buffer.from(injectCss(Buffer.concat(chunks).toString('utf8')), 'utf8');
+            const out = Buffer.from(decorate(Buffer.concat(chunks).toString('utf8'), pathname), 'utf8');
             delete h['transfer-encoding'];
             h['content-length'] = String(out.length);
             res.writeHead(upRes.statusCode || 502, h);
@@ -340,8 +355,8 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     return run;
   }
 
-  const server = http.createServer((req, res) => {
-    const refused = gate(req);
+  function handleRequest(req, res, shared = false) {
+    const refused = gate(req, shared);
     const pathname = normalPath(req.url) || '/';
     if (refused) {
       log(`kc refused ${req.method} ${pathname} (${refused})`);
@@ -360,6 +375,17 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     if (pathname === '/sw.js') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       return res.end();
+    }
+    if (pathname === EMBED_BOOT_PATH && (req.method === 'GET' || req.method === 'HEAD')) {
+      // Answered here, not by the gateway: the script is the same for every session and holds no secret.
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'content-length': String(Buffer.byteLength(EMBED_BOOT_SOURCE)),
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
+      });
+      return res.end(req.method === 'HEAD' ? undefined : EMBED_BOOT_SOURCE);
     }
     if (req.method === 'POST' && /^\/api\/auth\/refresh$/i.test(pathname)) {
       // Buffer the (small) body, then forward after any refresh in flight, so
@@ -387,14 +413,16 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
       return;
     }
     forward(req, res, pathname);
-  });
+  }
+
+  const server = http.createServer((req, res) => handleRequest(req, res, false));
 
   // Upgraded sockets leave the HTTP server's books; close() ends them itself.
   const sockets = new Set();
-  server.on('upgrade', (req, socket, head) => {
+  function handleUpgrade(req, socket, head, shared = false) {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    const refused = gate(req);
+    const refused = gate(req, shared);
     const pathname = normalPath(req.url) || '/';
     if (refused || denied(req.url, 'GET')) {
       log(`kc refused WebSocket ${pathname} (${refused || 'denied'})`);
@@ -423,7 +451,8 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     socket.on('error', close);
     upstream.on('close', () => socket.destroy());
     socket.on('close', () => upstream.destroy());
-  });
+  }
+  server.on('upgrade', (req, socket, head) => handleUpgrade(req, socket, head, false));
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
 
@@ -458,6 +487,9 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
 
   return {
     server,
+    /** Serve one request that arrived on the app's web origin (the launcher has vetted its Host and viewer). */
+    serveShared: (req, res) => handleRequest(req, res, true),
+    upgradeShared: (req, socket, head) => handleUpgrade(req, socket, head, true),
     listen(preferred, host = '127.0.0.1') {
       const tryPort = (p, fallback) =>
         new Promise((resolve, reject) => {

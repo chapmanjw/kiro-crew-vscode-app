@@ -207,6 +207,7 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
 <script type="importmap">${JSON.stringify({
     imports: {
       react: 'https://esm.sh/react@18.3.1',
+      'react-dom': 'https://esm.sh/react-dom@18.3.1',
       'react-dom/client': 'https://esm.sh/react-dom@18.3.1/client',
       '@kirocrew/app-sdk': '/sdk.mjs',
     },

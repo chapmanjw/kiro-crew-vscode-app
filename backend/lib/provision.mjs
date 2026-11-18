@@ -136,12 +136,16 @@ export function locateBuildRoot(dir, exists = fs.existsSync, platform = process.
  * Staged under a temp name and renamed into place so a half-unpacked build is
  * never picked up by discovery.
  */
-export async function provisionServer({ metadataUrl, dataDir, commit, onStatus, allowHttp = false }) {
+function nameFromMeta(meta) {
+  const name = meta && (meta.name || meta.productVersion);
+  return typeof name === 'string' && /^\d+\.\d+\.\d+/.test(name) ? name : null;
+}
+
+export async function provisionServer({ metadataUrl, dataDir, commit, onStatus, onInstalled, allowHttp = false }) {
   const root = path.join(dataDir, 'server');
-  const final = path.join(root, commit);
   fs.mkdirSync(root, { recursive: true });
   const stamp = `${process.pid}-${Date.now()}`;
-  const archive = path.join(root, `.download-${stamp}.zip`);
+  const archive = path.join(root, `.download-${stamp}.archive`);
   const staging = path.join(root, `.staging-${stamp}`);
   try {
     // The update service answers with the archive URL and its SHA-256.
@@ -150,7 +154,17 @@ export async function provisionServer({ metadataUrl, dataDir, commit, onStatus, 
     if (!meta || typeof meta.url !== 'string' || !/^[0-9a-f]{64}$/i.test(meta.sha256hash || '')) {
       throw new Error('update service returned no download URL or SHA-256');
     }
-    if (meta.version && meta.version !== commit) throw new Error(`update service returned commit ${meta.version}, expected ${commit}`);
+    // With no commit asked for (the latest-build lookup), the service names the
+    // build it chose in `version`.
+    if (!commit) {
+      if (!/^[0-9a-f]{40}$/i.test(meta.version || '')) throw new Error('update service returned no commit for the latest build');
+      commit = meta.version.toLowerCase();
+    } else if (meta.version && meta.version !== commit) {
+      throw new Error(`update service returned commit ${meta.version}, expected ${commit}`);
+    }
+    const final = path.join(root, commit);
+    // A build already in place is used as it is: no download, and nothing is replaced under a server that may run it.
+    if (isServerBuild(final, fs.existsSync)) return final;
     let last = 0;
     await downloadFile(meta.url, archive, {
       allowHttp,
@@ -169,6 +183,7 @@ export async function provisionServer({ metadataUrl, dataDir, commit, onStatus, 
     if (!buildRoot) throw new Error('downloaded archive does not contain a VS Code server build');
     fs.rmSync(final, { recursive: true, force: true });
     fs.renameSync(buildRoot, final);
+    onInstalled?.({ commit, name: nameFromMeta(meta) });
     return final;
   } finally {
     fs.rmSync(archive, { force: true });
