@@ -54,7 +54,7 @@ import {
   baseName,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.6.3.mjs';
+} from './vscode-pane-core-0.6.4.mjs';
 
 const { useAppApi, useTheme } = sdk;
 // The dashboard's session titles label the tabs opened from chats, when the
@@ -93,7 +93,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-6-3';
+const STYLE_ID = 'vscode-pane-style-0-6-4';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to

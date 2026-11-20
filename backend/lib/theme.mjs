@@ -6,7 +6,15 @@
 // builds called Default Dark Modern / Default Light Modern) plus a full
 // `workbench.colorCustomizations` object. The bridge extension writes that to
 // the user's settings; the launcher also seeds it into the server's Machine
-// settings so the first paint is already themed. Pure functions only.
+// settings so the first paint is already themed. Both scope the palette to the
+// base theme and leave a colour theme the user picked in VS Code alone; the
+// rules are in extension/kiro-crew-bridge/theme.js, which the extension and this
+// file share. Pure functions only.
+
+import { createRequire } from 'node:module';
+
+const { scopedPalette, kiroCrewOwnsTheme } = createRequire(import.meta.url)('../../extension/kiro-crew-bridge/theme.js');
+export { scopedPalette, kiroCrewOwnsTheme };
 
 /**
  * Variables we accept. The first seven are the contract; the rest are other
@@ -183,7 +191,8 @@ export function derivePalette({ kind, vars }) {
  */
 export function toVsCodeTheme(theme) {
   // Tier "base": the stock theme and an empty customization set, which tells
-  // the bridge to clear whatever palette an earlier theme left behind.
+  // the bridge to replace whatever palette an earlier theme left behind with
+  // an empty one (scopedPalette keeps the scope key).
   if (theme.tier === 'base' || !theme.vars) {
     return { colorTheme: BASE_THEMES[theme.kind], colorCustomizations: {}, tier: 'base' };
   }
@@ -401,6 +410,13 @@ export function themeSignature(vsTheme) {
  * Seed the server's Machine settings.json with the theme (window-scoped
  * settings from the remote's Machine settings apply on first paint). Other
  * settings are kept; returns null when the file is not plain JSON.
+ *
+ * VS Code writes a colour theme the user picks into this same file (a setting
+ * the file already holds is edited where it is). So the file's colour theme is
+ * replaced only while it is still the one Kiro Crew set (kiroCrewOwnsTheme),
+ * and a pick survives a launcher start and a theme change. The palette is
+ * always rewritten, scoped to the base theme, so it never colours another
+ * theme; a flat palette an earlier build wrote is replaced by the scoped one.
  */
 export function seedThemeSettings(existingText, vsTheme, extra = {}) {
   let obj = {};
@@ -413,12 +429,10 @@ export function seedThemeSettings(existingText, vsTheme, extra = {}) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   }
   if (vsTheme) {
-    obj['workbench.colorTheme'] = vsTheme.colorTheme;
-    if (vsTheme.colorCustomizations && Object.keys(vsTheme.colorCustomizations).length) {
-      obj['workbench.colorCustomizations'] = vsTheme.colorCustomizations;
-    } else {
-      delete obj['workbench.colorCustomizations']; // tier "base": no stale palette in the seed
-    }
+    // Decided before the palette is replaced: its scope key records which theme Kiro Crew set last.
+    if (kiroCrewOwnsTheme(obj['workbench.colorTheme'], obj['workbench.colorCustomizations'])) obj['workbench.colorTheme'] = vsTheme.colorTheme;
+    // Tier "base" has no palette: the scope key stays, empty, so no stale palette lingers and the record does.
+    obj['workbench.colorCustomizations'] = scopedPalette(vsTheme.colorTheme, vsTheme.colorCustomizations);
   }
   Object.assign(obj, extra);
   return JSON.stringify(obj, null, 2) + '\n';

@@ -115,7 +115,9 @@ test('seedThemeSettings writes the theme and chat settings and keeps other setti
   const out = JSON.parse(seedThemeSettings('{"editor.fontSize": 15}', vs, { 'chat.titleBar.signIn.enabled': false }));
   assert.equal(out['editor.fontSize'], 15);
   assert.equal(out['workbench.colorTheme'], 'Dark Modern');
-  assert.equal(out['workbench.colorCustomizations']['editor.background'], '#282a36');
+  // The palette is scoped to the base theme, so it never colours a theme the user picks.
+  assert.deepEqual(Object.keys(out['workbench.colorCustomizations']), ['[Dark Modern]']);
+  assert.equal(out['workbench.colorCustomizations']['[Dark Modern]']['editor.background'], '#282a36');
   assert.equal(out['chat.titleBar.signIn.enabled'], false);
   assert.equal(seedThemeSettings('// comment\n{}', vs), null, 'a file with comments is left alone');
   const noTheme = JSON.parse(seedThemeSettings('', null, { a: 1 }));
@@ -482,7 +484,8 @@ test('switching palette -> base removes the palette from the seeded settings', (
   const base = toVsCodeTheme(resolveTheme({ kind: 'light' }).theme);
   const after = JSON.parse(seedThemeSettings(seeded, base));
   assert.equal(after['workbench.colorTheme'], 'Light Modern');
-  assert.equal('workbench.colorCustomizations' in after, false, 'no stale palette lingers');
+  // No stale palette lingers. The scope key stays, empty: it is what says Kiro Crew chose Light Modern.
+  assert.deepEqual(after['workbench.colorCustomizations'], { '[Light Modern]': {} });
   assert.equal(after['editor.fontSize'], 14);
   assert.notEqual(themeSignature(palette), themeSignature(base));
 });
@@ -535,7 +538,7 @@ test('launcher: POST /api/theme moves between tiers, clears the palette and repo
     assert.equal(p2.json.theme.tier, 'base');
     assert.match(p2.json.theme.reason, /contrast/);
     assert.equal(machine()['workbench.colorTheme'], 'Dark Modern');
-    assert.equal('workbench.colorCustomizations' in machine(), false);
+    assert.deepEqual(machine()['workbench.colorCustomizations'], { '[Dark Modern]': {} }, 'the palette is gone and the scope key stays, empty');
     session = await fetch(`${base}/api/session`).then((r) => r.json());
     assert.deepEqual(session.theme, { kind: 'dark', tier: 'base' });
 

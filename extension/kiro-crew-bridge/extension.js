@@ -10,12 +10,14 @@
 // runs it as a turn in a real Kiro Crew chat session for the open folder and
 // streams the reply back. Without the proposal the same handler answers
 // `@kirocrew`. The launcher also sends the Kiro Crew colour theme, which is
-// written to the user settings only when it differs.
+// written to the user settings only when it differs, and never over a colour
+// theme the user picked in VS Code (theme.js).
 'use strict';
 
 const vscode = require('vscode');
 const http = require('http');
 const sessions = require('./sessions');
+const kiroCrewTheme = require('./theme');
 
 const BRIDGE_URL = process.env.KIROCREW_VSCODE_BRIDGE_URL || '';
 const BRIDGE_SECRET = process.env.KIROCREW_VSCODE_BRIDGE_SECRET || '';
@@ -304,7 +306,7 @@ async function runCommand(cmd) {
       await vscode.commands.executeCommand('revealInExplorer', uri);
       return;
     case 'applyTheme':
-      return applyTheme(cmd.theme);
+      return kiroCrewTheme.applyTheme({ vscode, payload: cmd.theme, postEvent, log });
     case 'askChat': {
       // Opens the Chat view and submits the prompt there. With the Kiro Crew
       // session type as the default the chat is a Kiro Crew session and its
@@ -391,6 +393,12 @@ async function pollLoop() {
   }
 }
 
+/** The path of the `.code-workspace` file this window is on, or null (a folder, or an untitled workspace). */
+function workspaceFilePath() {
+  const f = vscode.workspace.workspaceFile;
+  return f && f.scheme === 'file' ? f.fsPath : null;
+}
+
 function sendHello() {
   return postEvent({
     type: 'hello',
@@ -401,6 +409,9 @@ function sendHello() {
     // The vscode-pane page's tab this window is (null before it is known), so a restarted launcher learns it again.
     tab: typeof paneTab === 'string' ? paneTab : null,
     workspaceFolders: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath),
+    // The `.code-workspace` file this window is on, so the launcher knows a window on a workspace
+    // is still on the folder that holds the file (null for a folder, or a workspace not saved on disk).
+    workspaceFile: workspaceFilePath(),
     // Whether this extension host (and so the server process) still carries the
     // gateway's process-tracking variable. A boolean only, never the value.
     spawnTracked: !!process.env.KIROCREW_SPAWN_INSTANCE,
@@ -412,77 +423,10 @@ function sendHello() {
 }
 
 // ---------------------------------------------------------------- theme
-
-function stable(v) {
-  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
-  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}`;
-  return JSON.stringify(v === undefined ? null : v);
-}
-
-/**
- * The id this VS Code uses for a built-in theme. 1.146 contributes "Dark
- * Modern"/"Light Modern" where older builds had "Default Dark Modern"/"Default
- * Light Modern", and the workbench rewrites a setting that names the other
- * form, which would make every check look like a change.
- */
-function resolveThemeId(name) {
-  const ids = new Set();
-  for (const ext of vscode.extensions.all) {
-    for (const th of ext.packageJSON?.contributes?.themes || []) if (th.id || th.label) ids.add(th.id || th.label);
-  }
-  const bare = name.replace(/^Default /, '');
-  for (const candidate of [name, bare, `Default ${bare}`]) if (ids.has(candidate)) return candidate;
-  return name;
-}
-
-/**
- * Write the Kiro Crew theme into the user settings, only where it differs, so
- * an unchanged theme never touches settings.json.
- */
-async function applyTheme(payload) {
-  if (!payload || typeof payload.colorTheme !== 'string' || !payload.colorCustomizations || typeof payload.colorCustomizations !== 'object') {
-    throw new Error('bad theme payload');
-  }
-  const t = { ...payload, colorTheme: resolveThemeId(payload.colorTheme) };
-  const cfg = vscode.workspace.getConfiguration();
-  const target = vscode.ConfigurationTarget.Global;
-  let changed = false;
-  const why = [];
-  try {
-    const curTheme = cfg.inspect('workbench.colorTheme')?.globalValue;
-    if (curTheme !== t.colorTheme) {
-      why.push(`colorTheme ${curTheme} -> ${t.colorTheme}`);
-      await cfg.update('workbench.colorTheme', t.colorTheme, target);
-      changed = true;
-    }
-    // Tier "base" sends no customizations: the stock theme only, so an earlier
-    // palette is removed from the user settings rather than left behind.
-    const wanted = Object.keys(t.colorCustomizations).length ? t.colorCustomizations : null;
-    const curCust = cfg.inspect('workbench.colorCustomizations')?.globalValue;
-    const current = curCust && typeof curCust === 'object' && Object.keys(curCust).length ? curCust : null;
-    if (stable(current) !== stable(wanted)) {
-      const keys = current ? Object.keys(current) : [];
-      const diff = wanted ? Object.keys(wanted).find((k) => !current || current[k] !== wanted[k]) || keys.find((k) => !(k in wanted)) : '(cleared)';
-      why.push(`colorCustomizations ${keys.length} keys -> ${wanted ? Object.keys(wanted).length : 0}, first difference ${diff}`);
-      await cfg.update('workbench.colorCustomizations', wanted ?? undefined, target);
-      changed = true;
-    }
-    log(`theme ${changed ? 'applied' : 'unchanged'} (${t.colorTheme})${why.length ? ': ' + why.join('; ') : ''}`);
-    // Read the settings back from a fresh configuration snapshot, so the
-    // launcher (and its smoke test) sees what VS Code itself now holds.
-    const now = vscode.workspace.getConfiguration();
-    const cust = now.get('workbench.colorCustomizations') || {};
-    const readBack = {
-      colorTheme: now.get('workbench.colorTheme'),
-      editorBackground: cust['editor.background'] || null,
-      count: Object.keys(cust).length,
-    };
-    await postEvent({ type: 'theme', signature: t.signature, applied: true, changed, readBack });
-  } catch (e) {
-    await postEvent({ type: 'theme', signature: t.signature, applied: false, error: e.message });
-    throw e;
-  }
-}
+//
+// ./theme.js writes the theme, and decides whether a colour theme the user
+// picked in VS Code is left alone. The launcher's seed of the Machine settings
+// follows the same rules. runCommand calls it for the launcher's `applyTheme`.
 
 // ---------------------------------------------------------------- chat
 

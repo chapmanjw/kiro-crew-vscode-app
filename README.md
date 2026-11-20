@@ -6,14 +6,14 @@ terminals, the Microsoft Marketplace, debugging and every built-in extension. A
 small companion extension connects that VS Code back to the app, so Kiro Crew
 can open a file at a line in VS Code and can see which file VS Code has open.
 
-Status: prototype (0.6.3). Earlier builds were tested standalone on Windows 11
-with Node 24.18 and VS Code server 1.146.0 against a stand-in dashboard. 0.6.3
+Status: prototype (0.6.4). Earlier builds were tested standalone on Windows 11
+with Node 24.18 and VS Code server 1.146.0 against a stand-in dashboard. 0.6.4
 is tested on Linux (arm64) with VS Code server 1.146.0: the unit tests pass,
-the smoke run passes 180 of 182 checks, and the web-origin overlay smoke passes.
+the smoke run passes 187 of 189 checks, and the web-origin overlay smoke passes.
 The two that fail, a gap under the Restricted Mode banner and a seam at the
 bottom-left corner, failed before this change too. The Kiro Crew view's tab
-behaviour was also checked with real mouse clicks in the live Kiro Crew
-0.13.0.2 dashboard, with two views side by side. 0.2.0 was installed into the
+behaviour was checked with real mouse clicks in the live Kiro Crew 0.13.0.2
+dashboard, with two views side by side (0.6.3). 0.2.0 was installed into the
 live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 
 ## How it works
@@ -21,16 +21,18 @@ live Kiro Crew 0.13.0-rc.1 desktop app and worked.
 ```
 Kiro Crew dashboard  (http://localhost:5476, Electron)
  |
- |  app page: ui/vscode-pane-0.6.3.mjs, imported into the dashboard's React tree
+ |  app page: ui/vscode-pane-0.6.4.mjs, imported into the dashboard's React tree
  |   - an inset rounded card like the Sessions panel, with a slim toolbar:
  |     VS Code tabs, New tab, and one menu (status, Reload, Restart server,
  |     updates, the Kiro Crew tab's sign-in, the active file)
  |   - one <iframe src="http://127.0.0.1:<PORT>/vsc-<key>/?folder=...&vscpTab=<tab>">
  |     per tab that has been shown, kept on document.body and placed over the
  |     card, so they survive leaving the page; only the front tab's shows
+ |     (?workspace=<file> in place of ?folder= when the folder holds a
+ |     .code-workspace file)
  |   - signs VS Code's "Kiro Crew" tab in: mints a sign-in link with the
  |     dashboard's own session and hands it to the launcher
- |  composer chip: ui/vscode-pane-session-0.6.3.mjs (contributes.sessionControls)
+ |  composer chip: ui/vscode-pane-session-0.6.4.mjs (contributes.sessionControls)
  |   - opens (or brings back) the chat's own tab on its project folder;
  |     hidden inside the tab's chat
  |
@@ -228,7 +230,7 @@ that folder (`slotNameFor(folder)` plus `-` and 8 hex digits), whatever
 `data/state/chat-sessions.json` says, and only VS Code's "Approve" button
 approves; any other answer, a bare "yes" included, rejects.
 
-### Tabs (0.6.3)
+### Tabs (0.6.4)
 
 The page holds VS Code in tabs, each one VS Code window on a folder, all
 served by the one VS Code server and its one connection token. The launcher
@@ -251,6 +253,18 @@ so tabs survive page reloads and launcher restarts; the page only shows them.
   when first shown, and switching tabs reloads nothing: hidden windows stay
   loaded behind the front one. After a server restart, a hidden window reloads
   when it is next shown.
+- A folder that holds a `*.code-workspace` file opens that workspace in place of
+  the folder (0.6.4): the window loads `?workspace=<file>` rather than
+  `?folder=<folder>` (`backend/lib/workspacefile.mjs`). With several files, the
+  one named after the folder (`my-app/my-app.code-workspace`) opens, else the
+  first by name; only files directly in the folder count. The tab itself stays
+  on the folder, so its label, its chat and the file menus' "Open in VS Code"
+  still go by the folder, and a window on that file does not move its tab even
+  when the workspace lists other folders first. The folder is read when the
+  page builds a window's URL, so a workspace file added later is used from that
+  tab's next load (Reload, a server restart) and the open window is left alone.
+  A window that opens another workspace file itself (File > Open Workspace from
+  File) takes its tab to that file's folder.
 - Labels are the folder's name, numbered when two would repeat. A chat's tab
   shows the chat's title instead when the host shares session titles with the
   app (the SDK's `useHostSessions`, which needs `/api/config/default-agent` in
@@ -472,17 +486,53 @@ In tier "palette" the launcher maps the colours to about 180
 `workbench.colorCustomizations` entries covering the editor, side bar, activity
 bar, title bar, status bar, panel, tabs, lists, inputs, buttons, focus borders,
 chat and the terminal, deriving missing shades from the background, text and
-accent. In tier "base" it sends no customizations, and both the server's
-Machine settings and the user settings lose any earlier palette, so no stale
-colours linger.
+accent. In tier "base" the palette is empty, and both the server's Machine
+settings and the user settings lose any earlier palette, so no stale colours
+linger.
+
+The palette is written scoped to the stock theme it was made for:
+`"workbench.colorCustomizations": {"[Dark Modern]": {...}}`, or `[Light Modern]`
+for a light theme. VS Code applies a scoped palette only while that theme is the
+colour theme, so it never colours a theme you picked. A tier "base" theme keeps
+the key with an empty palette, because the key is also the record of which stock
+theme Kiro Crew chose last.
 
 The launcher keeps the result in `data/state/theme.json` and seeds the base
-theme (and the palette, in tier "palette") into the server's Machine settings,
-so the first paint is already themed. The extension writes the user settings
-with `ConfigurationTarget.Global` only when a value differs. Every new
-extension host (a start, reload or remount) gets the theme once and reports
-back what VS Code holds. `GET /api/session` carries `theme: {kind, tier}` and
-`GET /api/theme` adds the reason.
+theme and the scoped palette into the server's Machine settings, so the first
+paint is already themed. The extension writes the user settings with
+`ConfigurationTarget.Global` only when a value differs. Every new extension
+host (a start, reload or remount) gets the theme once and reports back what VS
+Code holds. `GET /api/session` carries
+`theme: {kind, tier}` and `GET /api/theme` adds the reason and what the
+extension last did, with `userTheme: true` when it left a theme you picked.
+The rules for which theme is whose are in `extension/kiro-crew-bridge/theme.js`,
+which the extension and the launcher share.
+
+#### A theme you pick (0.6.4)
+
+Kiro Crew sets the colour theme when none is set and keeps it in step with the
+dashboard (dark or light) while it is still the one Kiro Crew set. A theme you
+pick in VS Code (Ctrl+K Ctrl+T, "Preferences: Color Theme") is yours. Nothing
+replaces it when a window loads, on a reload, a new tab, a server restart or a
+launcher restart, or when the dashboard changes its theme. Before 0.6.4 every
+load wrote Kiro Crew's theme back over the pick.
+
+- VS Code writes the pick into the server's Machine settings, where Kiro Crew's
+  own theme sits, so the launcher's seed and the extension both read the
+  setting before they write it. The colour theme is Kiro Crew's while it is
+  unset or is the stock theme the palette's scope key names (Dark Modern under
+  `[Dark Modern]`). Any other name is a pick, the other stock theme included.
+- Behind a pick the palette still follows the dashboard: it moves to the stock
+  theme of the dashboard's current mode and colours nothing else, so your theme
+  looks as its author made it. A flat palette would have laid Kiro Crew's colours
+  over it. Picking the stock theme the palette is scoped to brings the Kiro Crew
+  colours back at once.
+- To hand the theme back, pick that stock theme (Dark Modern for a dark
+  dashboard, Light Modern for a light one) or reset `workbench.colorTheme`; the
+  next theme change or load sets it again.
+- A settings file from 0.6.3 or earlier holds a flat palette with no scope. The
+  first start of 0.6.4 replaces it with the scoped one. A stock theme in that
+  file counts as Kiro Crew's, and any other theme counts as your pick.
 
 ### Browser-side state across remounts and restarts
 
@@ -621,7 +671,7 @@ the bridge sends commands only to the extension host that said hello last.
   `vars` (`{"--bg": "#rrggbb", ...}`) only for the tokens the page could read:
   each is resolved by the browser (including `color-mix()`), translucent ones
   are composited over `--bg`, and the list is `THEME_VARS` in
-  `ui/vscode-pane-core-0.6.3.mjs`. When none can be read the body is `{kind}`
+  `ui/vscode-pane-core-0.6.4.mjs`. When none can be read the body is `{kind}`
   alone, and the backend falls back to stock VS Code Default Dark or Default
   Light. The toolbar degrades the same way: every colour is the dashboard
   variable when set, and otherwise a Default Dark or Default Light colour picked
@@ -974,7 +1024,11 @@ chat session closed in the mock must be recreated with its project on the next
 turn. It seeds a saved theme before the start and checks the Machine
 settings, checks that the page's palette POST on mount replaces it as tier
 "palette" and that the bridge writes it, posts a second palette and reads the workbench setting back through
-the bridge and from the painted status bar, reloads the page and checks the
+the bridge and from the painted status bar, picks another theme in VS Code's
+own picker and checks it shows without the Kiro Crew palette, survives a
+reload and a change of the Kiro Crew theme (the palette moving to the other
+stock theme), and that picking the stock theme the palette is scoped to brings
+the palette back (`scripts/lib/theme-checks.mjs`), reloads the page and checks the
 open editor comes back, then restarts the launcher on a new API port and checks
 the frame keeps its origin and path and the editor is restored from the same
 browser profile. Before that it restarts the launcher with the page still
@@ -1060,7 +1114,10 @@ whose Kiro Crew view frames that chat with no session created, that clicking
 the first tab shows its window again with both windows loaded and nothing
 reloaded, that the chip again brings back the chat's tab instead of opening
 another, that New tab opens a typed folder as a tab of its own and lists the
-recent projects, and that a tab's close button removes the tab and its window.
+recent projects, that a folder with a `.code-workspace` file opens as that
+workspace (the window reports the file, the explorer shows the workspace's
+folders and the tab stays on the folder), and that a tab's close button removes
+the tab and its window.
 `.cache/smoke/pane-dark.png` is the pane in the dark palette and
 `.cache/smoke/menu.png` the menu open. The pane then goes back to the workspace
 folder's tab for the restart checks.

@@ -109,8 +109,9 @@ export function terminalEnvSettings(existingText) {
 }
 
 /**
- * The `folder` query value the web workbench expects. With a remote authority,
- * a value starting with `/` is read as a vscode-remote path
+ * The `folder` query value the web workbench expects; its `workspace` value
+ * takes the same form. With a remote authority, a value starting with `/` is
+ * read as a vscode-remote path
  * (vscode/src/vs/code/browser/workbench/workbench.ts:429-437).
  */
 export function toFolderParam(folder) {
@@ -121,8 +122,15 @@ export function toFolderParam(folder) {
   return p;
 }
 
-export function workbenchUrl({ host = '127.0.0.1', port, basePath, folder }) {
+/**
+ * The workbench's address for a folder. A `.code-workspace` file names the whole
+ * workspace, so when one is given the URL opens it (`?workspace=`) in place of
+ * the folder (`?folder=`); a workspace file that is not an absolute path is ignored.
+ */
+export function workbenchUrl({ host = '127.0.0.1', port, basePath, folder, workspaceFile }) {
   const base = `http://${host}:${port}${basePath || ''}/`;
+  const w = toFolderParam(workspaceFile);
+  if (w) return `${base}?workspace=${encodeURIComponent(w)}`;
   const f = toFolderParam(folder);
   return f ? `${base}?folder=${encodeURIComponent(f)}` : base;
 }

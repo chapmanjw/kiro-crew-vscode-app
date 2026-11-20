@@ -15,6 +15,7 @@
 // A window knows its tab from the start: the page loads it with ?vscpTab=<id>,
 // and the frame proxy hands that to the extension as the default of the
 // kiroCrew.paneTab setting (lib/frameproxy.mjs injectConfigurationDefaults).
+import path from 'node:path';
 import { validTabId, sameFolder } from './tabs.mjs';
 
 // A command whose tab has no window yet: it waits for one, until its TTL.
@@ -38,10 +39,10 @@ export class Bridge {
     this.extension = null; // {version, workspaceFolders, ...} from the newest hello
     this.editor = null; // {path, selection, languageId, at}, from whichever window reported last
     this.lastSaved = null; // {path, at}
-    this.theme = null; // {signature, applied, error, at} last theme result from the extension
+    this.theme = null; // {signature, applied, changed, userTheme, error, at} last theme result from the extension
     // The extension host that said hello last.
     this.currentHost = null;
-    // Every extension host (one per VS Code window): host -> {folders, tab, at, helloAt, firstAt, startedAt, polls, editor}.
+    // Every extension host (one per VS Code window): host -> {folders, workspaceFile, tab, at, helloAt, firstAt, startedAt, polls, editor}.
     this.hosts = new Map();
     this.hostTtlMs = 10 * 60 * 1000;
     this.events = 0;
@@ -84,7 +85,10 @@ export class Bridge {
       const mapped = this.newestHost((h) => h.tab === route.tab);
       if (mapped) return mapped;
       if (route.folder) {
-        const byFolder = this.newestHost((h) => !h.tab && h.folders.some((f) => sameFolder(f, route.folder)));
+        // A window on a workspace file is on the folder that holds the file, whatever folders the workspace lists.
+        const byFolder = this.newestHost(
+          (h) => !h.tab && (h.folders.some((f) => sameFolder(f, route.folder)) || (!!h.workspaceFile && sameFolder(path.dirname(h.workspaceFile), route.folder))),
+        );
         if (byFolder) return byFolder;
       }
       return NOBODY;
@@ -240,7 +244,7 @@ export class Bridge {
     const id = String(host).slice(0, 64);
     let rec = this.hosts.get(id);
     if (!rec) {
-      rec = { folders: [], tab: null, at: this.now(), helloAt: 0, firstAt: 0, startedAt: 0, polls: 0, editor: null };
+      rec = { folders: [], workspaceFile: null, tab: null, at: this.now(), helloAt: 0, firstAt: 0, startedAt: 0, polls: 0, editor: null };
       this.hosts.set(id, rec);
     }
     return rec;
@@ -261,6 +265,8 @@ export class Bridge {
         this.extension = {
           version: str(ev.version),
           workspaceFolders: Array.isArray(ev.workspaceFolders) ? ev.workspaceFolders.map(str).slice(0, 20) : [],
+          // The `.code-workspace` file the window is on, when it is on one that is saved on disk.
+          workspaceFile: typeof ev.workspaceFile === 'string' && ev.workspaceFile ? str(ev.workspaceFile) : null,
           spawnTracked: ev.spawnTracked === true,
           secretInEnv: ev.secretInEnv === true,
           chat: chatInfo(ev.chat),
@@ -270,6 +276,7 @@ export class Bridge {
           this.currentHost = sender;
           const rec = this.hostRecord(sender);
           rec.folders = this.extension.workspaceFolders;
+          rec.workspaceFile = this.extension.workspaceFile;
           rec.at = this.now();
           rec.helloAt = this.now();
           if (!rec.firstAt) rec.firstAt = this.now();
@@ -295,6 +302,8 @@ export class Bridge {
           signature: str(ev.signature),
           applied: ev.applied === true,
           changed: ev.changed === true,
+          // The colour theme was left as the user chose it in VS Code.
+          userTheme: ev.userTheme === true,
           error: ev.error ? str(ev.error) : null,
           readBack:
             ev.readBack && typeof ev.readBack === 'object'

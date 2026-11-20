@@ -35,6 +35,7 @@ import { tunnelCss } from './lib/chipcss.mjs';
 import { layoutSettings } from './lib/layoutprefs.mjs';
 import { dashboardOrigins, overlayTabBody, embedPathFor } from './lib/kctab.mjs';
 import { TabStore, validTabId, validSessionKey, validFolder, sameFolder } from './lib/tabs.mjs';
+import { workspaceFileFinder } from './lib/workspacefile.mjs';
 import { RetryPolicy } from './lib/retry.mjs';
 import { windowsUserEnv } from './lib/userenv.mjs';
 import { provisionServer, fetchJson } from './lib/provision.mjs';
@@ -753,6 +754,18 @@ function isDirectory(p) {
   }
 }
 
+const workspaceFileOf = workspaceFileFinder();
+
+/**
+ * The workbench URL for a folder. A folder that holds a `*.code-workspace` file
+ * opens that workspace in place of the folder (lib/workspacefile.mjs picks the
+ * file); the tab itself stays on the folder. Read when the URL is built, so a
+ * frame that loads later sees a workspace file added since.
+ */
+function workbenchUrlFor(folder) {
+  return workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder, workspaceFile: folder ? workspaceFileOf(folder) : null });
+}
+
 /** The page's tabs as /api/session reports them: each with its workbench URL once the server is up. */
 function tabsBody() {
   const ready = state.status === 'ready' && !!state.serverPort && !!framePort;
@@ -761,7 +774,7 @@ function tabsBody() {
       id: t.id,
       folder: t.folder,
       session: t.session,
-      url: ready ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder: t.folder }) : null,
+      url: ready ? workbenchUrlFor(t.folder) : null,
     })),
     active: tabs.active,
     // No tab file yet: the page opens the first tab, on the folder it used last.
@@ -803,13 +816,16 @@ function tabRoute(t) {
 /**
  * The window showing a page tab opened another folder itself (File > Open
  * Folder in VS Code navigates the frame): the tab follows it, so its label and
- * its next load name that folder. Only the tab's newest window counts.
+ * its next load name that folder. Only the tab's newest window counts. A window
+ * on a workspace file is on the folder that holds the file, whatever folders the
+ * workspace lists, so a tab opened on a folder with a workspace file stays put.
  */
 function followWindowFolder(host) {
   const h = bridge.hosts.get(host);
-  if (!h || !h.tab || !h.folders.length || bridge.hostForTab(h.tab) !== host) return;
+  if (!h || !h.tab || bridge.hostForTab(h.tab) !== host) return;
   const t = tabs.get(h.tab);
-  const folder = h.folders[0];
+  const folder = h.workspaceFile ? path.dirname(h.workspaceFile) : h.folders[0];
+  if (!folder) return;
   if (t && !sameFolder(t.folder, folder) && isDirectory(folder) && tabs.setFolder(t.id, folder)) log('tab', t.id, 'follows its window to another folder');
 }
 
@@ -823,7 +839,7 @@ function sessionBody(folderParam) {
     message: state.message,
     error: state.error,
     // The front tab's workbench (or the default folder's, with no tab); each tab has its own in `tabs`.
-    url: ready && framePort ? workbenchUrl({ host: HOST, port: framePort, basePath: BASE_PATH, folder: front ? front.folder : folder }) : null,
+    url: ready && framePort ? workbenchUrlFor(front ? front.folder : folder) : null,
     folder,
     defaultFolder: config.workspace,
     generation: state.generation,

@@ -72,7 +72,7 @@ test('the Kiro Crew tab webview hides its frame until the page has loaded, over 
 });
 
 test('the pane keeps the frame hidden over a themed host until load, and passes the scheme on', () => {
-  const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.6.3.mjs'), 'utf8');
+  const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.6.4.mjs'), 'utf8');
   assert.match(page, /\.vscp-frame-host\{background:var\(--vscp-bg\);color-scheme:dark\}/);
   assert.match(page, /\.vscp-frame-host\[data-vscp-kind="light"\]\{color-scheme:light\}/);
   assert.match(page, /\.vscp-frame-host iframe\[data-ready="false"\]\{opacity:0\}/);

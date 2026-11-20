@@ -19,11 +19,13 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
+import { toFolderParam } from '../backend/lib/args.mjs';
 import { loadPlaywright, findBrowser } from './lib/browser.mjs';
 import { manifestIconFiles, svgProblems, isPng } from './lib/icon-checks.mjs';
 import { extensionIconChecks } from './lib/ext-icon-checks.mjs';
 import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
+import { themePickChecks } from './lib/theme-checks.mjs';
 import { startLoadWatch, loadChecks } from './lib/load-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
@@ -239,7 +241,7 @@ function portOpen(port) {
 // Round-2 UI checks, run in the stand-in dashboard once VS Code is up:
 // the inset rounded card, theme sync, the frame surviving an unmount, and the
 // composer's VS Code chip opening the chat's project folder.
-async function uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads, api, gatewayMock }) {
+async function uiRound2Checks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads, api, gatewayMock }) {
   const HEX = /^#[0-9a-f]{6}$/;
 
   // Item 1: the card matches the Sessions panel card and the frame is clipped to
@@ -561,6 +563,60 @@ async function uiRound2Checks({ page, frame, hostServer, target, chatProject, sh
     await sleep(300);
   }
   check('closing a tab with its x removes the tab and its VS Code window, and the tab to its left comes to the front', gone);
+
+  // A folder that holds a .code-workspace file opens as that workspace: the window is on the file, its
+  // folders are the workspace's (the chat project first, and both show in the explorer), and the tab stays on the folder.
+  await page.click('[data-testid="vscode-pane-new-tab"]');
+  await page.locator('[data-testid="vscode-pane-new-tab-panel"]').waitFor({ timeout: 5000 }).catch(() => {});
+  await page.fill('#vscp-folder', wsProject);
+  await page.keyboard.press('Enter');
+  let wsAdded = null;
+  const t8 = Date.now();
+  while (Date.now() - t8 < 10_000) {
+    const now = await tabsNow();
+    if (now.length === tabsAfter.length + 1) {
+      wsAdded = now.find((x) => x.active) || null;
+      break;
+    }
+    await sleep(300);
+  }
+  const wsFile = path.join(wsProject, 'ws-project.code-workspace');
+  const samePath = (a, b) => (process.platform === 'win32' ? String(a).toLowerCase() === String(b).toLowerCase() : a === b);
+  let wsSrc = '';
+  let wsExt = null;
+  const t9 = Date.now();
+  while (wsAdded && Date.now() - t9 < 60_000) {
+    wsSrc = (await page.locator(`div[data-vscode-pane-frame-host] iframe[data-tab="${wsAdded.id}"]`).getAttribute('src').catch(() => '')) || '';
+    wsExt = ((await api('GET', `/api/state?tab=${wsAdded.id}`)).json || {}).extension || null;
+    if (wsExt && wsExt.workspaceFile && samePath(wsExt.workspaceFile, wsFile)) break;
+    await sleep(500);
+  }
+  let wsTree = '';
+  const t10 = Date.now();
+  while (wsAdded && Date.now() - t10 < 30_000) {
+    wsTree = ((await frame.locator('.explorer-folders-view').first().textContent({ timeout: 1000 }).catch(() => '')) || '');
+    if (/from-chat\.md/.test(wsTree) && /in-workspace\.md/.test(wsTree)) break;
+    await sleep(500);
+  }
+  const wsParams = new URL(wsSrc || 'http://x/').searchParams;
+  const wsListed = wsAdded ? ((await api('GET', '/api/session')).json.tabs.list || []).find((t) => t.id === wsAdded.id) : null;
+  check('New tab on a folder with a .code-workspace file opens that workspace (the window is on the file, with its folders) and the tab stays on the folder',
+    !!wsAdded && wsParams.get('workspace') === toFolderParam(wsFile) && !wsParams.has('folder') && wsParams.get('vscpTab') === wsAdded.id &&
+      !!wsExt && !!wsExt.workspaceFile && samePath(wsExt.workspaceFile, wsFile) && wsExt.workspaceFolders.length === 2 && samePath(wsExt.workspaceFolders[0], chatProject) && samePath(wsExt.workspaceFolders[1], wsProject) &&
+      /from-chat\.md/.test(wsTree) && /in-workspace\.md/.test(wsTree) && !!wsListed && samePath(wsListed.folder, wsProject),
+    JSON.stringify({ src: wsSrc.replace(/vsc-[^/]+/, 'vsc-<key>').slice(-110), file: wsExt && wsExt.workspaceFile, folders: wsExt && wsExt.workspaceFolders, tree: wsTree.slice(0, 80), tab: wsListed && wsListed.folder }));
+  if (wsAdded) await page.click(`[data-testid="vscode-pane-tab"][data-tab-id="${wsAdded.id}"] [data-testid="vscode-pane-tab-close"]`);
+  let wsGone = false;
+  const t11 = Date.now();
+  while (wsAdded && Date.now() - t11 < 10_000) {
+    const now = await tabsNow();
+    if (now.length === tabsAfter.length && now.find((x) => x.session === CHAT_SLOT && x.active)) {
+      wsGone = true;
+      break;
+    }
+    await sleep(300);
+  }
+  check('the workspace tab closes like any other and the chat\'s tab comes back to the front', wsGone);
   await sleep(1000);
   const shot = path.join(shotDir, 'pane-dark.png');
   await page.screenshot({ path: shot });
@@ -586,6 +642,11 @@ async function main() {
   const chatProject = path.join(runDir, 'chat-project');
   fs.mkdirSync(chatProject, { recursive: true });
   fs.writeFileSync(path.join(chatProject, 'from-chat.md'), '# opened from the chat composer\n');
+  // A project that holds a .code-workspace file, which lists the chat project's folder first: a tab on it opens the workspace.
+  const wsProject = path.join(runDir, 'ws-project');
+  fs.mkdirSync(wsProject, { recursive: true });
+  fs.writeFileSync(path.join(wsProject, 'ws-project.code-workspace'), JSON.stringify({ folders: [{ path: '../chat-project' }, { path: '.' }] }, null, 2));
+  fs.writeFileSync(path.join(wsProject, 'in-workspace.md'), '# opened as a workspace\n');
 
   SECRET = crypto.randomBytes(24).toString('hex');
   PORT = await freePort();
@@ -695,8 +756,10 @@ async function main() {
     const seeded = toVsCodeTheme(SEEDED_THEME);
     check(
       'saved Kiro Crew theme is seeded into Machine settings before first paint',
-      machine['workbench.colorTheme'] === 'Dark Modern' && machine['workbench.colorCustomizations']?.['editor.background'] === seeded.colorCustomizations['editor.background'],
-      `${machine['workbench.colorTheme']} ${machine['workbench.colorCustomizations']?.['editor.background']}`,
+      machine['workbench.colorTheme'] === 'Dark Modern' &&
+        JSON.stringify(Object.keys(machine['workbench.colorCustomizations'] || {})) === '["[Dark Modern]"]' &&
+        machine['workbench.colorCustomizations']['[Dark Modern]']['editor.background'] === seeded.colorCustomizations['editor.background'],
+      `${machine['workbench.colorTheme']} ${Object.keys(machine['workbench.colorCustomizations'] || {})} ${machine['workbench.colorCustomizations']?.['[Dark Modern]']?.['editor.background']}`,
     );
     check('Copilot sign-in prompts are turned off by setting, not by removing extensions', machine['chat.titleBar.signIn.enabled'] === false && machine['chat.welcomePage.signIn.enabled'] === false && fs.existsSync(path.join(serverDir || DEV.serverDir || '', 'extensions', 'copilot', 'package.json')));
     check('new chats default to the Kiro Crew model by setting (chat.defaultModel)', machine['chat.defaultModel'] === 'kiro-crew', String(machine['chat.defaultModel']));
@@ -1114,7 +1177,7 @@ async function main() {
     }
     check('the workbench repaints in the posted palette (status bar)', painted === hexToRgb(wantVs.colorCustomizations['statusBar.background']), `${painted} want ${hexToRgb(wantVs.colorCustomizations['statusBar.background'])}`);
     const machine2 = JSON.parse(fs.readFileSync(path.join(dataDir, 'server-data', 'data', 'Machine', 'settings.json'), 'utf8'));
-    check('the posted theme is also seeded for the next start', machine2['workbench.colorTheme'] === 'Light Modern');
+    check('the posted theme is also seeded for the next start, its palette scoped to Light Modern', machine2['workbench.colorTheme'] === 'Light Modern' && JSON.stringify(Object.keys(machine2['workbench.colorCustomizations'] || {})) === '["[Light Modern]"]');
     const again = await api('POST', '/api/theme', POSTED_THEME);
     check('posting the same palette again changes nothing', again.json && again.json.changed === false);
 
@@ -1141,6 +1204,11 @@ async function main() {
       await sleep(300);
     }
     check('posting a sound palette again returns to tier "palette"', restore.json?.theme?.tier === 'palette' && th6 && th6.readBack && th6.readBack.count === Object.keys(wantVs.colorCustomizations).length, JSON.stringify(th6 && th6.readBack));
+
+    // 7e. a theme the user picks in VS Code's own picker is theirs: it survives a
+    //     reload and a Kiro Crew theme change, and the palette comes back with the
+    //     stock theme it is scoped to
+    await themePickChecks({ page, frame, api, dataDir, check });
 
     // 8. Kiro Crew -> VS Code: open a file at a line
     const open = await api('POST', '/api/open', { path: target, line: 3, column: 6 });
@@ -1224,7 +1292,7 @@ async function main() {
     await page.screenshot({ path: shot });
     check('screenshot saved', fs.existsSync(shot), shot);
 
-    await uiRound2Checks({ page, frame, hostServer, target, chatProject, shotDir, getLoads: () => workbenchLoads, api, gatewayMock });
+    await uiRound2Checks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads: () => workbenchLoads, api, gatewayMock });
 
     // The composer chip left the pane on the chat project (and remembered it);
     // take it back to the workspace folder with hello.txt open for steps 13-15.
