@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { updateBase, ownedBuild, buildName, readRecord, writeRecord, recordedDir, decideUpdate, removableBuilds, COMMIT_RE } from '../backend/lib/serverbuild.mjs';
-import { serverLatestMetadataUrl, serverMetadataUrl, PUBLIC_UPDATE_BASE } from '../backend/lib/discovery.mjs';
+import { serverLatestMetadataUrl, serverMetadataUrl, nodeExeName, PUBLIC_UPDATE_BASE } from '../backend/lib/discovery.mjs';
 import { matchRoute } from '../backend/lib/router.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -76,7 +76,7 @@ test('recordedDir names a folder only while it is a server build', () => {
     assert.equal(recordedDir({ dataDir, commit: A }), null);
     const build = path.join(dataDir, 'server', A);
     fs.mkdirSync(path.join(build, 'out'), { recursive: true });
-    fs.writeFileSync(path.join(build, 'node'), '');
+    fs.writeFileSync(path.join(build, nodeExeName()), '');
     assert.equal(recordedDir({ dataDir, commit: A }), null, 'no server-main.js yet');
     fs.writeFileSync(path.join(build, 'out', 'server-main.js'), '');
     assert.equal(recordedDir({ dataDir, commit: A }), build);

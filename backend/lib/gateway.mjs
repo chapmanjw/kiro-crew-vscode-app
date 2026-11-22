@@ -316,7 +316,7 @@ export class GatewayClient {
   /**
    * The Kiro Crew chat slot for a workspace folder: created (or reopened, the
    * create is idempotent by name) and pointed at the folder as its project.
-   * Run on every turn, not cached: John can close or delete the
+   * Run on every turn, not cached: the user can close or delete the
    * "VS Code: <folder>" session in Kiro Crew at any time, and a send to a slot
    * that is gone would fail or open a session with no project. For a slot that
    * is still open the create is a no-op and the project is set only if it

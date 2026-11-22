@@ -1,4 +1,4 @@
-// Tests for the V1-review fixes: user environment, stable restarts, bounded
+// Tests for the launcher basics: user environment, stable restarts, bounded
 // retries, command TTL, Host/Origin checks, https-only and checksummed download.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

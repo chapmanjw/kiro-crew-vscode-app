@@ -33,7 +33,7 @@ export function isServerBuild(dir, exists, platform = process.platform) {
 
 /**
  * Pick a server build. Order: the configured path, the app data dir, the dev
- * cache left by the R1-B probe. Inside the data dir and the dev cache, a build
+ * cache. Inside the data dir and the dev cache, a build
  * for `commit` wins; otherwise any build there is used (newest name first) so
  * the app still starts when the `code` CLI is missing.
  *

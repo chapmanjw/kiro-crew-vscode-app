@@ -1,4 +1,4 @@
-// "VS Code" chip in the chat composer (contributes.sessionControls).
+// "Open in Code" chip in the chat composer (contributes.sessionControls).
 //
 // Kiro Crew renders an app's session controls in the composer shelf, before
 // the agent chip ("Ultra Mode") and the project chip, and mounts this module in
@@ -10,7 +10,7 @@
 // first, so to the user the chip acts as a button.
 import React, { useEffect, useRef } from 'react';
 import { useNavigate } from '@kirocrew/app-sdk';
-import { appPageUrl } from './vscode-pane-core-0.6.4.mjs';
+import { appPageUrl } from './vscode-pane-core-0.7.0.mjs';
 
 const h = React.createElement;
 

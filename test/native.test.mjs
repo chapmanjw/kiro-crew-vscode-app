@@ -1,4 +1,4 @@
-// Round 3, native Chat takeover: the "Kiro Crew" chat session type's launcher
+// Native Chat takeover: the "Kiro Crew" chat session type's launcher
 // side (structured rows, tool reconcile, history, approvals relayed to the
 // gateway, questions, the session registry, the hide-Copilot-agents setting
 // and the crew chat toggle counter for the page).
@@ -165,12 +165,12 @@ test('SessionRegistry persists sessions per folder, newest first, and survives a
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('S-2: the registry relays only slots the app minted for that same folder', () => {
+test('the registry relays only slots the app minted for that same folder', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscp-reg2-'));
   const file = path.join(dir, 'chat-sessions.json');
   const mine = newSessionSlotName(FOLDER, () => '89abcdef');
   const forged = [
-    { slot: 'dashboard:chat-1', folder: FOLDER }, // John's own session, hand-registered
+    { slot: 'dashboard:chat-1', folder: FOLDER }, // a session registered by hand
     { slot: slotNameFor(FOLDER), folder: FOLDER }, // the folder's main slot, not a VS Code chat
     { slot: newSessionSlotName('/other', () => '89abcdef'), folder: FOLDER }, // minted for another folder
     { slot: `${slotNameFor(FOLDER)}-89ABCDEF`, folder: FOLDER }, // not lower-case hex
@@ -431,7 +431,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     br = JSON.parse(fs.readFileSync(path.join(serverDir, 'bridge.json'), 'utf8'));
     assert.ok(br.secret && br.url, 'the stand-in server got the bridge address and secret');
 
-    // V5 M-1: a webview origin (<uuid>.localhost on the frame port) gets only the
+    // A webview origin (<uuid>.localhost on the frame port) gets only the
     // webview host files; the workbench, /vscode-remote-resource (any file) and
     // POSTs are 403, though the same paths work for the workbench's own host.
     let sess = null;
@@ -516,7 +516,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal((await bridgeCall('POST', '/api/bridge/kc/connect', {}, 'h1')).json.connectRequests, 1);
     assert.equal((await proxy('GET', '/api/session')).json.kc.connectRequests, 1);
     assert.equal((await proxy('POST', '/api/kc/disconnect', {})).json.kc.connected, false);
-    // V5 S-3: after Disconnect an automatic sign-in is refused (it would undo it
+    // After Disconnect an automatic sign-in is refused (it would undo it
     // on the next dashboard reload); Connect or a paste still works.
     const st3 = (await proxy('GET', '/api/session')).json.kc;
     assert.equal(st3.userDisconnected, true);
@@ -524,7 +524,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(autoAgain.status, 409);
     assert.equal(autoAgain.json.code, 'user_disconnected');
     assert.equal((await proxy('GET', '/api/session')).json.kc.connected, false);
-    // V5 S-1: the page's reason for a refused mint is kept with its code for the setup note.
+    // The page's reason for a refused mint is kept with its code for the setup note.
     const noUrl = (await proxy('POST', '/api/kc/sign-in', { error: 'no dashboard URL', code: 'external_origin_unavailable', via: 'connect' })).json;
     assert.equal(noUrl.kc.lastCode, 'external_origin_unavailable');
     const k2 = (await bridgeCall('GET', `/api/bridge/kc?tab=${own.tab.id}`, undefined, 'h1')).json;
@@ -560,7 +560,7 @@ test('launcher: native sessions, history, approvals, prefs and the crew chat tog
     assert.equal(mock.rec.turns.at(-1).slot, a.slot);
     assert.equal((await bridgeCall('POST', '/api/bridge/chat', { prompt: 'x', folder: workspace, slot: 'not-ours' })).status, 404, 'only registered sessions');
 
-    // S-4: a second VS Code window on another folder does not take the first
+    // A second VS Code window on another folder does not take the first
     // window's sessions away; each window is checked against its own folders.
     const other = path.join(dataDir, 'second window');
     fs.mkdirSync(other, { recursive: true });

@@ -232,7 +232,7 @@ function register(context, deps) {
   /**
    * Ask in VS Code, with the workbench's inline confirmation card. Falls back
    * to a quick pick when the core confirmation tool is missing (it is
-   * internal API: R4 section 8).
+   * internal API).
    */
   async function askApproval(req, title, message, token) {
     if (vscode.lm && typeof vscode.lm.invokeTool === 'function') {

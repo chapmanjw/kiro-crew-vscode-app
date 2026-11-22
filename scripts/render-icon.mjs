@@ -9,8 +9,8 @@
 //   node scripts/render-icon.mjs --svg-only the SVGs only (no browser)
 //
 // Outputs:
-//   assets/icon-flat.svg flat mark, selected colours (manifest iconPath: store
-//                        tile and the rail's selected row)
+//   assets/icon-blue.svg the blue VS Code mark, transparent (manifest iconPath:
+//                        store tile and the rail's hover and selected rows)
 //   ui/icon-mono.svg     the same file for ui.pages[0].iconUrl
 //   ui/icon-idle.svg     flat mark, idle colours (ui.pages[0].iconInactiveUrl)
 import fs from 'node:fs';
@@ -25,7 +25,7 @@ const svgOnly = process.argv.includes('--svg-only');
 const source = fs.readFileSync(path.join(ROOT, 'ui', 'icon.svg'), 'utf8');
 const marks = buildMarks(source);
 const outputs = {
-  'assets/icon-flat.svg': marks.lit,
+  'assets/icon-blue.svg': marks.blue,
   'ui/icon-mono.svg': marks.lit,
   'ui/icon-idle.svg': marks.idle,
 };
@@ -47,7 +47,7 @@ if (!exe) throw new Error('no local Chrome/Edge');
 const pw = await loadPlaywright(depsRoot);
 const browser = await pw.chromium.launch({ executablePath: exe, headless: true });
 
-// Preview sheet: four themes (John's Dracula Pro and Kiro Crew's default, each
+// Preview sheet: four themes (Dracula Pro and Kiro Crew's default, each
 // dark and light). Each panel sets the root color-scheme the way Kiro Crew does
 // per mode and emulates the matching OS preference, and draws the rail as Kiro
 // Crew does: the files go in as <img>, the idle row at opacity-70 in the row's
@@ -80,7 +80,7 @@ const panelShot = async (t) => {
   </style></head><body>
     <h2>${t.name}</h2>
     ${row('Idle: ui/icon-idle.svg', dataUrl(marks.idle), false)}
-    ${row('Selected: assets/icon-flat.svg', dataUrl(marks.lit), true)}
+    ${row('Hover/selected: assets/icon-blue.svg', dataUrl(marks.blue), true)}
   </body></html>`);
   await page.waitForFunction(() => [...document.images].every((i) => i.complete && i.naturalWidth > 0));
   const shot = await page.screenshot();

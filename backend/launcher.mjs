@@ -1140,7 +1140,7 @@ function handleProbe(req, res) {
  */
 function handleFrame(req, res) {
   const webOrigin = isWebOriginHost(req.headers.host, APP_NAME);
-  // A webview origin gets the webview host files and nothing else (V5 M-1).
+  // A webview origin gets the webview host files and nothing else.
   if (isWebviewHost(req.headers.host) && !webviewRequestAllowed(req.method, req.url, BASE_PATH)) {
     req.resume();
     return sendJson(res, 403, { error: 'not available to webviews' });
@@ -1486,7 +1486,7 @@ async function handle(req, res) {
         return sendJson(res, 200, { ok: false, kc: kcBody() });
       }
       if (!parsed || typeof parsed.url !== 'string') return sendJson(res, 400, { error: 'body must be {url} or {error}' });
-      // Disconnect sticks until the user presses Connect or pastes a link (V5 S-3).
+      // Disconnect sticks until the user presses Connect or pastes a link.
       if (parsed.via !== 'connect' && parsed.via !== 'paste' && kc.status().userDisconnected) {
         return sendJson(res, 409, { ok: false, error: 'the tab was disconnected; press Connect to sign it in again', code: 'user_disconnected', kc: kcBody() });
       }

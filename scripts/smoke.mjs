@@ -8,7 +8,7 @@
 //
 // --native-only stops after the Kiro Crew chat session type checks (step 6n).
 //
-// Needs a VS Code server build (default: the R1-B probe's copy under .cache)
+// Needs a VS Code server build (default: a build under .cache/serve-web)
 // and a local Chrome or Edge for the headless workbench.
 
 import fs from 'node:fs';
@@ -238,10 +238,10 @@ function portOpen(port) {
   });
 }
 
-// Round-2 UI checks, run in the stand-in dashboard once VS Code is up:
+// Page UI checks, run in the stand-in dashboard once VS Code is up:
 // the inset rounded card, theme sync, the frame surviving an unmount, and the
 // composer's VS Code chip opening the chat's project folder.
-async function uiRound2Checks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads, api, gatewayMock }) {
+async function uiPageChecks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads, api, gatewayMock }) {
   const HEX = /^#[0-9a-f]{6}$/;
 
   // Item 1: the card matches the Sessions panel card and the frame is clipped to
@@ -627,10 +627,10 @@ async function main() {
   if (process.platform !== 'win32') console.log('note: process-tree checks are written for Windows');
   const serverDir = serverDirArg || findCachedServer();
   if (APP) console.log(`app root ${APP} (server build from its dev-config.json)`);
-  if (!serverDir && !APP) throw new Error('no VS Code server build; run the R1-B probe or pass --server-dir');
+  if (!serverDir && !APP) throw new Error('no VS Code server build; pass --server-dir');
   const runDir = path.join(ROOT, '.cache', 'smoke', `run-${Date.now()}`);
   const dataDir = path.join(runDir, 'data');
-  // A folder name with a space (V3 N-5, V4 N-5): slot names, folder checks,
+  // A folder name with a space: slot names, folder checks,
   // terminal paths and the Kiro Crew tab all have to cope with it.
   const workspace = path.join(runDir, 'my workspace');
   fs.mkdirSync(dataDir, { recursive: true });
@@ -1292,7 +1292,7 @@ async function main() {
     await page.screenshot({ path: shot });
     check('screenshot saved', fs.existsSync(shot), shot);
 
-    await uiRound2Checks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads: () => workbenchLoads, api, gatewayMock });
+    await uiPageChecks({ page, frame, hostServer, target, chatProject, wsProject, shotDir, getLoads: () => workbenchLoads, api, gatewayMock });
 
     // The composer chip left the pane on the chat project (and remembered it);
     // take it back to the workspace folder with hello.txt open for steps 13-15.

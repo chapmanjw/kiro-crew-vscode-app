@@ -49,7 +49,26 @@ function mark({ silhouette, panel }, { light, dark }) {
     + `</svg>\n`;
 }
 
+/** The blue VS Code mark: the icon's own three fills, flat, on a transparent ground. */
+export const BLUE = { upper: '#0065A9', lower: '#007ACC', panel: '#1F9CF0' };
+
+function blueMark(sourceSvg, { silhouette }) {
+  const fillPath = (hex) => {
+    const m = sourceSvg.match(new RegExp(`<path d="([^"]+)" fill="${hex}"`, 'i'));
+    if (!m) throw new Error(`ui/icon.svg no longer has the ${hex} path`);
+    return m[1];
+  };
+  // No <style> and no media query: the same blue shows on a light or a dark page.
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="${VIEWBOX}">`
+    + `<defs><clipPath id="vsc-shape"><path clip-rule="evenodd" d="${silhouette}"/></clipPath></defs>`
+    + `<g clip-path="url(#vsc-shape)">`
+    + `<path fill="${BLUE.upper}" d="${fillPath(BLUE.upper)}"/>`
+    + `<path fill="${BLUE.lower}" d="${fillPath(BLUE.lower)}"/>`
+    + `<path fill="${BLUE.panel}" d="${fillPath(BLUE.panel)}"/>`
+    + `</g></svg>\n`;
+}
+
 export function buildMarks(sourceSvg) {
   const paths = extractPaths(sourceSvg);
-  return { idle: mark(paths, NEUTRAL.idle), lit: mark(paths, NEUTRAL.lit) };
+  return { idle: mark(paths, NEUTRAL.idle), lit: mark(paths, NEUTRAL.lit), blue: blueMark(sourceSvg, paths) };
 }

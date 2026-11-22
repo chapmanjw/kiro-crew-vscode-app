@@ -1,6 +1,6 @@
 // The Kiro Crew tunnel: the live gateway dashboard served on the launcher's
 // own loopback origin, so VS Code's "Kiro Crew" tab can frame the dashboard's
-// own /embed/chat page (research R5). Node built-ins only.
+// own /embed/chat page. Node built-ins only.
 //
 // Origin. The browser reaches it only as http://<label>.localhost:<port>,
 // where <label> is 128 random bits kept in data/state/kc-session.json. Every
@@ -45,7 +45,7 @@ const DROP_REQ = new Set(['cookie', 'origin', 'host', 'referer', 'forwarded', 'x
 
 /**
  * Routes that mint, reveal or hand out credentials, or change security setup:
- * never through the tunnel, whatever the method (V5 review section 2).
+ * never through the tunnel, whatever the method.
  */
 export const DENY = [
   /^\/api\/token\/local(\/|$)/i,
@@ -91,7 +91,7 @@ export function normalPath(url) {
 /**
  * Whether the tunnel refuses a request target. Only origin-form targets
  * (`/path?query`) pass: an absolute-form target (`http://host/path`) would
- * slip past the path rules while the gateway still routed it (V5 S-4).
+ * slip past the path rules while the gateway still routed it.
  */
 export function denied(url, method = 'GET') {
   const raw = String(url || '');
@@ -176,7 +176,7 @@ export function loadKcState(file) {
     token: ok(v && v.token),
     refresh: ok(v && v.refresh),
     signedInAt: v && typeof v.signedInAt === 'string' ? v.signedInAt : null,
-    // The user pressed Disconnect: no automatic sign-in until Connect or a paste (V5 S-3).
+    // The user pressed Disconnect: no automatic sign-in until Connect or a paste.
     userDisconnected: !!(v && v.userDisconnected === true),
   };
 }
@@ -205,7 +205,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
   let refreshChain = Promise.resolve();
   let lastError = '';
   // Bumped whenever the session is cleared (Disconnect, a 401); a refresh that
-  // started before the bump must not write its cookies back (V5 N-1).
+  // started before the bump must not write its cookies back.
   let epoch = 0;
   const publicHost = () => `${st.label}.localhost:${port}`;
   const publicOrigin = () => `http://${publicHost()}`;
@@ -258,7 +258,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
     return h;
   }
 
-  /** The session is dead: forget it so the page or Connect can sign in again (V5 S-2). */
+  /** The session is dead: forget it so the page or Connect can sign in again. */
   function dropSession(why) {
     if (!st.token && !st.refresh) return;
     st.token = '';
@@ -593,7 +593,7 @@ export function createKcProxy({ gatewayHost = '127.0.0.1', gatewayPort, stateFil
      * frame still holding the old URL gets 421.
      */
     disconnect() {
-      // After any refresh in flight, so it cannot write cookies back (V5 N-1).
+      // After any refresh in flight, so it cannot write cookies back.
       return serialRefresh(() => this.disconnectNow());
     },
     async disconnectNow() {

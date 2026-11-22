@@ -110,7 +110,7 @@ function renderCrewView() {
   // Until the page has said which tab this is (and the launcher has answered), the view only asks it.
   const info = paneTab === undefined || !kcInfo ? { ...(kcInfo || {}), pending: true } : kcInfo;
   // lastError only matters to the sign-in panel; while the frame shows, a new
-  // error must not reload it and drop what the user typed (V5 N-5).
+  // error must not reload it and drop what the user typed.
   const connectedNow = !!(info && info.connected);
   const key = JSON.stringify([info && info.pending, info && info.available, connectedNow, info && info.origin, info && info.embedPath, info && info.overlay, connectedNow ? null : info && info.lastError, info && info.reason]);
   if (key === kcRendered) return;
@@ -135,7 +135,7 @@ const crewViewProvider = {
       if (view.visible) refreshKc();
     });
     // Every window looks again now and then while its tab shows, in case a
-    // kcChanged command did not reach it (V5 N-2).
+    // kcChanged command did not reach it.
     const poll = setInterval(() => {
       if (view.visible) refreshKc();
     }, 30_000);

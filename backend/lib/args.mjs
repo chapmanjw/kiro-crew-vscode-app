@@ -5,7 +5,7 @@ import path from 'node:path';
 /**
  * Arguments for `node out/server-main.js`.
  * The server is started directly, not through `code serve-web`, because the
- * CLI wrapper adds X-Frame-Options/frame-ancestors (R1-B section 2).
+ * CLI wrapper adds X-Frame-Options/frame-ancestors.
  */
 export function buildServerArgs({ host = '127.0.0.1', port, tokenFile, dataDir, workspace, basePath, proposedApiFor = [] }) {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('invalid port');

@@ -1,0 +1,27 @@
+Visual Studio Code Server Integration for Kiro Crew
+Copyright (c) 2026 John Chapman
+
+The code in this repository is licensed under the MIT License (see LICENSE).
+The MIT License does not cover the following.
+
+Kiro Crew artwork
+  The Kiro Crew ghost glyph (extension/kiro-crew-bridge/media/kiro-crew.svg),
+  the Kiro Crew app icon (extension/kiro-crew-bridge/icon.png), its vector
+  form (assets/kirocrew-logo.svg, copied unchanged from site/public/kirocrew-logo.svg
+  in the Kiro Crew source), and the app icon drawn in the store art
+  (assets/store-*.svg) are Kiro Crew artwork. Kiro Crew
+  (https://github.com/kirodotdev/KiroCrew) is licensed under the Apache License
+  2.0. That licence grants no trademark rights, and this repository has no
+  separate permission to use the marks beyond it. They are included to identify
+  Kiro Crew and remain under their owners' terms.
+
+Visual Studio Code mark
+  The Visual Studio Code name and icon (ui/icon.svg and the marks built
+  from it in assets/ and ui/, and the mark drawn in assets/store-*.svg) are trademarks of Microsoft Corporation. They are
+  used here only to identify Visual Studio Code. This project is independent and
+  is not affiliated with or endorsed by Microsoft.
+
+Visual Studio Code Server
+  The server the app downloads at run time is not part of this repository. It is
+  Microsoft's software under the Visual Studio Code Server License Terms
+  (https://aka.ms/vscode-server-license).

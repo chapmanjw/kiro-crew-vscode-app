@@ -30,7 +30,7 @@ async function withMock(fn) {
 const turn = (g, prompt, parts = []) =>
   runChatTurn({ gateway: g, prompt, folder: FOLDER, signal: new AbortController().signal, write: (p) => parts.push(p) });
 
-// ---------------------------------------------------------------- S-2 slots
+// ---------------------------------------------------------------- slots
 
 test('a slot closed in Kiro Crew is recreated with its project on the next turn', async () => {
   await withMock(async (mock, _origin, g) => {
@@ -67,7 +67,7 @@ test('an open slot whose project is already set is not re-pointed on every turn'
   });
 });
 
-// ---------------------------------------------------------------- S-6 permissions
+// ---------------------------------------------------------------- permissions
 
 test('the gateway out-of-scope 403 is reported as unapproved permissions, and clears once approved', async () => {
   assert.equal(isScopeDenied(403, { error: 'app token not permitted for this endpoint', code: 'forbidden' }), true);
@@ -88,7 +88,7 @@ test('the gateway out-of-scope 403 is reported as unapproved permissions, and cl
   });
 });
 
-// ---------------------------------------------------------------- S-3 folder pin
+// ---------------------------------------------------------------- folder pin
 
 test('folderInRoots allows only open workspace folders and their subfolders', () => {
   const w = { win: true };
@@ -105,7 +105,7 @@ test('folderInRoots allows only open workspace folders and their subfolders', ()
   assert.equal(folderInRoots('/work/demox', ['/work/demo'], p), false);
 });
 
-// ---------------------------------------------------------------- launcher: S-1/S-4 and S-6
+// ---------------------------------------------------------------- launcher
 
 function freePort() {
   return new Promise((resolve, reject) => {

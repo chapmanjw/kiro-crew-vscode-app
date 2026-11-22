@@ -1,4 +1,4 @@
-// Hiding this app's own "VS Code" composer chip inside the Kiro Crew tab.
+// Hiding this app's own "Open in Code" composer chip inside the Kiro Crew tab.
 //
 // Kiro Crew has no supported way to hide a session control on one surface:
 // a control has no visibility or `when` field (website/src/hooks/useSessionControls.ts
@@ -17,9 +17,9 @@ export const CHIP_ICON = 'Package';
  * label alone while the control has no status (ContextShelf.tsx:117-148; this
  * app declares no statusPath). The host renders no app-identity attribute on
  * the chip, so label plus icon is the narrowest stable match: another app's
- * Package-icon chip with another label keeps showing (V5 S-6).
+ * Package-icon chip with another label keeps showing.
  */
-export const CHIP_LABEL = 'VS Code';
+export const CHIP_LABEL = 'Open in Code';
 
 export function chipHideCss(icon = CHIP_ICON, label = CHIP_LABEL) {
   const cls = `lucide-${String(icon).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()}`;

@@ -1,8 +1,8 @@
 {
   "name": "vscode-pane",
-  "version": "0.6.4",
-  "displayName": "VS Code",
-  "description": "A full VS Code in a Kiro Crew pane. The app runs the official VS Code server on this machine and shows its workbench in the page, themed from Kiro Crew's palette, with a bridge so Kiro Crew can open files in VS Code and see which file VS Code has open, and a VS Code button in the chat composer that opens the chat's project folder.",
+  "version": "0.7.0",
+  "displayName": "Visual Studio Code Server Integration",
+  "description": "A full Visual Studio Code in a Kiro Crew pane. The app runs the official Visual Studio Code server on this machine and shows its workbench in the page, themed from Kiro Crew's palette, with a bridge so Kiro Crew can open files in Visual Studio Code and see which file Visual Studio Code has open, and an Open in Code button in the chat composer that opens the chat's project folder.",
   "author": "John Chapman",
   "license": "MIT",
   "minKiroCrewVersion": "0.13.0",
@@ -21,7 +21,9 @@
     ],
     "requiresDesktopApp": true
   },
-  "iconPath": "assets/icon-flat.svg",
+  "iconPath": "assets/icon-blue.svg",
+  "heroImage": "assets/store-hero.svg",
+  "heroImageDetail": "assets/store-hero-detail.svg",
   "permissions": {
     "api": [
       "/apps/vscode-pane/api",
@@ -40,11 +42,11 @@
     "webOrigin": true
   },
   "ui": {
-    "entry": "vscode-pane-0.6.4.mjs",
+    "entry": "vscode-pane-0.7.0.mjs",
     "pages": [
       {
         "route": "/apps/vscode-pane",
-        "label": "VS Code",
+        "label": "Code",
         "iconUrl": "icon-mono.svg",
         "iconInactiveUrl": "icon-idle.svg"
       }
@@ -73,8 +75,8 @@
     "sessionControls": [
       {
         "id": "open-in-vscode",
-        "entryPoint": "vscode-pane-session-0.6.4.mjs",
-        "label": "VS Code",
+        "entryPoint": "vscode-pane-session-0.7.0.mjs",
+        "label": "Open in Code",
         "icon": "Package"
       }
     ]

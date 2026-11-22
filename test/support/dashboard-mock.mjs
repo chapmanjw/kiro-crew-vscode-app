@@ -83,7 +83,7 @@ export function attachDashboard(rec) {
 <div class="dock" data-testid="composer-dock-root"><div class="input-area" data-testid="mock-composer">
 <div class="glass" data-testid="composer-dock">Message Kiro Crew</div>
 <div class="glass-shelf" data-testid="composer-context-shelf"><div class="chip-row" data-testid="chip-row">
-<button type="button" class="chip" data-session-control-chip="" title="VS Code" aria-label="VS Code" data-chip-id="vscode-pane:open-in-vscode"><svg class="lucide lucide-package" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>VS Code</span></button>
+<button type="button" class="chip" data-session-control-chip="" title="Open in Code" aria-label="Open in Code" data-chip-id="vscode-pane:open-in-vscode"><svg class="lucide lucide-package" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>Code</span></button>
 <button type="button" class="chip" data-session-control-chip="" title="Package app" aria-label="Package app" data-chip-id="package-app:control"><svg class="lucide lucide-package" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>Package app</span></button>
 <button type="button" class="chip" data-session-control-chip="" title="Other app" aria-label="Other app" data-chip-id="other-app:control"><svg class="lucide lucide-zap" width="13" height="13" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"></rect></svg><span>Other app</span></button>
 </div><span class="chip">Ultra Mode</span></div></div></div>

@@ -54,7 +54,7 @@ import {
   baseName,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.6.4.mjs';
+} from './vscode-pane-core-0.7.0.mjs';
 
 const { useAppApi, useTheme } = sdk;
 // The dashboard's session titles label the tabs opened from chats, when the
@@ -93,7 +93,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-6-4';
+const STYLE_ID = 'vscode-pane-style-0-7-0';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to
@@ -872,7 +872,7 @@ export default function VsCodePane() {
   // Automatic sign-in: at most once per page load and tunnel epoch (the epoch
   // moves when a session ends, say a 401 after 30 idle days), and never after
   // the user pressed Disconnect, which the launcher keeps until Connect or a
-  // paste (V5 S-2, S-3).
+  // paste.
   const kcEpoch = kcState && Number.isInteger(kcState.epoch) ? kcState.epoch : 0;
   const kcUserOff = !!(kcState && kcState.userDisconnected);
   useEffect(() => {
@@ -886,7 +886,7 @@ export default function VsCodePane() {
     holder.kcSeenConnect = kcRequests;
     // The first reading is a baseline; a lower count is a restarted launcher.
     if (seen === null || kcRequests <= seen) return;
-    // Even when the tunnel says connected: its session may be dead (V5 S-2).
+    // Even when the tunnel says connected: its session may be dead.
     signIn('connect');
   }, [kcRequests, signIn]);
   const kcDisconnect = async () => {
@@ -1346,7 +1346,7 @@ export default function VsCodePane() {
   session && session.chat && session.chat.message
     ? h('div', { className: 'vscp-note', role: 'alert', 'data-testid': 'vscode-pane-chat-problem' }, `VS Code Chat: ${session.chat.message}`)
     : null,
-  // The tab cannot sign in by itself until the dashboard has a URL (V5 S-1):
+  // The tab cannot sign in by itself until the dashboard has a URL:
   // say so with the one command that fixes it. Nothing is changed for you.
   kcAvailable && !kcConnected && kcState && kcState.lastCode === 'external_origin_unavailable'
     ? h('div', { className: 'vscp-note', role: 'status', 'data-testid': 'vscode-pane-kc-setup' },
