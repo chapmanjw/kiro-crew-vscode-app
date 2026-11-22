@@ -4,6 +4,8 @@
 
 A Kiro Crew app that runs the official Visual Studio Code server on your machine and shows a full Visual Studio Code in a Kiro Crew page, with terminals, debugging, the Microsoft Marketplace and your extensions. A small companion extension connects that VS Code back to Kiro Crew, so Kiro Crew can open a file at a line in VS Code and see which file VS Code has open. VS Code's own Chat can run Kiro Crew sessions, and VS Code gets a Kiro Crew tab in its right-hand pane.
 
+![Visual Studio Code running inside Kiro Crew, with the Kiro Crew chat in the editor's side panel](docs/images/screenshot.png)
+
 The app is named `vscode-pane` and appears in the sidebar as **Code**.
 
 ## Requirements
