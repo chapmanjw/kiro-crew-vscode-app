@@ -204,7 +204,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   // 4. The chip: hidden inside the tunnelled chat, another app's kept.
   const ef = embedFrame(page);
   const chips = await ef.evaluate(() => Array.from(document.querySelectorAll('[data-session-control-chip]')).map((b) => ({ id: b.dataset.chipId, display: getComputedStyle(b).display })));
-  check('inside the tunnelled chat the app\'s "VS Code" chip (Tag icon) is hidden while other apps\' chips show, one with the Package icon included',
+  check('inside the tunnelled chat the app\'s "Open in Code" chip (Package icon) is hidden while other apps\' chips show, one with the Package icon included',
     chips.length === 3 && chips.find((c) => c.id.startsWith('vscode-pane:'))?.display === 'none' && chips.find((c) => c.id.startsWith('other-app:'))?.display !== 'none' && chips.find((c) => c.id.startsWith('package-app:'))?.display !== 'none', JSON.stringify(chips));
 
   // 4a. First paint (0.5.3): the tunnelled page carries the theme's boot rule,
@@ -221,7 +221,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   check('the Kiro Crew tab\'s frame is on the side bar colour and revealed once its page has loaded (data-loaded, opacity 1)',
     !!kcLoaded && kcLoaded.loaded && kcLoaded.opacity === '1' && kcLoaded.bg !== 'rgba(0, 0, 0, 0)', JSON.stringify(kcLoaded));
 
-  // 4b. The tunnelled chat fills the webview flush (F8): its embed shell
+  // 4b. The tunnelled chat fills the webview flush: its embed shell
   //     touches all four edges at 0 px, nothing from <html> to the chat pane
   //     keeps a margin, padding, border, radius or shadow, the pane reaches
   //     the left, right and bottom edges, nothing scrolls, and the composer's
@@ -297,7 +297,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     !!out && dash.logouts === logouts0 + 1 && !embedFrame(page) && pageState === 'false', JSON.stringify({ out, logouts: dash.logouts - logouts0, page: pageState }));
   check('after Disconnect the old tunnel origin is refused', (await rawRequest({ port: kcPort, path: '/', headers: { host: new URL(origin).host } })).status === 421);
 
-  // V5 S-3: reloading the dashboard does not undo the Disconnect.
+  // Reloading the dashboard does not undo the Disconnect.
   const mintsBefore = hostServer.mints.length;
   await page.reload();
   await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
@@ -333,7 +333,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
   check('(b) when the dashboard has no URL configured, Connect reports external_origin_unavailable in the tab and stays signed out', !!refused, String(refused || '').slice(0, 200));
   const setupCmd = await waitFor(async () => page.locator('[data-testid="vscode-pane-kc-setup-command"]').textContent({ timeout: 1000 }).catch(() => null), 8000);
   const pageOrigin = new URL(page.url()).origin;
-  check('V5 S-1: the page names the one-time fix, the exact command for this dashboard, and the tab says the same',
+  check('the page names the one-time fix, the exact command for this dashboard, and the tab says the same',
     setupCmd === `kirocrew config set dashboard.url ${pageOrigin}` && /kirocrew config set dashboard\.url/.test(String(refused)), `${setupCmd}`);
   const link = gatewayMock.mintLink();
   await inView(page, framePort, async (f) => {
@@ -360,7 +360,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     return null;
   }, 30_000);
   check('the Markdown preview renders from the self-hosted webview endpoint, with no webview from vscode-cdn.net', !!preview && cdnRequests.length === 0, `${preview}; cdn ${cdnRequests.length}`);
-  // V5 M-1: script in a webview cannot reach the workbench or any file through the frame proxy.
+  // Script in a webview cannot reach the workbench or any file through the frame proxy.
   // The browser-side probe: a webview's own CSP may already stop the fetch.
   // The direct probe below sends the same requests with the webview's real
   // Host, which a webview page with a looser CSP would produce.
@@ -389,7 +389,7 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     }, path.join(workspace, 'hello.txt')).catch((e) => ({ error: e.message.slice(0, 80) }));
     if (probed && !probed.error) break;
   }
-  check('V5 M-1: a webview origin gets /vscode-remote-resource and the workbench refused (403) while its own pre/ files load and the preview renders',
+  check('a webview origin gets /vscode-remote-resource and the workbench refused (403) while its own pre/ files load and the preview renders',
     !!direct && !!preview && direct.remoteResource === 403 && direct.workbench === 403 && direct.preFile === 200 && direct.workbenchHostStillWorks === 200 &&
       !!probed && Object.values(probed).every((v) => v === 403 || v === 'blocked'),
     JSON.stringify({ direct, inBrowser: probed }));

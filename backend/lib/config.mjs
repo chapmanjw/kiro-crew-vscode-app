@@ -43,7 +43,7 @@ export function effectiveConfig(fileConfig, env, { homedir, appRoot }) {
     serverDir: pick(env.VSCODE_PANE_SERVER_DIR, fileConfig.serverDir) || null,
     workspace: pick(env.VSCODE_PANE_WORKSPACE, fileConfig.workspace) || homedir,
     codeCli: pick(env.VSCODE_PANE_CODE_CLI, fileConfig.codeCli) || 'code',
-    // Dev convenience only: the R1-B probe's download of the server build.
+    // Dev convenience only: a server build left in the dev cache.
     devCacheRoot:
       pick(env.VSCODE_PANE_DEV_CACHE, fileConfig.devCacheRoot) ||
       path.join(appRoot, '.cache', 'serve-web', 'cli-data', 'serve-web'),

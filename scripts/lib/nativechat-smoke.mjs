@@ -47,8 +47,8 @@ export function isSessionSlot(slot, workspace) {
 const confirmations = (frame, text) => frame.locator('.chat-confirmation-widget, .chat-confirmation-widget2', { hasText: text });
 
 /**
- * The native session checks after the first message (which created session
- * S1). Returns {s1, s2} for the history check after the reload.
+ * The native session checks after the first message (which created the first
+ * session). Returns {s1, s2} for the history check after the reload.
  */
 export async function nativeChatChecks({ page, frame, api, check, gatewayMock, workspace, firstTurn, root }) {
   const shots = path.join(root, '.cache', 'smoke');

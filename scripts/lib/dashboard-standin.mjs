@@ -138,7 +138,7 @@ sdkState.setChatPanel = (on) => { ChatPanel = on ? ChatPanelStub : undefined; };
 `;
 
 // Token names from website/src/styles/design-tokens.css; values: a Dracula-style
-// dark palette (John's live theme) and the dashboard's default light palette.
+// dark palette and the dashboard's default light palette.
 const PALETTES = `
 [data-theme="dracula-dark"]{
   --bg:#21222c;--bg-accent:#232530;--bg-elevated:#282a36;--bg-hover:#343746;
@@ -213,7 +213,7 @@ export function createDashboardStandin({ repoRoot, launcherPort, secret, recentD
     },
   })}</script></head>
 <body>
-<div id="shell"><header id="topbar">Kiro Crew</header><nav id="rail"><div id="rail-head"><div id="rail-brand"><i id="rail-logo"></i><span>KIRO CREW</span></div><div id="rail-hairline"></div></div><div id="rail-items"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">VS Code</button></div></nav>
+<div id="shell"><header id="topbar">Kiro Crew</header><nav id="rail"><div id="rail-head"><div id="rail-brand"><i id="rail-logo"></i><span>KIRO CREW</span></div><div id="rail-hairline"></div></div><div id="rail-items"><button id="nav-chat" type="button">Chat</button><button id="nav-vscode" type="button">Code</button></div></nav>
 <main id="main-content"></main></div>
 <script type="module">
 import React from 'react';

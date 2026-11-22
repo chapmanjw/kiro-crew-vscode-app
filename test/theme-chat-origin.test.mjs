@@ -1,4 +1,4 @@
-// Round 2: Kiro Crew theme -> VS Code, the built-in Chat backed by the Kiro
+// Kiro Crew theme -> VS Code, the built-in Chat backed by the Kiro
 // Crew gateway, and a stable frame origin across launcher restarts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

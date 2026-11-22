@@ -1,5 +1,5 @@
 // Unit tests for the UI's pure helpers (ui/vscode-pane-core-*.mjs) and the
-// manifest wiring the round-2 UI depends on.
+// manifest wiring the page depends on.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -137,7 +137,7 @@ test('framePlacement positions over the slot and clips to bounds with rounded bo
 });
 
 test('manifest: version, bundle names, permissions, icons and the composer control', () => {
-  assert.equal(manifest.version, '0.6.4');
+  assert.equal(manifest.version, '0.7.0');
   assert.equal(manifest.ui.entry, `vscode-pane-${manifest.version}.mjs`);
   assert.ok(fs.existsSync(path.join(ROOT, 'ui', manifest.ui.entry)));
   assert.equal(coreFile, `vscode-pane-core-${manifest.version}.mjs`);

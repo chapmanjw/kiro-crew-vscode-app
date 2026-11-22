@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { findWorkspaceFile, workspaceFileFinder } from '../backend/lib/workspacefile.mjs';
-import { workbenchUrl } from '../backend/lib/args.mjs';
+import { workbenchUrl, toFolderParam } from '../backend/lib/args.mjs';
 import { Bridge } from '../backend/lib/bridge.mjs';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { createGatewayMock } from './support/gateway-mock.mjs';
@@ -236,12 +236,12 @@ test('launcher: a tab on a folder with a workspace file loads the workspace, and
     const tp = (await proxy('POST', '/api/tabs/open', { folder: plain })).json.tab;
     s = (await proxy('GET', '/api/session')).json;
     const urlOf = (id) => s.tabs.list.find((t) => t.id === id).url;
-    assert.deepEqual(params(urlOf(tw.id)), { folder: null, workspace: wsFile }, 'the file named after the folder, not the first by name');
-    assert.deepEqual(params(urlOf(tp.id)), { folder: plain, workspace: null }, 'a folder with none opens as a folder');
-    assert.deepEqual(params(s.url), { folder: plain, workspace: null }, 'the session url is the front tab\'s');
+    assert.deepEqual(params(urlOf(tw.id)), { folder: null, workspace: toFolderParam(wsFile) }, 'the file named after the folder, not the first by name');
+    assert.deepEqual(params(urlOf(tp.id)), { folder: toFolderParam(plain), workspace: null }, 'a folder with none opens as a folder');
+    assert.deepEqual(params(s.url), { folder: toFolderParam(plain), workspace: null }, 'the session url is the front tab\'s');
     assert.equal(s.tabs.list.find((t) => t.id === tw.id).folder, withWs, 'the tab is still on the folder');
     await proxy('POST', '/api/tabs/activate', { id: tw.id });
-    assert.deepEqual(params((await proxy('GET', '/api/session')).json.url), { folder: null, workspace: wsFile });
+    assert.deepEqual(params((await proxy('GET', '/api/session')).json.url), { folder: null, workspace: toFolderParam(wsFile) });
     // The file menu's "Open in VS Code" on that folder finds the tab that is on it.
     const fm = (await proxy('POST', '/api/file-menu', { item_id: 'open-in-vscode', surface: 'folder-row', path: withWs, kind: 'dir' })).json;
     assert.match(fm.url, new RegExp(`\\?tab=${tw.id}$`));
@@ -253,20 +253,20 @@ test('launcher: a tab on a folder with a workspace file loads the workspace, and
     await hello('wa', [plain], tw.id, movedFile);
     const followed = await tabNow(tw.id);
     assert.equal(followed.folder, moved);
-    assert.deepEqual(params(followed.url), { folder: null, workspace: movedFile });
+    assert.deepEqual(params(followed.url), { folder: null, workspace: toFolderParam(movedFile) });
     // Then a plain folder: the tab follows it as before.
     await hello('wa', [plain], tw.id);
     const back = await tabNow(tw.id);
     assert.equal(back.folder, plain);
-    assert.deepEqual(params(back.url), { folder: plain, workspace: null });
+    assert.deepEqual(params(back.url), { folder: toFolderParam(plain), workspace: null });
     // A workspace file added to a folder shows in the next URL.
     const added = touch(path.join(plain, 'plain.code-workspace'));
     let url = '';
-    for (let i = 0; i < 80 && params(url).workspace !== added; i++) {
+    for (let i = 0; i < 80 && params(url).workspace !== toFolderParam(added); i++) {
       await sleep(100);
       url = (await tabNow(tp.id)).url;
     }
-    assert.deepEqual(params(url), { folder: null, workspace: added });
+    assert.deepEqual(params(url), { folder: null, workspace: toFolderParam(added) });
   } finally {
     child.kill();
     await sleep(200);

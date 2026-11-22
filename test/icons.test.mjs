@@ -1,5 +1,5 @@
-// The icon files app.json names exist, parse, and are the flat neutral marks
-// built from ui/icon.svg, so Kiro Crew's rail never shows the blue mark.
+// The icon files app.json names exist and parse. iconPath is the blue VS Code mark;
+// the rail's idle row and the fallback icon are the flat neutral marks, all built from ui/icon.svg.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\
 const BLUES = ['#0065A9', '#007ACC', '#1F9CF0'];
 // Dracula Pro's own colours: the marks must not be tied to one theme.
 const DRACULA = ['#B9A9FF', '#9C93C9', '#644AC9', '#565289', '#F8F8F2', '#2A2A2A', '#9580FF'];
-const SHIPPED = ['assets/icon-flat.svg', 'ui/icon-mono.svg', 'ui/icon-idle.svg'];
+const SHIPPED = ['ui/icon-mono.svg', 'ui/icon-idle.svg'];
 
 test('every icon field app.json names points at a file that parses', () => {
   const files = manifestIconFiles(ROOT);
@@ -31,16 +31,18 @@ test('every icon field app.json names points at a file that parses', () => {
   }
 });
 
-test('the rail can never pick the blue mark: every manifest icon is a flat SVG', () => {
-  assert.equal(manifest.iconPath, 'assets/icon-flat.svg');
+test('iconPath is the blue VS Code mark; the idle row and the fallback stay flat; no editor tile ships', () => {
+  assert.equal(manifest.iconPath, 'assets/icon-blue.svg');
   assert.ok(!('iconPathDark' in manifest) && !('iconUrl' in manifest) && !('iconUrlDark' in manifest));
+  assert.ok(!fs.existsSync(path.join(ROOT, 'assets/store-icon.svg')));
+  assert.ok(read('assets/kirocrew-logo.svg').includes('M84.76,266.62'), 'vendored Kiro Crew logo');
   for (const { field, file } of manifestIconFiles(ROOT)) {
     assert.ok(file.endsWith('.svg'), `${field} must be an SVG`);
-    assert.ok(SHIPPED.includes(path.relative(ROOT, file).replace(/\\/g, '/')), `${field} must be a flat mark`);
+    assert.ok([...SHIPPED, 'assets/icon-blue.svg'].includes(path.relative(ROOT, file).replace(/\\/g, '/')), `${field} must be a shipped mark`);
   }
 });
 
-test('the flat marks: no blue, no Dracula colours, neutral greys, --ico tokens, light/dark by color scheme', () => {
+test('the idle and fallback marks: no blue, no Dracula colours, neutral greys, --ico tokens, light/dark by color scheme', () => {
   for (const rel of SHIPPED) {
     const svg = read(rel).toUpperCase();
     for (const c of [...BLUES, ...DRACULA]) assert.ok(!svg.includes(c), `${rel} has ${c}`);
@@ -57,21 +59,34 @@ test('the flat marks: no blue, no Dracula colours, neutral greys, --ico tokens, 
   }
 });
 
-test('the flat marks are what scripts/render-icon.mjs builds from ui/icon.svg', () => {
+test('the marks are what scripts/render-icon.mjs builds from ui/icon.svg', () => {
   const src = read('ui/icon.svg');
   const { silhouette, panel } = extractPaths(src);
   const marks = buildMarks(src);
   assert.equal(read('ui/icon-idle.svg'), marks.idle);
   assert.equal(read('ui/icon-mono.svg'), marks.lit);
-  assert.equal(read('assets/icon-flat.svg'), marks.lit);
-  for (const svg of Object.values(marks)) {
-    assert.ok(svg.includes(silhouette) && svg.includes(panel), 'uses the real VS Code paths');
-  }
+  assert.equal(read('assets/icon-blue.svg'), marks.blue);
+  for (const svg of Object.values(marks)) assert.ok(svg.includes(silhouette), 'uses the real VS Code silhouette');
+  for (const svg of [marks.idle, marks.lit]) assert.ok(svg.includes(panel), 'uses the real VS Code panel');
   // Idle is the quieter pair, selected the text-strength pair.
   assert.ok(marks.idle.includes(`.a{fill:var(--ico-a,${NEUTRAL.idle.light.a})}`));
   assert.ok(marks.idle.includes(`.a{fill:var(--ico-a,${NEUTRAL.idle.dark.a})}`));
   assert.ok(marks.lit.includes(`.b{fill:var(--ico-b,${NEUTRAL.lit.dark.b})}`));
   assert.ok(marks.lit.includes(`.b{fill:var(--ico-b,${NEUTRAL.lit.light.b})}`));
+});
+
+test('the blue mark: the three VS Code blues, transparent, no colour-scheme rule, no filters', () => {
+  const raw = read('assets/icon-blue.svg');
+  for (const c of BLUES) assert.ok(raw.includes(`fill=\"${c}\"`), c);
+  assert.doesNotMatch(raw, /prefers-color-scheme|<style|GRADIENT|FILTER|MIX-BLEND|<MASK|<rect|var\(--/i);
+  assert.deepEqual([...raw.matchAll(/#[0-9A-F]{6}/gi)].map((m) => m[0].toUpperCase()).sort(), [...BLUES].sort());
+});
+
+test('the blue mark: the three VS Code blues, transparent, no colour-scheme rule, no filters', () => {
+  const raw = read('assets/icon-blue.svg');
+  for (const c of BLUES) assert.ok(raw.includes('fill="' + c + '"'), c);
+  assert.doesNotMatch(raw, /prefers-color-scheme|<style|gradient|filter|mix-blend|<mask|<rect|var\(--/i);
+  assert.deepEqual([...raw.matchAll(/#[0-9A-F]{6}/gi)].map((m) => m[0].toUpperCase()).sort(), [...BLUES].sort());
 });
 
 test('the bridge extension ships the Kiro Crew mark: a PNG icon >= 128px and a currentColor container SVG', () => {

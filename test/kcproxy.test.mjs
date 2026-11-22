@@ -145,7 +145,7 @@ test('pages through the tunnel: frame headers rewritten, chip stylesheet added, 
   assert.equal(page.headers['referrer-policy'], 'no-referrer');
   assert.match(page.headers['content-security-policy'], /frame-ancestors http:\/\/localhost:5476 http:\/\/127\.0\.0\.1:4100 http:\/\/\*\.localhost:4100$/);
   assert.match(page.headers['content-security-policy'], /default-src 'self'/, 'the rest of the CSP is kept');
-  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="VS Code"\]:has\(svg\.lucide-package\)/);
+  assert.match(page.body, /<style id="kc-vscode-pane">button\[data-session-control-chip\]\[aria-label="Open in Code"\]:has\(svg\.lucide-package\)/);
   assert.ok(page.body.includes(`<style id="kc-vscode-pane">${tunnelCss()}</style></head>`), 'the chip rule and the embed flush rules are injected whole, before </head>');
   assert.equal(page.headers['content-length'], String(Buffer.byteLength(page.body)));
   assert.ok(mock.rec.dash.xff > x0, 'X-Forwarded-For reached the gateway');
@@ -217,9 +217,9 @@ test('a restarted launcher keeps the origin, port and session; Disconnect signs 
   assert.ok(!lines.some((l) => /token=|mc_token|mc_refresh/.test(l)), 'no credential in the log');
 });
 
-// ---------------------------------------------------------------- V5 review
+// ---------------------------------------------------------------- tunnel hardening
 
-test('V5 S-4: only origin-form targets; an absolute-form target never reaches the gateway', async (t) => {
+test('only origin-form targets; an absolute-form target never reaches the gateway', async (t) => {
   const { kc, mock, H, origin, host } = await setup(t);
   await kc.signIn(mock.mintLink());
   const before = mock.rec.dash.forbiddenHits.length;
@@ -234,7 +234,7 @@ test('V5 S-4: only origin-form targets; an absolute-form target never reaches th
   assert.match(await wsOpen(kc.port, host, origin, 'http://127.0.0.1/api/ws'), /403/);
 });
 
-test('V5 S-5: setup and credential routes for others are refused; reading them is not', () => {
+test('setup and credential routes for others are refused; reading them is not', () => {
   for (const [m, p] of [['POST', '/api/shared-crew/ssm/invites'], ['POST', '/api/shared-crew/tailscale/invites/x/resend'], ['DELETE', '/api/shared-crew/tailscale/credential'],
     ['PUT', '/api/security/credential-redaction'], ['POST', '/api/kas-login/device'], ['POST', '/api/kas-login/loopback'], ['POST', '/api/kas-login/logout'],
     ['POST', '/api/connections/mint'], ['GET', '/api/connections/mint'], ['POST', '/api/connections/premint'], ['GET', '/api/connections/oauth-clients'], ['POST', '/api/mcp/oauth/relay'],
@@ -246,7 +246,7 @@ test('V5 S-5: setup and credential routes for others are refused; reading them i
   }
 });
 
-test('V5 S-2: a 401 from the session checks ends the stored session, so sign-in can run again', async (t) => {
+test('a 401 from the session checks ends the stored session, so sign-in can run again', async (t) => {
   const { kc, mock, H, origin, stateFile } = await setup(t);
   await kc.signIn(mock.mintLink());
   const e0 = kc.status().epoch;
@@ -269,7 +269,7 @@ test('V5 S-2: a 401 from the session checks ends the stored session, so sign-in 
   assert.ok(origin);
 });
 
-test('V5 S-3: Disconnect is persisted until a non-automatic sign-in', async (t) => {
+test('Disconnect is persisted until a non-automatic sign-in', async (t) => {
   const { kc, mock, stateFile } = await setup(t);
   await kc.signIn(mock.mintLink());
   await kc.disconnect();
@@ -281,26 +281,26 @@ test('V5 S-3: Disconnect is persisted until a non-automatic sign-in', async (t) 
   assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).userDisconnected, false);
 });
 
-test('V5 N-1, N-3, N-4, N-7, N-8: refresh vs disconnect, foreign-port cookies, WS host, body cap, replaced chain', async (t) => {
+test('refresh vs disconnect, foreign-port cookies, WS host, body cap, replaced chain', async (t) => {
   const { kc, mock, H, origin, host } = await setup(t);
   await kc.signIn(mock.mintLink());
-  // N-1: a refresh in flight when Disconnect is pressed does not write cookies back.
+  // A refresh in flight when Disconnect is pressed does not write cookies back.
   const inflight = req(kc.port, { method: 'POST', path: '/api/auth/refresh', headers: H({ origin, 'content-length': '0' }) });
   await new Promise((r) => setTimeout(r, 20));
   await kc.disconnect();
   await inflight;
   assert.equal(kc.status().connected, false);
-  // N-3: an expiry for another port's cookie does not touch ours.
+  // An expiry for another port's cookie does not touch ours.
   const s = { token: 'A', refresh: 'R' };
   assert.equal(captureCookies(['mc_token_1=; Max-Age=0', 'mc_refresh_1=; Max-Age=0'], s, 4000), false);
   assert.deepEqual(s, { token: 'A', refresh: 'R' });
-  // N-4: a WebSocket to the wrong host is 421, like HTTP.
+  // A WebSocket to the wrong host is 421, like HTTP.
   assert.match(await wsOpen(kc.port, `127.0.0.1:${kc.port}`, origin), /^HTTP\/1\.1 421/);
-  // N-7: an oversized refresh body is refused.
+  // An oversized refresh body is refused.
   const newHost = new URL(kc.origin).host;
   const big = await req(kc.port, { method: 'POST', path: '/api/auth/refresh', headers: { host: newHost, origin: kc.origin, 'content-length': String(20 * 1024) }, body: 'x'.repeat(20 * 1024) }).catch(() => ({ status: 0 }));
   assert.ok(big.status === 413 || big.status === 0, String(big.status));
-  // N-8: signing in again over a live session logs the old chain out.
+  // Signing in again over a live session logs the old chain out.
   await kc.signIn(mock.mintLink());
   const logouts = mock.rec.dash.logouts;
   await kc.signIn(mock.mintLink());

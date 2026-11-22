@@ -1,4 +1,4 @@
-// Round 3: the card sits where the Kiro Crew Sessions card does, and the
+// The card sits where the Kiro Crew Sessions card does, and the
 // bridge publishes its language model at activation so a plain first chat
 // message carries a model.
 import { test } from 'node:test';

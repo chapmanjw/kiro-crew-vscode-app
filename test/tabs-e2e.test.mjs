@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { signProxyRequest } from '../backend/lib/auth.mjs';
 import { createGatewayMock } from './support/gateway-mock.mjs';
+import { toFolderParam } from '../backend/lib/args.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -105,8 +106,8 @@ test('launcher: tabs route commands to their own windows, and the file menu open
     s = (await proxy('GET', '/api/session')).json;
     assert.deepEqual(s.tabs.list.map((t) => [t.id, t.session]), [[ta.id, null], [tb.id, 'chat-b']]);
     assert.equal(s.tabs.active, tb.id);
-    for (const t of s.tabs.list) assert.match(t.url, new RegExp(`/\\?folder=${encodeURIComponent(t.folder).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
-    assert.equal(new URL(s.url).searchParams.get('folder'), b, 'the session url is the front tab\'s');
+    for (const t of s.tabs.list) assert.match(t.url, new RegExp(`/\\?folder=${encodeURIComponent(toFolderParam(t.folder)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+    assert.equal(new URL(s.url).searchParams.get('folder'), toFolderParam(b), 'the session url is the front tab\'s');
 
     // Two windows. Window A has said which tab it is; window B has not yet.
     await hello('wa', a, ta.id);

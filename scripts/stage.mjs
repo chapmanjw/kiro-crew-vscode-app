@@ -6,7 +6,7 @@
 //
 //   node scripts/stage.mjs [dest]      default dest: .cache/stage/vscode-pane
 //
-// When the R1-B probe's server build exists under .cache, the staged copy gets
+// When a server build exists under .cache, the staged copy gets
 // a dev-config.json pointing at it so the first start does not download.
 import fs from 'node:fs';
 import path from 'node:path';

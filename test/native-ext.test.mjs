@@ -324,7 +324,7 @@ test('commandOf reads a shell command from the tool input', () => {
   assert.equal(sessions.commandOf(''), '');
 });
 
-test('S-5: only the Approve button approves; a plain "yes" (no button picked) is a rejection', () => {
+test('only the Approve button approves; a plain "yes" (no button picked) is a rejection', () => {
   assert.equal(sessions.approvalFromConfirmation('Approve'), 'approved');
   for (const v of ['yes', 'Yes', 'approve', 'Reject', '', undefined, null, 1]) assert.equal(sessions.approvalFromConfirmation(v), 'rejected', String(v));
 });
