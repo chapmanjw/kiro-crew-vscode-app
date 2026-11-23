@@ -14,7 +14,7 @@ import { mintAllowed } from '../backend/lib/secretkey.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
 const coreFile = fs.readdirSync(path.join(ROOT, 'ui')).find((f) => /^vscode-pane-core-.*\.mjs$/.test(f));
-const { probeUrl, webOriginUrl, chooseFrameUrl } = await import(pathToFileURL(path.join(ROOT, 'ui', coreFile)).href);
+const { probeUrl, webOriginUrl, chooseFrameUrl, canUseWebOrigin, chooseReach, frameUrlFor, unreachableAdvice } = await import(pathToFileURL(path.join(ROOT, 'ui', coreFile)).href);
 
 test('the manifest opts into the gateway web origin relay', () => {
   assert.equal(manifest.backend.webOrigin, true);
@@ -73,6 +73,59 @@ test('chooseFrameUrl keeps the frame port unless the probe said to use the web o
   assert.equal(chooseFrameUrl(session, 'origin', loc), 'http://vscode-pane.apps.localhost:7778/vsc-KEY/?folder=%2Fhome%2Fme');
   assert.equal(chooseFrameUrl({ url: session.url }, 'origin', loc), null);
   assert.equal(chooseFrameUrl(null, 'frame', loc), null);
+});
+
+// A dashboard reached through a tunnel's https address (0.7.1): the frame port is the
+// viewer's own 127.0.0.1 and the web origin names the viewer's own loopback, so neither
+// leads to the machine that runs Kiro Crew. The page used to point its frame at the
+// frame port anyway and show the browser's connection error.
+test('canUseWebOrigin: plain http on a loopback name only', () => {
+  const at = (protocol, hostname) => ({ protocol, hostname, port: '5476' });
+  for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '[::1]', '::1', 'kirocrew.localhost', 'a-b.localhost']) {
+    assert.equal(canUseWebOrigin(at('http:', host)), true, host);
+  }
+  assert.equal(canUseWebOrigin(at('https:', 'localhost')), false, 'https has no web origin (it is plain http)');
+  for (const host of ['tunnel-host.example.test', '192.168.1.5', '10.0.0.7', 'devbox.example.com', 'localhost.evil.example', 'evil.localhost.example', 'a.b.localhost', '', undefined]) {
+    assert.equal(canUseWebOrigin(at('http:', host)), false, String(host));
+  }
+  assert.equal(canUseWebOrigin(null), false);
+  assert.equal(canUseWebOrigin({}), false);
+  assert.equal(canUseWebOrigin({ protocol: 'http:' }), false, 'no host name, no claim');
+});
+
+test('chooseReach: the frame port when it answered, else the web origin when the address can carry it, else none', () => {
+  const local = { protocol: 'http:', hostname: '127.0.0.1', port: '5476' };
+  const forward = { protocol: 'http:', hostname: 'localhost', port: '49152' };
+  const tunnel = { protocol: 'https:', hostname: 'tunnel-host.example.test', port: '' };
+  assert.equal(chooseReach(true, local), 'frame');
+  assert.equal(chooseReach(true, tunnel), 'frame', 'a probe that answered is the proof, whatever the address');
+  assert.equal(chooseReach(false, forward), 'origin');
+  assert.equal(chooseReach(false, tunnel), 'none');
+  assert.equal(chooseReach(false, { protocol: 'http:', hostname: '192.168.1.5', port: '5476' }), 'none');
+});
+
+test('a frame URL for the verdict none is no URL', () => {
+  const loc = { protocol: 'https:', hostname: 'x.example', port: '' };
+  assert.equal(frameUrlFor(session.url, session, 'none', loc), null);
+  assert.equal(chooseFrameUrl(session, 'none', loc), null);
+  assert.equal(frameUrlFor(session.url, session, 'frame', loc), session.url, 'the other verdicts are as before');
+});
+
+test('unreachableAdvice names the viewer\'s address and the port forward, with the gateway\'s own port', () => {
+  const loc = { protocol: 'https:', host: 'tunnel-host.example.test' };
+  const a = unreachableAdvice(loc, { webOrigin: { host: 'vscode-pane.apps.localhost', probe: '/_vscp-probe', gatewayPort: 5476 } });
+  assert.equal(a.title, 'VS Code cannot load at this address');
+  assert.match(a.message, /tunnel-host\.example\.test/);
+  assert.equal(a.command, 'ssh -L 5476:127.0.0.1:5476 <user>@<that machine>');
+  assert.match(a.steps, /forward a local port/);
+  assert.match(a.after, /http:\/\/localhost:5476 in this browser/);
+  assert.match(a.after, /kirocrew token/);
+  assert.match(a.after, /machine that hosts Kiro Crew itself/);
+  // A launcher that does not report its gateway's port (an older run) leaves the port to the reader.
+  for (const s of [null, {}, { webOrigin: {} }, { webOrigin: { gatewayPort: null } }, { webOrigin: { gatewayPort: 0 } }, { webOrigin: { gatewayPort: 70000 } }, { webOrigin: { gatewayPort: '5476' } }]) {
+    assert.equal(unreachableAdvice(loc, s).command, 'ssh -L <port>:127.0.0.1:<port> <user>@<that machine>', JSON.stringify(s));
+  }
+  assert.match(unreachableAdvice(null, null).message, /this address/);
 });
 
 test('overlayTabBody keeps the tab, its embed path and sign-in state and drops the tunnel address', async () => {

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { slotNameFor } from '../../backend/lib/gateway.mjs';
 import { edgeChecks } from './edge-checks.mjs';
+import { decodePng } from './png.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -360,6 +361,34 @@ export async function tabChecks({ page, frame, api, hostServer, gatewayMock, wor
     return null;
   }, 30_000);
   check('the Markdown preview renders from the self-hosted webview endpoint, with no webview from vscode-cdn.net', !!preview && cdnRequests.length === 0, `${preview}; cdn ${cdnRequests.length}`);
+  // The preview is painted in the editor's background. The workbench sits in the theme's colour scheme and a webview
+  // page sets none, so a webview frame left alone gets an opaque white canvas, and the theme's light text sat on white.
+  {
+    const editorBg = await frame.locator('.monaco-workbench .part.editor').first().evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => '');
+    const want = (editorBg.match(/\d+/g) || []).slice(0, 3).map(Number);
+    const content = await waitFor(async () => {
+      for (const f of page.frames()) {
+        if (!new RegExp(`^http://[a-z0-9]+\\.localhost:${framePort}/`).test(f.url())) continue;
+        const t = await f.evaluate(() => (document.body && document.body.innerText) || '').catch(() => '');
+        if (/Preview works through loopback/.test(t)) return f;
+      }
+      return null;
+    }, 10_000);
+    // The content's frame sits in the webview host's, which the workbench holds in an iframe.webview.
+    const host = content && content.parentFrame();
+    const webviewEl = host ? await host.frameElement().catch(() => null) : null;
+    const box = webviewEl ? await webviewEl.boundingBox() : null;
+    let samples = [];
+    if (box && want.length === 3) {
+      const png = decodePng(await page.screenshot());
+      // Padding and empty body, away from the text at the top and the notifications at the bottom.
+      samples = [[6, box.height * 0.6], [box.width / 2, box.height * 0.7], [box.width - 12, box.height * 0.5]].map(([dx, dy]) => png.px(Math.round(box.x + dx), Math.round(box.y + dy)));
+    }
+    const near = (c) => c.every((v, i) => Math.abs(v - want[i]) <= 12);
+    check('the Markdown preview is painted in the editor\'s background, not on an opaque white canvas',
+      want.length === 3 && samples.length === 3 && samples.every(near),
+      JSON.stringify({ editorBackground: editorBg, samples, box: box && { w: Math.round(box.width), h: Math.round(box.height) } }));
+  }
   // Script in a webview cannot reach the workbench or any file through the frame proxy.
   // The browser-side probe: a webview's own CSP may already stop the fetch.
   // The direct probe below sends the same requests with the webview's real

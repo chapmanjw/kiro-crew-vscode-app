@@ -471,14 +471,27 @@ export function bootColors(theme, vsTheme = null) {
 }
 
 /**
- * One rule that paints the root and body, and tells the browser the page's
- * colour scheme, before any other stylesheet has loaded. `:where()` gives it
- * zero specificity so the page's own rules win once they arrive. Without the
- * scheme (`scheme: true`, the workbench) a framed page whose scheme differs from
- * its parent's gets an opaque white canvas; the tunnelled dashboard sets its
- * own scheme, so it passes `scheme: false` and only gets the colours.
+ * VS Code's webview frames (the Markdown preview, an extension's page, the Kiro
+ * Crew view) hold pages that set no colour scheme, as in any browser. A frame
+ * whose scheme differs from the one it sits in gets an opaque white canvas, and
+ * the workbench sits in the theme's scheme (bootCss), so left alone every webview
+ * is a white page with the theme's light text on it. Putting the frame itself
+ * back to the normal scheme gives it the transparent canvas it has in any other
+ * browser tab, over the editor's own background.
+ */
+export const WEBVIEW_FRAME_CSS = ':where(iframe.webview){color-scheme:normal}';
+
+/**
+ * The rules a page gets before any other stylesheet has loaded. The first
+ * paints the root and body, and tells the browser the page's colour scheme.
+ * `:where()` gives it zero specificity so the page's own rules win once they
+ * arrive. Without the scheme (`scheme: true`, the workbench) a framed page whose
+ * scheme differs from its parent's gets an opaque white canvas; the tunnelled
+ * dashboard sets its own scheme, so it passes `scheme: false` and only gets the
+ * colours. The workbench also gets WEBVIEW_FRAME_CSS, for the frames inside it.
  */
 export function bootCss(theme, vsTheme = null, { scheme = true } = {}) {
   const c = bootColors(theme, vsTheme);
-  return `:where(html){background:${c.bg};color:${c.fg};${scheme ? `color-scheme:${c.kind}` : ''}}:where(body){background:${c.bg}}`.replace(';}', '}');
+  const page = `:where(html){background:${c.bg};color:${c.fg};${scheme ? `color-scheme:${c.kind}` : ''}}:where(body){background:${c.bg}}`.replace(';}', '}');
+  return scheme ? `${page}${WEBVIEW_FRAME_CSS}` : page;
 }

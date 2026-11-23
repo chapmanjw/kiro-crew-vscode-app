@@ -69,3 +69,35 @@ Manager listener, is refused with 421 (the reason is in the security log,
 per-webview `<uuid>.localhost` hosts are not used and webviews take VS Code's
 default endpoint; and the overlay relies on VS Code's webview iframe naming, so
 a VS Code release that changes it needs the finder in `overlay.mjs` updated.
+
+## An address that is not a local port
+
+Both routes end at a port on the viewer's own machine. The frame port is
+`127.0.0.1:<frame port>`, and the web origin is `<app>.apps.localhost:<the
+dashboard's port>`, which a browser resolves to its own loopback. A dashboard
+reached at a tunnel's https address, or at any host name other than `localhost`,
+`127.0.0.1`, `[::1]` and `<name>.localhost`, has neither. No local port carries
+the request. The gateway relays the web origin only for a request that names
+`<app>.apps.localhost` and arrives straight from its own machine, and a tunnel in
+front of the dashboard serves the dashboard's pages and calls under the
+dashboard's own name. The app proxy (`/apps/<app>/api/`) carries HTTP only, while
+VS Code's workbench needs a WebSocket to its server.
+
+Before 0.7.1 the page framed `http://127.0.0.1:<frame port>` at such an address
+anyway. The browser then showed its own connection error in the frame (Chrome as
+a sad-face page, Firefox as a blank frame with the console line `Content at
+about:neterror?... may not load or link to chrome://...`), and nothing reached
+Kiro Crew. The page now runs the reachability probe at every address. When the
+frame port does not answer and the address cannot carry the web origin, it shows
+"VS Code cannot load at this address" and the port forward that works:
+
+```
+ssh -L <gateway port>:127.0.0.1:<gateway port> <user>@<the machine that runs Kiro Crew>
+```
+
+Then open `http://localhost:<gateway port>` in that browser. On the machine that
+runs Kiro Crew, `kirocrew token` prints a link that signs the browser in. The
+forward uses the gateway's own port number, so the gateway accepts the `Host` as
+it is. Another local port works after **Allow port N**, as above. **Check again**
+probes again. A frame port that does answer is used at any address, so a browser
+on the machine itself keeps working whatever name it uses.

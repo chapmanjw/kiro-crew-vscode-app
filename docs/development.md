@@ -53,6 +53,14 @@ are free. It needs a local Chrome or Edge and installs `playwright-core` under
 network access. Screenshots land in `.cache/smoke/` (`workbench.png`,
 `chat.png`, `after-restart.png`, `crew-tab-dark.png`).
 
+The viewer-reach checks live in `scripts/lib/reach-checks.mjs`. They open the
+stand-in at a name that is not a loopback name (`tunnel-viewer.test`, which the
+smoke's browser resolves to 127.0.0.1 with `--host-resolver-rules`) and check
+that, with the frame port unreachable, the pane shows "VS Code cannot load at
+this address" with the port forward for the gateway's port and creates no VS Code
+frame, that Check again probes again, and that a frame port that does answer is
+used at that same address.
+
 The Kiro Crew tab checks live in `scripts/lib/tab-checks.mjs`. The dashboard
 behind the tunnel there is the mock gateway's (`test/support/dashboard-mock.mjs`,
 sign-in links, the link exchange with cookies named after the Host port,
@@ -70,7 +78,8 @@ and the session file owner-only and never logged; credential routes refused
 from inside the tab, a bare `Host` 421 and a foreign `Origin` 403;
 Ctrl+Alt+K; Disconnect (logout at the gateway, origin rotated, old origin
 refused); Connect in the tab; a refused mint (no dashboard URL) followed by a
-pasted link; the Markdown preview from the loopback endpoint; and, after the
+pasted link; the Markdown preview from the loopback endpoint, painted in the
+editor's background and not on a white canvas; and, after the
 launcher restarts with the page open and with a new browser, the tab still
 signed in with no new link.
 

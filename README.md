@@ -37,6 +37,7 @@ After a source change on a local install, use Update on the app in the App Store
 - **Code** in the sidebar opens VS Code in tabs, one VS Code window per tab. New opens another.
 - The **Open in Code** button in a chat's footer opens that chat's project folder in a tab.
 - **Open in VS Code** in a file or folder menu opens that path in VS Code.
+- VS Code loads from a port on the computer you are looking at, so it works in the desktop app, in a browser on the machine that runs Kiro Crew, and through a local port forward. At a tunnel's web address it cannot load, and the page says so and shows the port forward to use. See [Using the app on a Remote Crew](docs/remote-crew.md).
 - In VS Code, the **Kiro Crew** tab in the right pane shows the Kiro Crew dashboard. The first time, it signs in by itself when Kiro Crew has a dashboard URL. If the page says there is none, run the command it shows (`kirocrew config set dashboard.url <origin>`), restart Kiro Crew, and the tab signs in on its own from then on. You can also paste a sign-in link into the tab.
 - In VS Code's Chat, choose the **Kiro Crew** session type to chat with a Kiro Crew session, with tool cards and approvals.
 

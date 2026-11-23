@@ -280,6 +280,19 @@ extension last did, with `userTheme: true` when it left a theme you picked.
 The rules for which theme is whose are in `extension/kiro-crew-bridge/theme.js`,
 which the extension and the launcher share.
 
+Before VS Code's own styles load, the launcher puts one `<style id="vscp-boot">`
+first in the workbench page's head (`bootCss` in `backend/lib/theme.mjs`). It
+paints the root and body in the theme's editor colours and sets the page's
+`color-scheme` to the theme's kind. The pane's frame host sets the same scheme,
+so the frame has no opaque white canvas while it loads. VS Code's own webview
+frames are the exception. Their pages set no colour scheme, and a frame whose
+scheme differs from the one it sits in gets an opaque white canvas. Under the
+workbench's dark scheme the Markdown preview and an extension's page were white,
+with the theme's light text on them (before 0.7.1). The same style puts
+`iframe.webview` back to `color-scheme: normal`, which gives those frames the
+transparent canvas they have in any other browser tab, over the editor's
+background. The smoke test samples the Markdown preview's pixels for this.
+
 ### A theme you pick (0.6.4)
 
 Kiro Crew sets the colour theme when none is set and keeps it in step with the

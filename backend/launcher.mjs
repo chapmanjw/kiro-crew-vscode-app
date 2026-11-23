@@ -848,7 +848,9 @@ function sessionBody(folderParam) {
     tabs: tabsBody(),
     // How a page whose browser is not on this machine reaches the workbench:
     // http://<webOriginHost>:<its own dashboard port><the path of `url`>.
-    webOrigin: { host: `${APP_NAME}.apps.localhost`, probe: PROBE_PATH },
+    // `gatewayPort` is the dashboard's own port here, which the page names in the
+    // port forward it suggests to a viewer that has no route at all.
+    webOrigin: { host: `${APP_NAME}.apps.localhost`, probe: PROBE_PATH, gatewayPort: gatewayUrl ? Number(gatewayUrl.port || 80) : null },
     // 'install-server' while the page should offer to download the server.
     action: state.needsInstall && !state.installing ? 'install-server' : null,
     server: state.build ? { source: state.build.source, commit: state.build.commit, name: state.build.name || null, startedAt: state.startedAt, owned: serverOwned() } : null,

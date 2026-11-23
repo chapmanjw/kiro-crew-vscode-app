@@ -7,10 +7,17 @@
   is submitted (`chatWidget.ts`, `getSelectedModelRequestOptions`) and does
   not wait for one. The model list is kept in memory only, so every new window
   has this short window. Sending again works.
-- Same machine only. The iframe points at `127.0.0.1`, which resolves on the
-  viewing machine, so this works in the desktop app or a browser on the gateway
-  host, not from another computer or through a tunnel. Fixing that needs
-  WebSocket support in the Kiro Crew app proxy.
+- Local ports only. The workbench loads from a port on the viewing machine:
+  the frame port (`127.0.0.1`) in the desktop app or a browser on the machine
+  that runs Kiro Crew, or the app's web origin through a local forward that
+  carries the dashboard (see "Using the app on a Remote Crew"). A dashboard
+  reached at a tunnel's https address, or at any other address that is not a
+  local port, cannot load it. Since 0.7.1 the page says so and names a port
+  forward that works; before that it framed the viewer's own `127.0.0.1` and
+  showed the browser's connection error, or a blank pane. Making the tunnel
+  itself carry VS Code needs the Kiro Crew gateway to relay an app's WebSocket
+  traffic: its app proxy (`/apps/<name>/api/`) relays HTTP only, and its web
+  origin relay serves only requests that arrive straight from the machine.
 - License. The server build is Microsoft's VS Code Server, under the Visual
   Studio Code Server License Terms (https://aka.ms/vscode-server-license);
   the launcher passes `--accept-server-license-terms` on your behalf. It is

@@ -44,6 +44,8 @@ import {
   tabWorkbenchUrl,
   framePlacement,
   probeUrl,
+  chooseReach,
+  unreachableAdvice,
   webOriginAdvice,
   updateButton,
   updateBanner,
@@ -54,7 +56,7 @@ import {
   baseName,
   CARD_MARGIN,
   BAR_HEIGHT,
-} from './vscode-pane-core-0.7.0.mjs';
+} from './vscode-pane-core-0.7.1.mjs';
 
 const { useAppApi, useTheme } = sdk;
 // The dashboard's session titles label the tabs opened from chats, when the
@@ -93,7 +95,7 @@ function errText(e) {
 // dark palette as the fallback for a host that does not define them.
 // ---------------------------------------------------------------------------
 
-const STYLE_ID = 'vscode-pane-style-0-7-0';
+const STYLE_ID = 'vscode-pane-style-0-7-1';
 // Each colour is the dashboard's variable when it is set. When it is not, the
 // fallback follows the dashboard's kind (data-vscp-kind), using VS Code's stock
 // Default Dark / Default Light colours, the same base the backend falls back to
@@ -148,6 +150,9 @@ const CSS = `
 .vscp-badge{position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:4px;background:var(--vscp-accent)}
 .vscp-body{position:relative;flex:1 1 auto;min-height:0;min-width:0;background:var(--vscp-bg)}
 .vscp-overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:13px}
+.vscp-cmd{display:block;margin:10px auto 0;padding:6px 10px;max-width:100%;box-sizing:border-box;overflow-x:auto;text-align:left;white-space:pre;
+  border:1px solid var(--vscp-border);border-radius:var(--radius-sm,6px);background:var(--vscp-bg);color:var(--vscp-text);
+  font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;user-select:all}
 .vscp-frame-host{background:var(--vscp-bg);color-scheme:dark}
 .vscp-frame-host[data-vscp-kind="light"]{color-scheme:light}
 /* The workbench is invisible until its page has loaded: the frame's own canvas is opaque white in a cross-origin
@@ -217,7 +222,7 @@ const holder = {
   session: null, // last session seen, so a remount shows the live frame at once
   owner: null, // the mounted page's token, or null while unmounted
   kind: '', // last resolved dashboard kind, so a remount styles itself at once
-  reach: null, // {instance, mode}: how this browser reaches the workbench, 'frame' (the frame port) or 'origin' (the app web origin)
+  reach: null, // {instance, mode}: how this browser reaches the workbench, 'frame' (the frame port), 'origin' (the app web origin) or 'none' (no route)
   // Tunnel sign-in from this page (the smoke reads these).
   kcAutoEpoch: null, // the tunnel epoch the automatic attempt last ran for (once per page load and epoch)
   kcSeenConnect: null, // last connectRequests reading
@@ -652,16 +657,20 @@ export default function VsCodePane() {
   }, []);
 
   // How this browser reaches the workbench. On the machine that runs the launcher
-  // the frame port answers; for a dashboard reached through a Remote Crew tunnel
-  // it does not (127.0.0.1 is the viewer's own machine), and the workbench is
-  // loaded from the app's web origin on the dashboard's own port instead.
+  // the frame port answers; for a dashboard reached through a Remote Crew's local
+  // forward it does not (127.0.0.1 is the viewer's own machine), and the workbench
+  // is loaded from the app's web origin on the dashboard's own port instead. For a
+  // dashboard at an address that is not a local port at all, such as a tunnel's
+  // https address, neither route exists and the page says so (chooseReach).
   const [reach, setReach] = useState(holder.reach);
+  const [reachTry, setReachTry] = useState(0);
   const reachInstance = session && session.instance;
   const reachReady = !!(session && session.ready && session.url);
   const reachProbe = probeUrl(session);
   useEffect(() => {
     if (!reachReady) return undefined;
-    if (!reachProbe || window.location.protocol !== 'http:') {
+    // A launcher that reports no probe (an older run) is on this machine.
+    if (!reachProbe) {
       holder.reach = { instance: reachInstance, mode: 'frame' };
       setReach(holder.reach);
       return undefined;
@@ -675,19 +684,19 @@ export default function VsCodePane() {
     probe.setAttribute('aria-hidden', 'true');
     probe.tabIndex = -1;
     Object.assign(probe.style, { position: 'absolute', width: '0', height: '0', border: '0', visibility: 'hidden' });
-    const finish = (mode) => {
+    const finish = (answered) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       window.removeEventListener('message', onMessage);
       probe.remove();
-      holder.reach = { instance: reachInstance, mode };
+      holder.reach = { instance: reachInstance, mode: chooseReach(answered, window.location) };
       setReach(holder.reach);
     };
     const onMessage = (e) => {
-      if (e.source === probe.contentWindow && e.data && e.data.vscodePaneProbe === reachInstance) finish('frame');
+      if (e.source === probe.contentWindow && e.data && e.data.vscodePaneProbe === reachInstance) finish(true);
     };
-    const timer = setTimeout(() => finish('origin'), 2500);
+    const timer = setTimeout(() => finish(false), 2500);
     window.addEventListener('message', onMessage);
     probe.src = reachProbe;
     document.body.appendChild(probe);
@@ -697,11 +706,17 @@ export default function VsCodePane() {
       window.removeEventListener('message', onMessage);
       probe.remove();
     };
-  }, [reachReady, reachInstance, reachProbe]);
+  }, [reachReady, reachInstance, reachProbe, reachTry]);
   // On the web origin the gateway must be willing to relay on the port this browser
   // reaches the dashboard on; ask the launcher (it sits beside the gateway) before loading.
   const reachMode = reach && reach.instance === reachInstance ? reach.mode : null;
   const viaOrigin = reachMode === 'origin';
+  const unreachable = reachMode === 'none';
+  const checkReachAgain = () => {
+    holder.reach = null;
+    setReach(null);
+    setReachTry((n) => n + 1);
+  };
   const originPort = window.location.port || '80';
   const [originCheck, setOriginCheck] = useState(null);
   const [originTry, setOriginTry] = useState(0);
@@ -733,7 +748,7 @@ export default function VsCodePane() {
   };
 
   // The front tab's frame: its URL as this browser reaches it, and the identity of its load.
-  const frameReady = reachReady && !!reachMode && !originAdvice && !originPending;
+  const frameReady = reachReady && !!reachMode && !unreachable && !originAdvice && !originPending;
   const activeUrl = activeTab && frameReady ? frameUrlFor(tabWorkbenchUrl(activeTab.url, activeTab.id), session, reachMode, window.location) : null;
   const key = activeUrl
     ? tabFrameKey({ id: activeTab.id, nonce: holder.nonces.get(activeTab.id) || 0, instance: session.instance, generation: session.generation, mode: reachMode })
@@ -1286,7 +1301,21 @@ export default function VsCodePane() {
 
   let overlay = null;
   const failed = status === 'error';
-  if (!showFrame && originAdvice) {
+  if (!showFrame && unreachable) {
+    const adv = unreachableAdvice(window.location, session);
+    overlay = h('div', { className: 'vscp-overlay', 'data-testid': 'vscode-pane-unreachable' },
+      h('div', { style: { maxWidth: 600 } },
+        h('div', { style: { fontSize: 15, marginBottom: 8 } }, adv.title),
+        h('div', { className: 'vscp-muted' }, adv.message),
+        h('div', { className: 'vscp-muted', style: { marginTop: 10 } }, adv.steps),
+        h('code', { className: 'vscp-cmd', 'data-testid': 'vscode-pane-unreachable-command' }, adv.command),
+        h('div', { className: 'vscp-muted', style: { marginTop: 10 } }, adv.after),
+        h('div', { style: { marginTop: 12, display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' } },
+          navigator.clipboard && navigator.clipboard.writeText
+            ? h('button', { type: 'button', className: 'vscp-btn vscp-btn-primary', onClick: () => navigator.clipboard.writeText(adv.command).then(() => say('Command copied'), () => say('Could not copy the command', 'error')) }, 'Copy command')
+            : null,
+          h('button', { type: 'button', className: 'vscp-btn', onClick: checkReachAgain, 'data-testid': 'vscode-pane-unreachable-again' }, 'Check again'))));
+  } else if (!showFrame && originAdvice) {
     const cmd = 'kirocrew restart';
     overlay = h('div', { className: 'vscp-overlay', 'data-testid': 'vscode-pane-origin-advice' },
       h('div', { style: { maxWidth: 600 } },

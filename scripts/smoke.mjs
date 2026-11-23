@@ -27,6 +27,7 @@ import { createDashboardStandin } from './lib/dashboard-standin.mjs';
 import { tabChecks, tunnelPersists } from './lib/tab-checks.mjs';
 import { themePickChecks } from './lib/theme-checks.mjs';
 import { startLoadWatch, loadChecks } from './lib/load-checks.mjs';
+import { reachChecks, REACH_HOST_ARG } from './lib/reach-checks.mjs';
 import { secretChecks, secretReadBack } from './lib/secret-checks.mjs';
 import { createGatewayMock } from '../test/support/gateway-mock.mjs';
 import { toVsCodeTheme } from '../backend/lib/theme.mjs';
@@ -809,7 +810,8 @@ async function main() {
     // A persistent profile, so browser-side VS Code state can be checked across
     // a launcher restart (step 15).
     const profileDir = path.join(runDir, 'browser-profile');
-    browser = await pw.chromium.launchPersistentContext(profileDir, { executablePath: exe, headless: true, viewport: { width: 1400, height: 900 } });
+    // REACH_HOST_ARG resolves one made-up name to 127.0.0.1, for the viewer at an address that is not a local port (14c).
+    browser = await pw.chromium.launchPersistentContext(profileDir, { executablePath: exe, headless: true, viewport: { width: 1400, height: 900 }, args: [REACH_HOST_ARG] });
     const page = browser.pages()[0] || (await browser.newPage());
     {
       // The icon files app.json names, from the copy under test (the staged
@@ -1410,6 +1412,12 @@ async function main() {
       await frame.locator('.monaco-workbench').waitFor({ timeout: 60_000 }).catch(() => {});
       await sleep(3000);
     }
+
+    // 14a-2. a viewer at an address that is not a local port at all (a tunnel's https
+    //      address): the web origin cannot be used either, so with the frame port
+    //      unreachable the page says so and names the port forward, not a blank pane.
+    //      A frame port that does answer is still used at such an address.
+    await reachChecks({ browser, hostPort, framePort, gatewayOrigin, check });
 
     // 14b. restart the backend while the page stays open (an app disable and
     //      enable, an Update, a gateway restart): the page sees the new run id

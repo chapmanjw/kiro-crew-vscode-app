@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootColors, bootCss, resolveTheme, toVsCodeTheme } from '../backend/lib/theme.mjs';
+import { bootColors, bootCss, resolveTheme, toVsCodeTheme, WEBVIEW_FRAME_CSS } from '../backend/lib/theme.mjs';
 import { injectBootStyle, notReadyHtml } from '../backend/lib/frameproxy.mjs';
 import { tunnelCss } from '../backend/lib/chipcss.mjs';
 import { createRequire } from 'node:module';
@@ -34,10 +34,28 @@ test('bootColors: palette tier uses the workbench editor colour, no theme uses t
 test('bootCss: zero-specificity rule, scheme only when asked', () => {
   const t = resolveTheme(DRACULA).theme;
   const withScheme = bootCss(t, toVsCodeTheme(t));
-  assert.match(withScheme, /^:where\(html\)\{background:#[0-9a-f]{6};color:#[0-9a-f]{6};color-scheme:dark\}:where\(body\)\{background:#[0-9a-f]{6}\}$/);
+  assert.match(withScheme, /^:where\(html\)\{background:#[0-9a-f]{6};color:#[0-9a-f]{6};color-scheme:dark\}:where\(body\)\{background:#[0-9a-f]{6}\}:where\(iframe\.webview\)\{color-scheme:normal\}$/);
   const noScheme = bootCss(t, null, { scheme: false });
   assert.doesNotMatch(noScheme, /color-scheme/);
   assert.match(noScheme, /^:where\(html\)\{background:#282a36;color:#f8f8f2\}/);
+});
+
+test('bootCss: the workbench\'s webview frames go back to the normal scheme, and no other page\'s frames are touched', () => {
+  // The workbench is in the theme's scheme, and a webview page sets none. A frame whose scheme differs from the
+  // one it sits in gets an opaque white canvas, which left the theme's light text on white in the Markdown
+  // preview and in an extension's page.
+  assert.equal(WEBVIEW_FRAME_CSS, ':where(iframe.webview){color-scheme:normal}');
+  const dark = bootCss(resolveTheme(DRACULA).theme, null);
+  assert.ok(dark.endsWith(WEBVIEW_FRAME_CSS));
+  assert.match(dark, /color-scheme:dark\}/, 'the page itself stays in the theme\'s scheme');
+  const light = bootCss(resolveTheme({ kind: 'light' }).theme, null);
+  assert.match(light, /color-scheme:light\}.*:where\(iframe\.webview\)\{color-scheme:normal\}$/, 'a light workbench gets the same rule');
+  // The tunnelled dashboard sets its own scheme and gets only the colours; its frames are not webviews.
+  assert.doesNotMatch(bootCss(resolveTheme(DRACULA).theme, null, { scheme: false }), /iframe/);
+  // Zero specificity, no markup: it goes first in the workbench page's head like the rest of the rule.
+  assert.match(WEBVIEW_FRAME_CSS, /^:where\(/);
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>';
+  assert.ok(injectBootStyle(html, dark).includes(WEBVIEW_FRAME_CSS));
 });
 
 test('injectBootStyle puts the rule first in <head>, and refuses markup in the css', () => {
@@ -72,7 +90,7 @@ test('the Kiro Crew tab webview hides its frame until the page has loaded, over 
 });
 
 test('the pane keeps the frame hidden over a themed host until load, and passes the scheme on', () => {
-  const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.7.0.mjs'), 'utf8');
+  const page = fs.readFileSync(path.join(ROOT, 'ui', 'vscode-pane-0.7.1.mjs'), 'utf8');
   assert.match(page, /\.vscp-frame-host\{background:var\(--vscp-bg\);color-scheme:dark\}/);
   assert.match(page, /\.vscp-frame-host\[data-vscp-kind="light"\]\{color-scheme:light\}/);
   assert.match(page, /\.vscp-frame-host iframe\[data-ready="false"\]\{opacity:0\}/);

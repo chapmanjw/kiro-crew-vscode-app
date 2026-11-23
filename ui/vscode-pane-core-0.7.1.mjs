@@ -325,9 +325,14 @@ export function tabFrameKey({ id, nonce = 0, instance = '', generation = 0, mode
   return `${id}#${nonce || 0}#${instance || ''}#${generation || 0}#${mode}`;
 }
 
-/** The URL a tab's frame loads: the tab's own workbench URL, or the same path on the web origin. */
+/**
+ * The URL a tab's frame loads: the tab's own workbench URL, or the same path on
+ * the web origin. null for 'none', the verdict for a browser that has no route
+ * to the workbench (see `chooseReach`): a frame pointed at the frame port would
+ * only show the browser's connection error.
+ */
 export function frameUrlFor(url, session, mode, loc) {
-  if (!url) return null;
+  if (!url || mode === 'none') return null;
   if (mode === 'origin') return webOriginUrl({ ...(session || {}), url }, loc) || null;
   return url;
 }
@@ -438,11 +443,67 @@ export function webOriginUrl(session, loc) {
   }
 }
 
-/** The URL to load for the probe's verdict: 'frame' keeps `session.url`, 'origin' uses the web origin. */
+/** The URL to load for the probe's verdict: 'frame' keeps `session.url`, 'origin' uses the web origin, 'none' loads nothing. */
 export function chooseFrameUrl(session, mode, loc) {
-  if (!session || !session.url) return null;
+  if (!session || !session.url || mode === 'none') return null;
   if (mode === 'origin') return webOriginUrl(session, loc) || null;
   return session.url;
+}
+
+/**
+ * Whether the dashboard page is at an address the web origin can ride on: plain
+ * http on a name the browser resolves to its own loopback (localhost, 127.0.0.1,
+ * [::1] or <name>.localhost). The web origin is `<app>.apps.localhost:<this page's
+ * port>`, a port on the viewer's own machine, and a request there reaches the
+ * gateway only when whatever listens on that port carries the dashboard as well
+ * (a Remote Crew's SSH forward). A page at an https address, such as a tunnel's,
+ * or at any other host name has no such port.
+ */
+export function canUseWebOrigin(loc) {
+  if (!loc || loc.protocol !== 'http:') return false;
+  const host = String(loc.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || /^[a-z0-9-]{1,63}\.localhost$/.test(host);
+}
+
+/**
+ * How this browser reaches the workbench, from the reachability probe: 'frame'
+ * when the frame port answered, else 'origin' when the page's address can carry
+ * the app's web origin, else 'none': no route leads from here to the workbench.
+ */
+export function chooseReach(probeAnswered, loc) {
+  if (probeAnswered) return 'frame';
+  return canUseWebOrigin(loc) ? 'origin' : 'none';
+}
+
+/** The gateway's port as `/api/session` reports it (`webOrigin.gatewayPort`), or null. */
+function reportedGatewayPort(session) {
+  const p = session && session.webOrigin ? session.webOrigin.gatewayPort : null;
+  return Number.isInteger(p) && p > 0 && p < 65536 ? p : null;
+}
+
+/**
+ * What the page says when `chooseReach` found no route to the workbench: why,
+ * and the one way that works, a local port forwarded to the machine that runs
+ * Kiro Crew. `loc` is the dashboard page's location.
+ *
+ * @returns {{title:string, message:string, steps:string, command:string, after:string, port:string}}
+ */
+export function unreachableAdvice(loc, session) {
+  const host = (loc && loc.host) || 'this address';
+  const gateway = reportedGatewayPort(session);
+  const port = gateway ? String(gateway) : '<port>';
+  return {
+    title: 'VS Code cannot load at this address',
+    message:
+      `You are using Kiro Crew at ${host}. VS Code runs on the machine that hosts Kiro Crew, and a browser can reach it only through a local port that leads to that machine. ` +
+      'This address does not give you one.',
+    steps: 'To use VS Code from this computer, forward a local port to that machine:',
+    command: `ssh -L ${port}:127.0.0.1:${port} <user>@<that machine>`,
+    after:
+      `Then open Kiro Crew at http://localhost:${port} in this browser. On that machine, "kirocrew token" prints a link that signs you in. ` +
+      `On the machine that hosts Kiro Crew itself, use http://localhost:${port} directly.`,
+    port,
+  };
 }
 
 /**

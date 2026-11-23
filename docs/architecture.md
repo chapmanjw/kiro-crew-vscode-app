@@ -207,6 +207,13 @@ connectRequests}`, the tunnel's sign-in state. It never carries the tunnel
 origin or a cookie. Nothing here, and nothing the Kiro Crew view asks for,
 creates a Kiro Crew session: see "Tabs" below.
 
+It carries `webOrigin: {host, probe, gatewayPort}` for the page's choice of
+route to the workbench: `probe` is the path the page loads from the frame port
+to find out whether its browser can reach it, `host` names the app's web origin,
+and `gatewayPort` is the dashboard's own port on this machine, which the page
+puts in the port forward it suggests to a viewer that has no route (see "Using
+the app on a Remote Crew").
+
 Every `/api/bridge/*` call names its VS Code window (`X-Kiro-Bridge-Host`, one
 id per extension host), and the native chat routes check the folder against
 that window's own folders, so two VS Code windows keep their own sessions. The
